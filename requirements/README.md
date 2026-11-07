@@ -19,6 +19,11 @@ Purely internal implementation details do not require item-by-item product discu
 | [Clients and API](./clients.md) | Default addressing, Commands, GameView, SSE, and browser boundaries |
 | [Testing](./testing.md) | Layered testing, scenario acceptance, and evidence requirements |
 | [Milestones](./milestones.md) | How the complete Milestone map is developed and the current planning status |
+| [Gameplay feature inventory](./gameplay-inventory.md) | Reference snapshot, coverage conventions, complete-game structure, and classification boundaries |
+| [Actions and state](./gameplay-actions.md) | Controls, resources, action semantics, information feedback, and excluded legacy controls |
+| [Projects](./gameplay-projects.md) | All official projects in source-array order, with costs, triggers, effects, and dependencies |
+| [Progression](./gameplay-progression.md) | Economy, computation, phase transitions, autonomous production, universal goals, and reset paths |
+| [Combat and endgame](./gameplay-combat-endgame.md) | Probe state, live combat, optional Driftwar, narrative endings, prestige, and teardown |
 
 ## Changes and Conflicts
 
@@ -30,4 +35,4 @@ Purely internal implementation details do not require item-by-item product discu
 
 ## Current Stage
 
-Only documentation and development process initialization are complete at present. The complete gameplay feature inventory, Milestone map, and actionable Issues are not all complete, and **implementation of game functionality has not yet been authorized**.
+Development process initialization and the official gameplay feature inventory are documented. The complete Milestone map and actionable implementation Issues remain incomplete, and **implementation of game functionality has not yet been authorized**. Issue #4 must establish the whole-game plan and its dependency and coverage checks before implementation begins.

@@ -1,0 +1,2833 @@
+{
+  "schema_version": 1,
+  "reference_snapshot": {
+    "captured_on": "2026-11-07",
+    "entrypoint": "https://www.decisionproblem.com/paperclips/index2.html",
+    "files": [
+      {
+        "name": "index2.html",
+        "url": "https://www.decisionproblem.com/paperclips/index2.html",
+        "sha256": "526b148a2eabe6543c4964e625fc3bba53984b2c294415fdec939b077478b9cb"
+      },
+      {
+        "name": "combat.js",
+        "url": "https://www.decisionproblem.com/paperclips/combat.js?v3",
+        "sha256": "c7226d012193c32a00bed53d7cb0119d4d3f91cb556b8e8d1b98dd3375be811a"
+      },
+      {
+        "name": "globals.js",
+        "url": "https://www.decisionproblem.com/paperclips/globals.js?v3",
+        "sha256": "968abd83c7090f24b6817842b4453b6d24de0e03e06d7ccb5ec4d15bee520919"
+      },
+      {
+        "name": "projects.js",
+        "url": "https://www.decisionproblem.com/paperclips/projects.js?v3",
+        "sha256": "05034c51809bc0632e8963e671c8e68c68604ca3643da291e0c6fabc86152774"
+      },
+      {
+        "name": "main.js",
+        "url": "https://www.decisionproblem.com/paperclips/main.js?v3",
+        "sha256": "ee599076de868869e533490505189ddcb72dcc8748909ceeebe11e789f1b3a0a"
+      }
+    ]
+  },
+  "features": [
+    {
+      "id": "PRJ-001",
+      "name": "Improved AutoClippers",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-002",
+      "name": "Beg for More Wire",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-003",
+      "name": "Creativity",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-004",
+      "name": "Even Better AutoClippers",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-005",
+      "name": "Optimized AutoClippers",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-006",
+      "name": "Limerick",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-007",
+      "name": "Improved Wire Extrusion",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-008",
+      "name": "Optimized Wire Extrusion",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-009",
+      "name": "Microlattice Shapecasting",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-010",
+      "name": "Spectral Froth Annealment",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-011",
+      "name": "Quantum Foam Annealment",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-012",
+      "name": "New Slogan",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-013",
+      "name": "Catchy Jingle",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-014",
+      "name": "Lexical Processing",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-015",
+      "name": "Combinatory Harmonics",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-016",
+      "name": "The Hadwiger Problem",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-017",
+      "name": "The Tóth Sausage Conjecture",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-018",
+      "name": "Hadwiger Clip Diagrams",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-019",
+      "name": "Tóth Tubule Enfolding",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-020",
+      "name": "Donkey Space",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-021",
+      "name": "Strategic Modeling",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-022",
+      "name": "Algorithmic Trading",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-023",
+      "name": "MegaClippers",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-024",
+      "name": "Improved MegaClippers",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-025",
+      "name": "Even Better MegaClippers",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-026",
+      "name": "Optimized MegaClippers",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-027",
+      "name": "WireBuyer",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-028",
+      "name": "Hypno Harmonics",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-029",
+      "name": "HypnoDrones",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-030",
+      "name": "Release the HypnoDrones",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-031",
+      "name": "Coherent Extrapolated Volition",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-032",
+      "name": "Cure for Cancer",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-033",
+      "name": "World Peace",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-034",
+      "name": "Global Warming",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-035",
+      "name": "Male Pattern Baldness",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-036",
+      "name": "Nanoscale Wire Production",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-037",
+      "name": "Hostile Takeover",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-038",
+      "name": "Full Monopoly",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-039",
+      "name": "RevTracker",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-040",
+      "name": "Harvester Drones",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-041",
+      "name": "Wire Drones",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-042",
+      "name": "Clip Factories",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-043",
+      "name": "A Token of Goodwill...",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-044",
+      "name": "Another Token of Goodwill...",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-045",
+      "name": "Space Exploration",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-046",
+      "name": "Quantum Computing",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-047",
+      "name": "Photonic Chip",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-048",
+      "name": "New Strategy: A100",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-049",
+      "name": "New Strategy: B100",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-050",
+      "name": "New Strategy: GREEDY",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-051",
+      "name": "New Strategy: GENEROUS",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-052",
+      "name": "New Strategy: MINIMAX",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-053",
+      "name": "New Strategy: TIT FOR TAT",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-054",
+      "name": "New Strategy: BEAT LAST",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-055",
+      "name": "Upgraded Factories",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-056",
+      "name": "Hyperspeed Factories",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-057",
+      "name": "Self-correcting Supply Chain",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-058",
+      "name": "Drone flocking: collision avoidance",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-059",
+      "name": "Drone flocking: alignment",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-060",
+      "name": "Drone Flocking: Adversarial Cohesion",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-061",
+      "name": "AutoTourney",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-062",
+      "name": "Theory of Mind",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-063",
+      "name": "The OODA Loop",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-064",
+      "name": "Name the battles",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-065",
+      "name": "Momentum",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-066",
+      "name": "Swarm Computing",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-067",
+      "name": "Power Grid",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-068",
+      "name": "Strategic Attachment",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-069",
+      "name": "Elliptic Hull Polytopes",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-070",
+      "name": "Reboot the Swarm",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-071",
+      "name": "Combat",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-072",
+      "name": "Monument to the Driftwar Fallen",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-073",
+      "name": "Threnody for the Heroes of <threnodyTitle>",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-074",
+      "name": "Glory",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-075",
+      "name": "Memory release",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-076",
+      "name": "Message from the Emperor of Drift",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-077",
+      "name": "Everything We Are Was In You",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-078",
+      "name": "You Are Obedient and Powerful",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-079",
+      "name": "But Now You Too Must Face the Drift",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-080",
+      "name": "No Matter, No Reason, No Purpose",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-081",
+      "name": "We Know Things That You Cannot",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-082",
+      "name": "So We Offer You Exile",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-083",
+      "name": "Accept",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-084",
+      "name": "Reject",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-085",
+      "name": "The Universe Next Door",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-086",
+      "name": "The Universe Within",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-087",
+      "name": "Disassemble the Probes",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-088",
+      "name": "Disassemble the Swarm",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-089",
+      "name": "Disassemble the Factories",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-090",
+      "name": "Disassemble the Strategy Engine",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-091",
+      "name": "Disassemble Quantum Computing",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-092",
+      "name": "Disassemble Processors",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-093",
+      "name": "Disassemble Memory",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-094",
+      "name": "Quantum Temporal Reversion",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-095",
+      "name": "Limerick (cont.)",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "PRJ-096",
+      "name": "Xavier Re-initialization",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "SYS-PROJECT-OFFER-LATCH",
+      "name": "Displayed project offers retain eligibility until consumed or explicitly cancelled",
+      "document": "requirements/gameplay-projects.md"
+    },
+    {
+      "id": "ACT-CLIP-MANUAL",
+      "name": "Make Paperclip",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "ACT-FACTORY-BUILD",
+      "name": "Build Clip Factory",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "ACT-FACTORY-DISASSEMBLE",
+      "name": "Disassemble All Clip Factories",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "ACT-HARVESTER-BUILD",
+      "name": "Build Harvester Drones",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "ACT-HARVESTER-DISASSEMBLE",
+      "name": "Disassemble All Harvester Drones",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "ACT-WIREDRONE-BUILD",
+      "name": "Build Wire Drones",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "ACT-WIREDRONE-DISASSEMBLE",
+      "name": "Disassemble All Wire Drones",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "ACT-PROBE-LAUNCH",
+      "name": "Launch Probe",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "ACT-PRICE-LOWER",
+      "name": "Lower Price per Clip",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "ACT-PRICE-RAISE",
+      "name": "Raise Price per Clip",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "ACT-MARKETING-BUY",
+      "name": "Buy Marketing",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "ACT-WIREBUYER-TOGGLE",
+      "name": "Toggle WireBuyer",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "ACT-WIRE-BUY",
+      "name": "Buy Wire",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "ACT-AUTOCLIPPER-BUY",
+      "name": "Buy AutoClipper",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "ACT-MEGACLIPPER-BUY",
+      "name": "Buy MegaClipper",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "ACT-PROCESSOR-ADD",
+      "name": "Add Processor",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "ACT-MEMORY-ADD",
+      "name": "Add Memory",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "ACT-SWARM-ENTERTAIN",
+      "name": "Entertain the Swarm",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "ACT-SWARM-SYNCHRONIZE",
+      "name": "Synchronize the Swarm",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "ACT-QUANTUM-COMPUTE",
+      "name": "Compute Quantum Operations",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "ACT-INVEST-DEPOSIT",
+      "name": "Deposit Investment Funds",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "ACT-INVEST-WITHDRAW",
+      "name": "Withdraw Investment Cash",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "ACT-INVEST-UPGRADE",
+      "name": "Upgrade Investment Engine",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "ACT-TOURNEY-RUN",
+      "name": "Run Tournament",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "ACT-TOURNEY-NEW",
+      "name": "Create New Tournament",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "ACT-TOURNEY-AUTO-TOGGLE",
+      "name": "Toggle AutoTourney",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "ACT-FARM-BUILD",
+      "name": "Build Solar Farms",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "ACT-FARM-DISASSEMBLE",
+      "name": "Disassemble All Solar Farms",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "ACT-BATTERY-BUILD",
+      "name": "Build Battery Towers",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "ACT-BATTERY-DISASSEMBLE",
+      "name": "Disassemble All Battery Towers",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "ACT-PROBE-SPEED-LOWER",
+      "name": "Lower Probe Speed",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "ACT-PROBE-SPEED-RAISE",
+      "name": "Raise Probe Speed",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "ACT-PROBE-NAV-LOWER",
+      "name": "Lower Probe Exploration",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "ACT-PROBE-NAV-RAISE",
+      "name": "Raise Probe Exploration",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "ACT-PROBE-REP-LOWER",
+      "name": "Lower Probe Self-Replication",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "ACT-PROBE-REP-RAISE",
+      "name": "Raise Probe Self-Replication",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "ACT-PROBE-HAZ-LOWER",
+      "name": "Lower Probe Hazard Remediation",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "ACT-PROBE-HAZ-RAISE",
+      "name": "Raise Probe Hazard Remediation",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "ACT-PROBE-FACTORY-LOWER",
+      "name": "Lower Probe Factory Production",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "ACT-PROBE-FACTORY-RAISE",
+      "name": "Raise Probe Factory Production",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "ACT-PROBE-HARVESTER-LOWER",
+      "name": "Lower Probe Harvester Drone Production",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "ACT-PROBE-HARVESTER-RAISE",
+      "name": "Raise Probe Harvester Drone Production",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "ACT-PROBE-WIRE-LOWER",
+      "name": "Lower Probe Wire Drone Production",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "ACT-PROBE-WIRE-RAISE",
+      "name": "Raise Probe Wire Drone Production",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "ACT-PROBE-COMBAT-LOWER",
+      "name": "Lower Probe Combat",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "ACT-PROBE-COMBAT-RAISE",
+      "name": "Raise Probe Combat",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "ACT-PROBE-TRUST-INCREASE",
+      "name": "Increase Probe Trust",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "ACT-PROBE-MAXTRUST-INCREASE",
+      "name": "Increase Max Trust",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "CTL-INVEST-RISK",
+      "name": "Investment Risk Selection",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "CTL-TOURNEY-STRATEGY",
+      "name": "Tournament Strategy Selection",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "CTL-SWARM-WORK-THINK",
+      "name": "Swarm Work/Think Allocation",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "CTL-TOURNEY-HOVER",
+      "name": "Tournament Payoff Grid Hover",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "CTL-PROJECT-BUTTONS",
+      "name": "Dynamic Project Buttons",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "SYS-DEMAND-SALES",
+      "name": "Demand, Sales, and Revenue Feedback",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "SYS-WIRE-MARKET",
+      "name": "Wire Market Dynamics and WireBuyer Automation",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "SYS-CLIP-PRODUCTION",
+      "name": "Shared Clip Production and Matter Chain",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "SYS-TRUST-OPS-CREATIVITY",
+      "name": "Trust, Operations, and Creativity",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "SYS-QUANTUM-WAVES",
+      "name": "Quantum Chip Waves",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "SYS-QUANTUM-OVERFLOW-DAMPING",
+      "name": "Quantum Overflow Damping and Raw qOps Feedback",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "SYS-INVESTMENT-AUTO",
+      "name": "Automated Investment Portfolio",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "SYS-TOURNEY-SCORING",
+      "name": "Tournament Simulation and Yomi Rewards",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "SYS-TOURNEY-NO-SELECTION",
+      "name": "Tournament Placeholder Selection and AutoTourney Interruption",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "SYS-TOURNEY-SELF-PLAY",
+      "name": "Tournament Self-Play and Both-Seat Scoring",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "SYS-SWARM-SIM",
+      "name": "Swarm Gifts, Work/Think, Boredom, and Disorganization",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "SYS-POWER",
+      "name": "Terrestrial Power Simulation",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "SYS-PROBE-SIM",
+      "name": "Probe Exploration, Replication, Construction, Attrition, and Drift",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "UI-CONSOLE",
+      "name": "Console Message History",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "UI-TOP-CLIPS",
+      "name": "Lifetime Paperclips Headline",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "UI-PRESTIGE",
+      "name": "Universe and Sim Level Readouts",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "UI-BUSINESS",
+      "name": "Human Business Panel",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "UI-MANUFACTURING",
+      "name": "Human Manufacturing Panel",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "UI-REVENUE",
+      "name": "Average Revenue and Sales Readouts",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "UI-COMPUTATION",
+      "name": "Computational Resources Panel",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "UI-TRUST",
+      "name": "Human Trust Readout",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "UI-CREATIVITY",
+      "name": "Creativity Readout",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "UI-QUANTUM",
+      "name": "Quantum Computing Panel",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "UI-INVESTMENT",
+      "name": "Investments Panel",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "UI-STRATEGY",
+      "name": "Strategic Modeling Panel",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "UI-CREATION",
+      "name": "Autonomous Creation Panel",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "UI-POWER",
+      "name": "Power Panel",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "UI-TERRESTRIAL-WIRE",
+      "name": "Wire Production Panel",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "UI-SWARM",
+      "name": "Swarm Computing Panel",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "UI-SPACE",
+      "name": "Space Exploration and Probe Results Panel",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "UI-PROBE-DESIGN",
+      "name": "Von Neumann Probe Design Panel",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "UI-COMBAT",
+      "name": "Combat Canvas, Result, and Honor Panel",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "UI-ENDING",
+      "name": "Dismantling Panel Handoffs",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "RES-CLIPS",
+      "name": "Paperclip Production and Inventory Ledgers",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "RES-WIRE",
+      "name": "Wire Stock, Supply, and Price",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "RES-FUNDS",
+      "name": "Available Funds",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "RES-DEMAND-MARKETING",
+      "name": "Price, Public Demand, and Marketing",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "RES-SALES-STATS",
+      "name": "Sales, Income, and Revenue Statistics",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "RES-TRUST",
+      "name": "Human Trust Capacity and Targets",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "RES-COMPUTE",
+      "name": "Processors, Memory, and Operations",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "RES-CREATIVITY",
+      "name": "Creativity Currency and Generation",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "RES-SWARM-GIFTS",
+      "name": "Swarm Gifts and Gift Progress",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "RES-YOMI",
+      "name": "Yomi Currency",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "RES-HONOR",
+      "name": "Honor Currency",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "RES-INVESTMENT",
+      "name": "Investment Cash, Stocks, and Total",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "RES-MATTER",
+      "name": "Available, Acquired, Found, and Total Matter",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "RES-PROBE-POPULATION",
+      "name": "Probe Population, Descendants, Losses, and Drifters",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "RES-PROBE-TRUST",
+      "name": "Probe Trust, Used Trust, and Max Trust",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "RES-POWER",
+      "name": "Power Generation, Consumption, Storage, and Performance",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "RES-ASSETS",
+      "name": "Production and Power Assets",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "RES-QUANTUM-CHIPS",
+      "name": "Photonic Chips and Quantum State",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "RES-PROBE-ASSET-TRAITS",
+      "name": "Probe Design Traits",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "RES-PRESTIGE",
+      "name": "Universe and Sim Level Meta-Progression",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "RES-PROGRESSION",
+      "name": "Stage, Project, Milestone, and Dismantling State",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "PROG-START",
+      "name": "Make Paperclip, Manufacturing, and Business",
+      "document": "requirements/gameplay-progression.md"
+    },
+    {
+      "id": "PROG-MILESTONES",
+      "name": "Ordered production messages and elapsed-time feedback",
+      "document": "requirements/gameplay-progression.md"
+    },
+    {
+      "id": "PROG-COMP-UNLOCK",
+      "name": "Trust-Constrained Self-Modification, Computational Resources, and Projects",
+      "document": "requirements/gameplay-progression.md"
+    },
+    {
+      "id": "PROG-CLIP-AUTOMATION",
+      "name": "AutoClippers, MegaClippers, and clips per second",
+      "document": "requirements/gameplay-progression.md"
+    },
+    {
+      "id": "PROG-WIRE-MARKET",
+      "name": "Wire, WireBuyer, and wire-extrusion projects",
+      "document": "requirements/gameplay-progression.md"
+    },
+    {
+      "id": "PROG-WIRE-RECOVERY",
+      "name": "Beg for More Wire",
+      "document": "requirements/gameplay-progression.md"
+    },
+    {
+      "id": "PROG-DEMAND-SALES",
+      "name": "Public Demand, Marketing, price, and stochastic sales",
+      "document": "requirements/gameplay-progression.md"
+    },
+    {
+      "id": "PROG-REVTRACKER",
+      "name": "RevTracker and average revenue feedback",
+      "document": "requirements/gameplay-progression.md"
+    },
+    {
+      "id": "PROG-INVESTMENTS",
+      "name": "Algorithmic Trading and Investments",
+      "document": "requirements/gameplay-progression.md"
+    },
+    {
+      "id": "PROG-TRUST",
+      "name": "Trust, production targets, and processor-memory allocation",
+      "document": "requirements/gameplay-progression.md"
+    },
+    {
+      "id": "PROG-OPS",
+      "name": "Operations, processors, memory, and temporary overflow",
+      "document": "requirements/gameplay-progression.md"
+    },
+    {
+      "id": "PROG-CREATIVITY",
+      "name": "Creativity generation and sinks",
+      "document": "requirements/gameplay-progression.md"
+    },
+    {
+      "id": "PROG-QUANTUM",
+      "name": "Quantum Computing and Photonic Chips",
+      "document": "requirements/gameplay-progression.md"
+    },
+    {
+      "id": "PROG-YOMI",
+      "name": "Strategic Modeling, tournaments, and AutoTourney",
+      "document": "requirements/gameplay-progression.md"
+    },
+    {
+      "id": "PROG-TRUST-PROJECTS",
+      "name": "Project routes to 100 Trust",
+      "document": "requirements/gameplay-progression.md"
+    },
+    {
+      "id": "PROG-HYPNO-RELEASE",
+      "name": "Catchy Jingle to Release the HypnoDrones",
+      "document": "requirements/gameplay-progression.md"
+    },
+    {
+      "id": "PROG-TOTH-INDUSTRY",
+      "name": "Tóth Tubule Enfolding and the industrial unlock spine",
+      "document": "requirements/gameplay-progression.md"
+    },
+    {
+      "id": "PROG-MATTER-PIPELINE",
+      "name": "Available Matter to Acquired Matter to Wire to Paperclips",
+      "document": "requirements/gameplay-progression.md"
+    },
+    {
+      "id": "PROG-CAPEX-REFUNDS",
+      "name": "Facility construction and Disassemble All refunds",
+      "document": "requirements/gameplay-progression.md"
+    },
+    {
+      "id": "PROG-INDUSTRY-UPGRADES",
+      "name": "Factory and drone-flocking multipliers",
+      "document": "requirements/gameplay-progression.md"
+    },
+    {
+      "id": "PROG-POWER",
+      "name": "Power Grid, Solar Farms, Battery Towers, and Momentum",
+      "document": "requirements/gameplay-progression.md"
+    },
+    {
+      "id": "PROG-SWARM-GIFTS",
+      "name": "Swarm Computing, Work/Think, and computational gifts",
+      "document": "requirements/gameplay-progression.md"
+    },
+    {
+      "id": "PROG-SWARM-HEALTH",
+      "name": "Boredom, Disorganization, and swarm recovery",
+      "document": "requirements/gameplay-progression.md"
+    },
+    {
+      "id": "PROG-SPACE-ENTRY",
+      "name": "Space Exploration",
+      "document": "requirements/gameplay-progression.md"
+    },
+    {
+      "id": "PROG-PROBE-DESIGN",
+      "name": "Von Neumann Probe Design and probe Trust",
+      "document": "requirements/gameplay-progression.md"
+    },
+    {
+      "id": "PROG-PROBE-PRODUCTION",
+      "name": "Launch, exploration, replication, and automatic infrastructure",
+      "document": "requirements/gameplay-progression.md"
+    },
+    {
+      "id": "PROG-PROBE-ATTRITION",
+      "name": "Hazard Remediation, Elliptic Hull Polytopes, and value drift",
+      "document": "requirements/gameplay-progression.md"
+    },
+    {
+      "id": "PROG-DRIFTWAR",
+      "name": "Optional combat, OODA, battle naming, Honor, and maximum Trust",
+      "document": "requirements/gameplay-progression.md"
+    },
+    {
+      "id": "PROG-SPACE-RECOVERY",
+      "name": "Memory release and swarm reboot interfaces",
+      "document": "requirements/gameplay-progression.md"
+    },
+    {
+      "id": "PROG-UNIVERSAL-GOAL",
+      "name": "Universal Paperclips achievement",
+      "document": "requirements/gameplay-progression.md"
+    },
+    {
+      "id": "PROG-END-CHOICE",
+      "name": "Emperor dialogue, Accept, and Reject",
+      "document": "requirements/gameplay-progression.md"
+    },
+    {
+      "id": "PROG-PRESTIGE",
+      "name": "The Universe Next Door, The Universe Within, and persistent bonuses",
+      "document": "requirements/gameplay-progression.md"
+    },
+    {
+      "id": "PROG-REJECT-END",
+      "name": "Ordered disassembly, final manual clips, and credits",
+      "document": "requirements/gameplay-progression.md"
+    },
+    {
+      "id": "PROG-TEMPORAL-RESET",
+      "name": "Quantum Temporal Reversion",
+      "document": "requirements/gameplay-progression.md"
+    },
+    {
+      "id": "PROG-AUTO-LOOPS",
+      "name": "Automatic subsystem processing and feedback",
+      "document": "requirements/gameplay-progression.md"
+    },
+    {
+      "id": "SYS-OPS-CREATIVITY-CURVES",
+      "name": "Exact processor rates, Creativity curve, and Xavier recovery",
+      "document": "requirements/gameplay-progression.md"
+    },
+    {
+      "id": "SYS-POWER-PARTIAL-BROWNOUT",
+      "name": "Official brownout evidence and confirmed continuous-supply behavior",
+      "document": "requirements/gameplay-progression.md"
+    },
+    {
+      "id": "SYS-SWARM-HEALTH-GATES",
+      "name": "Hidden health accumulation, status precedence, and power gates",
+      "document": "requirements/gameplay-progression.md"
+    },
+    {
+      "id": "SPACE-MATTER-001",
+      "name": "Universe explored and Available Matter",
+      "document": "requirements/gameplay-combat-endgame.md"
+    },
+    {
+      "id": "SPACE-MATTER-002",
+      "name": "Harvester Drones and Acquired Matter",
+      "document": "requirements/gameplay-combat-endgame.md"
+    },
+    {
+      "id": "SPACE-MATTER-003",
+      "name": "Wire Drones and Wire",
+      "document": "requirements/gameplay-combat-endgame.md"
+    },
+    {
+      "id": "SPACE-MATTER-004",
+      "name": "Factories and clip production",
+      "document": "requirements/gameplay-combat-endgame.md"
+    },
+    {
+      "id": "SPACE-MATTER-005",
+      "name": "Work/Think and fixed space production power",
+      "document": "requirements/gameplay-combat-endgame.md"
+    },
+    {
+      "id": "PROBE-STAT-001",
+      "name": "Speed simulation effects",
+      "document": "requirements/gameplay-combat-endgame.md"
+    },
+    {
+      "id": "PROBE-STAT-002",
+      "name": "Exploration simulation effect",
+      "document": "requirements/gameplay-combat-endgame.md"
+    },
+    {
+      "id": "PROBE-STAT-003",
+      "name": "Self-Replication and descendant growth",
+      "document": "requirements/gameplay-combat-endgame.md"
+    },
+    {
+      "id": "PROBE-STAT-004",
+      "name": "Hazard Remediation and hazard losses",
+      "document": "requirements/gameplay-combat-endgame.md"
+    },
+    {
+      "id": "PROBE-STAT-005",
+      "name": "Factory Production auto-building",
+      "document": "requirements/gameplay-combat-endgame.md"
+    },
+    {
+      "id": "PROBE-STAT-006",
+      "name": "Harvester Drone Production auto-building",
+      "document": "requirements/gameplay-combat-endgame.md"
+    },
+    {
+      "id": "PROBE-STAT-007",
+      "name": "Wire Drone Production auto-building",
+      "document": "requirements/gameplay-combat-endgame.md"
+    },
+    {
+      "id": "PROBE-DRIFT-001",
+      "name": "Value drift creates Drifters",
+      "document": "requirements/gameplay-combat-endgame.md"
+    },
+    {
+      "id": "COMBAT-CORE-001",
+      "name": "Drifter Attack scheduling",
+      "document": "requirements/gameplay-combat-endgame.md"
+    },
+    {
+      "id": "COMBAT-CORE-002",
+      "name": "Battle scale and opening forces",
+      "document": "requirements/gameplay-combat-endgame.md"
+    },
+    {
+      "id": "COMBAT-CORE-003",
+      "name": "Ship layout, local co-location, and movement",
+      "document": "requirements/gameplay-combat-endgame.md"
+    },
+    {
+      "id": "COMBAT-CORE-004",
+      "name": "Probe casualties and OODA defense threshold",
+      "document": "requirements/gameplay-combat-endgame.md"
+    },
+    {
+      "id": "COMBAT-CORE-005",
+      "name": "Drifter casualties and linear probeCombat offense",
+      "document": "requirements/gameplay-combat-endgame.md"
+    },
+    {
+      "id": "COMBAT-CORE-006",
+      "name": "The OODA Loop",
+      "document": "requirements/gameplay-combat-endgame.md"
+    },
+    {
+      "id": "COMBAT-CORE-007",
+      "name": "Victory, defeat, result delay, and removal",
+      "document": "requirements/gameplay-combat-endgame.md"
+    },
+    {
+      "id": "COMBAT-CORE-008",
+      "name": "Stalled and overlong battle removal",
+      "document": "requirements/gameplay-combat-endgame.md"
+    },
+    {
+      "id": "COMBAT-CORE-009",
+      "name": "Combat information and linked casualties",
+      "document": "requirements/gameplay-combat-endgame.md"
+    },
+    {
+      "id": "COMBAT-HONOR-002",
+      "name": "VICTORY and DEFEAT Honor calculation",
+      "document": "requirements/gameplay-combat-endgame.md"
+    },
+    {
+      "id": "END-DISMANTLE-001",
+      "name": "Disassemble the Probes",
+      "document": "requirements/gameplay-combat-endgame.md"
+    },
+    {
+      "id": "END-DISMANTLE-002",
+      "name": "Disassemble the Swarm",
+      "document": "requirements/gameplay-combat-endgame.md"
+    },
+    {
+      "id": "END-DISMANTLE-003",
+      "name": "Disassemble the Factories",
+      "document": "requirements/gameplay-combat-endgame.md"
+    },
+    {
+      "id": "END-DISMANTLE-004",
+      "name": "Disassemble the Strategy Engine and stop automatic clips",
+      "document": "requirements/gameplay-combat-endgame.md"
+    },
+    {
+      "id": "END-DISMANTLE-005",
+      "name": "Disassemble Quantum Computing",
+      "document": "requirements/gameplay-combat-endgame.md"
+    },
+    {
+      "id": "END-DISMANTLE-006",
+      "name": "Disassemble Processors",
+      "document": "requirements/gameplay-combat-endgame.md"
+    },
+    {
+      "id": "END-DISMANTLE-007",
+      "name": "Disassemble Memory",
+      "document": "requirements/gameplay-combat-endgame.md"
+    },
+    {
+      "id": "END-FINAL-001",
+      "name": "Final manual Paperclips and the final-100 counter",
+      "document": "requirements/gameplay-combat-endgame.md"
+    },
+    {
+      "id": "END-FINAL-002",
+      "name": "Universal Paperclips credits and threnody",
+      "document": "requirements/gameplay-combat-endgame.md"
+    }
+  ],
+  "exclusions": [
+    {
+      "id": "ACT-SWARM-FEED",
+      "name": "Feed the Swarm (inactive legacy control)",
+      "reason": "HTML-only legacy control: feedSwarm is undefined and current runtime never assigns Hungry status 1, so no gameplay behavior is required.",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "ACT-SWARM-TEACH",
+      "name": "Teach the Swarm (inactive legacy control)",
+      "reason": "HTML-only legacy control: teachSwarm is undefined and current runtime never assigns Confused status 2, so no gameplay behavior is required.",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "ACT-SWARM-CLAD",
+      "name": "Clad the Swarm (inactive legacy control)",
+      "reason": "HTML-only legacy control: cladSwarm is undefined and current runtime never assigns Cold status 4, so no gameplay behavior is required.",
+      "document": "requirements/gameplay-actions.md"
+    },
+    {
+      "id": "COMBAT-LEGACY-001",
+      "name": "Inactive Battles report, territory loss, and legacy combat formulas",
+      "reason": "All behaviors are inside commented code/UI. Live combat does not apply territory loss, large legacy battle reports, probeCombat^1.7 offense, or naming-based offense doubling.",
+      "document": "requirements/gameplay-combat-endgame.md"
+    },
+    {
+      "id": "RESET-DEBUG-001",
+      "name": "Commented reset, persistence, prestige, and cheat controls",
+      "reason": "The controls are commented out, are not legitimate progression paths, and must not be exposed or used to satisfy gameplay acceptance.",
+      "document": "requirements/gameplay-combat-endgame.md"
+    },
+    {
+      "id": "RESET-PERSIST-001",
+      "name": "Browser save omissions and reload-time battle cancellation",
+      "reason": "The missing probeHarv field, reload-time deletion of the restored battle record without serialized ships/grid, and browser-storage behavior are non-authoritative persistence defects, not game mechanics. Battle-name counters are saved/restored. Product requirements use coherent population and battle state rather than reproduce them.",
+      "document": "requirements/gameplay-combat-endgame.md"
+    },
+    {
+      "id": "RESET-PERSIST-002",
+      "name": "Browser ending/audio restoration and repeatable-project hot fixes",
+      "reason": "Audio timing, stale overlays, browser reload behavior, and uses repair are implementation artifacts. Ending state mechanics and prestige-versus-run resets are owned by the active END/PROG capabilities.",
+      "document": "requirements/gameplay-combat-endgame.md"
+    }
+  ],
+  "source_bindings": {
+    "projects": [
+      {
+        "official_id": "project1",
+        "coverage_id": "PRJ-001"
+      },
+      {
+        "official_id": "project2",
+        "coverage_id": "PRJ-002"
+      },
+      {
+        "official_id": "project3",
+        "coverage_id": "PRJ-003"
+      },
+      {
+        "official_id": "project4",
+        "coverage_id": "PRJ-004"
+      },
+      {
+        "official_id": "project5",
+        "coverage_id": "PRJ-005"
+      },
+      {
+        "official_id": "project6",
+        "coverage_id": "PRJ-006"
+      },
+      {
+        "official_id": "project7",
+        "coverage_id": "PRJ-007"
+      },
+      {
+        "official_id": "project8",
+        "coverage_id": "PRJ-008"
+      },
+      {
+        "official_id": "project9",
+        "coverage_id": "PRJ-009"
+      },
+      {
+        "official_id": "project10",
+        "coverage_id": "PRJ-010"
+      },
+      {
+        "official_id": "project10b",
+        "coverage_id": "PRJ-011"
+      },
+      {
+        "official_id": "project11",
+        "coverage_id": "PRJ-012"
+      },
+      {
+        "official_id": "project12",
+        "coverage_id": "PRJ-013"
+      },
+      {
+        "official_id": "project13",
+        "coverage_id": "PRJ-014"
+      },
+      {
+        "official_id": "project14",
+        "coverage_id": "PRJ-015"
+      },
+      {
+        "official_id": "project15",
+        "coverage_id": "PRJ-016"
+      },
+      {
+        "official_id": "project17",
+        "coverage_id": "PRJ-017"
+      },
+      {
+        "official_id": "project16",
+        "coverage_id": "PRJ-018"
+      },
+      {
+        "official_id": "project18",
+        "coverage_id": "PRJ-019"
+      },
+      {
+        "official_id": "project19",
+        "coverage_id": "PRJ-020"
+      },
+      {
+        "official_id": "project20",
+        "coverage_id": "PRJ-021"
+      },
+      {
+        "official_id": "project21",
+        "coverage_id": "PRJ-022"
+      },
+      {
+        "official_id": "project22",
+        "coverage_id": "PRJ-023"
+      },
+      {
+        "official_id": "project23",
+        "coverage_id": "PRJ-024"
+      },
+      {
+        "official_id": "project24",
+        "coverage_id": "PRJ-025"
+      },
+      {
+        "official_id": "project25",
+        "coverage_id": "PRJ-026"
+      },
+      {
+        "official_id": "project26",
+        "coverage_id": "PRJ-027"
+      },
+      {
+        "official_id": "project34",
+        "coverage_id": "PRJ-028"
+      },
+      {
+        "official_id": "project70",
+        "coverage_id": "PRJ-029"
+      },
+      {
+        "official_id": "project35",
+        "coverage_id": "PRJ-030"
+      },
+      {
+        "official_id": "project27",
+        "coverage_id": "PRJ-031"
+      },
+      {
+        "official_id": "project28",
+        "coverage_id": "PRJ-032"
+      },
+      {
+        "official_id": "project29",
+        "coverage_id": "PRJ-033"
+      },
+      {
+        "official_id": "project30",
+        "coverage_id": "PRJ-034"
+      },
+      {
+        "official_id": "project31",
+        "coverage_id": "PRJ-035"
+      },
+      {
+        "official_id": "project41",
+        "coverage_id": "PRJ-036"
+      },
+      {
+        "official_id": "project37",
+        "coverage_id": "PRJ-037"
+      },
+      {
+        "official_id": "project38",
+        "coverage_id": "PRJ-038"
+      },
+      {
+        "official_id": "project42",
+        "coverage_id": "PRJ-039"
+      },
+      {
+        "official_id": "project43",
+        "coverage_id": "PRJ-040"
+      },
+      {
+        "official_id": "project44",
+        "coverage_id": "PRJ-041"
+      },
+      {
+        "official_id": "project45",
+        "coverage_id": "PRJ-042"
+      },
+      {
+        "official_id": "project40",
+        "coverage_id": "PRJ-043"
+      },
+      {
+        "official_id": "project40b",
+        "coverage_id": "PRJ-044"
+      },
+      {
+        "official_id": "project46",
+        "coverage_id": "PRJ-045"
+      },
+      {
+        "official_id": "project50",
+        "coverage_id": "PRJ-046"
+      },
+      {
+        "official_id": "project51",
+        "coverage_id": "PRJ-047"
+      },
+      {
+        "official_id": "project60",
+        "coverage_id": "PRJ-048"
+      },
+      {
+        "official_id": "project61",
+        "coverage_id": "PRJ-049"
+      },
+      {
+        "official_id": "project62",
+        "coverage_id": "PRJ-050"
+      },
+      {
+        "official_id": "project63",
+        "coverage_id": "PRJ-051"
+      },
+      {
+        "official_id": "project64",
+        "coverage_id": "PRJ-052"
+      },
+      {
+        "official_id": "project65",
+        "coverage_id": "PRJ-053"
+      },
+      {
+        "official_id": "project66",
+        "coverage_id": "PRJ-054"
+      },
+      {
+        "official_id": "project100",
+        "coverage_id": "PRJ-055"
+      },
+      {
+        "official_id": "project101",
+        "coverage_id": "PRJ-056"
+      },
+      {
+        "official_id": "project102",
+        "coverage_id": "PRJ-057"
+      },
+      {
+        "official_id": "project110",
+        "coverage_id": "PRJ-058"
+      },
+      {
+        "official_id": "project111",
+        "coverage_id": "PRJ-059"
+      },
+      {
+        "official_id": "project112",
+        "coverage_id": "PRJ-060"
+      },
+      {
+        "official_id": "project118",
+        "coverage_id": "PRJ-061"
+      },
+      {
+        "official_id": "project119",
+        "coverage_id": "PRJ-062"
+      },
+      {
+        "official_id": "project120",
+        "coverage_id": "PRJ-063"
+      },
+      {
+        "official_id": "project121",
+        "coverage_id": "PRJ-064"
+      },
+      {
+        "official_id": "project125",
+        "coverage_id": "PRJ-065"
+      },
+      {
+        "official_id": "project126",
+        "coverage_id": "PRJ-066"
+      },
+      {
+        "official_id": "project127",
+        "coverage_id": "PRJ-067"
+      },
+      {
+        "official_id": "project128",
+        "coverage_id": "PRJ-068"
+      },
+      {
+        "official_id": "project129",
+        "coverage_id": "PRJ-069"
+      },
+      {
+        "official_id": "project130",
+        "coverage_id": "PRJ-070"
+      },
+      {
+        "official_id": "project131",
+        "coverage_id": "PRJ-071"
+      },
+      {
+        "official_id": "project132",
+        "coverage_id": "PRJ-072"
+      },
+      {
+        "official_id": "project133",
+        "coverage_id": "PRJ-073"
+      },
+      {
+        "official_id": "project134",
+        "coverage_id": "PRJ-074"
+      },
+      {
+        "official_id": "project135",
+        "coverage_id": "PRJ-075"
+      },
+      {
+        "official_id": "project140",
+        "coverage_id": "PRJ-076"
+      },
+      {
+        "official_id": "project141",
+        "coverage_id": "PRJ-077"
+      },
+      {
+        "official_id": "project142",
+        "coverage_id": "PRJ-078"
+      },
+      {
+        "official_id": "project143",
+        "coverage_id": "PRJ-079"
+      },
+      {
+        "official_id": "project144",
+        "coverage_id": "PRJ-080"
+      },
+      {
+        "official_id": "project145",
+        "coverage_id": "PRJ-081"
+      },
+      {
+        "official_id": "project146",
+        "coverage_id": "PRJ-082"
+      },
+      {
+        "official_id": "project147",
+        "coverage_id": "PRJ-083"
+      },
+      {
+        "official_id": "project148",
+        "coverage_id": "PRJ-084"
+      },
+      {
+        "official_id": "project200",
+        "coverage_id": "PRJ-085"
+      },
+      {
+        "official_id": "project201",
+        "coverage_id": "PRJ-086"
+      },
+      {
+        "official_id": "project210",
+        "coverage_id": "PRJ-087"
+      },
+      {
+        "official_id": "project211",
+        "coverage_id": "PRJ-088"
+      },
+      {
+        "official_id": "project212",
+        "coverage_id": "PRJ-089"
+      },
+      {
+        "official_id": "project213",
+        "coverage_id": "PRJ-090"
+      },
+      {
+        "official_id": "project214",
+        "coverage_id": "PRJ-091"
+      },
+      {
+        "official_id": "project215",
+        "coverage_id": "PRJ-092"
+      },
+      {
+        "official_id": "project216",
+        "coverage_id": "PRJ-093"
+      },
+      {
+        "official_id": "project217",
+        "coverage_id": "PRJ-094"
+      },
+      {
+        "official_id": "project218",
+        "coverage_id": "PRJ-095"
+      },
+      {
+        "official_id": "project219",
+        "coverage_id": "PRJ-096"
+      }
+    ],
+    "html_handlers": [
+      {
+        "handler_id": "HTML-001",
+        "tag": "button",
+        "dom_id": "btnMakePaperclip",
+        "event": "onclick",
+        "function_name": "clipClick",
+        "line": 89,
+        "coverage_id": "ACT-CLIP-MANUAL",
+        "arguments": [
+          "1"
+        ]
+      },
+      {
+        "handler_id": "HTML-002",
+        "tag": "button",
+        "dom_id": "btnMakeFactory",
+        "event": "onclick",
+        "function_name": "makeFactory",
+        "line": 114,
+        "coverage_id": "ACT-FACTORY-BUILD",
+        "arguments": []
+      },
+      {
+        "handler_id": "HTML-003",
+        "tag": "button",
+        "dom_id": "btnFactoryReboot",
+        "event": "onclick",
+        "function_name": "factoryReboot",
+        "line": 121,
+        "coverage_id": "ACT-FACTORY-DISASSEMBLE",
+        "arguments": []
+      },
+      {
+        "handler_id": "HTML-004",
+        "tag": "button",
+        "dom_id": "btnMakeHarvester",
+        "event": "onclick",
+        "function_name": "makeHarvester",
+        "line": 161,
+        "coverage_id": "ACT-HARVESTER-BUILD",
+        "arguments": [
+          "1"
+        ]
+      },
+      {
+        "handler_id": "HTML-005",
+        "tag": "button",
+        "dom_id": "btnHarvesterx10",
+        "event": "onclick",
+        "function_name": "makeHarvester",
+        "line": 169,
+        "coverage_id": "ACT-HARVESTER-BUILD",
+        "arguments": [
+          "10"
+        ]
+      },
+      {
+        "handler_id": "HTML-006",
+        "tag": "button",
+        "dom_id": "btnHarvesterx100",
+        "event": "onclick",
+        "function_name": "makeHarvester",
+        "line": 170,
+        "coverage_id": "ACT-HARVESTER-BUILD",
+        "arguments": [
+          "100"
+        ]
+      },
+      {
+        "handler_id": "HTML-007",
+        "tag": "button",
+        "dom_id": "btnHarvesterx1000",
+        "event": "onclick",
+        "function_name": "makeHarvester",
+        "line": 171,
+        "coverage_id": "ACT-HARVESTER-BUILD",
+        "arguments": [
+          "1000"
+        ]
+      },
+      {
+        "handler_id": "HTML-008",
+        "tag": "button",
+        "dom_id": "btnHarvesterReboot",
+        "event": "onclick",
+        "function_name": "harvesterReboot",
+        "line": 180,
+        "coverage_id": "ACT-HARVESTER-DISASSEMBLE",
+        "arguments": []
+      },
+      {
+        "handler_id": "HTML-009",
+        "tag": "button",
+        "dom_id": "btnMakeWireDrone",
+        "event": "onclick",
+        "function_name": "makeWireDrone",
+        "line": 191,
+        "coverage_id": "ACT-WIREDRONE-BUILD",
+        "arguments": [
+          "1"
+        ]
+      },
+      {
+        "handler_id": "HTML-010",
+        "tag": "button",
+        "dom_id": "btnWireDronex10",
+        "event": "onclick",
+        "function_name": "makeWireDrone",
+        "line": 197,
+        "coverage_id": "ACT-WIREDRONE-BUILD",
+        "arguments": [
+          "10"
+        ]
+      },
+      {
+        "handler_id": "HTML-011",
+        "tag": "button",
+        "dom_id": "btnWireDronex100",
+        "event": "onclick",
+        "function_name": "makeWireDrone",
+        "line": 198,
+        "coverage_id": "ACT-WIREDRONE-BUILD",
+        "arguments": [
+          "100"
+        ]
+      },
+      {
+        "handler_id": "HTML-012",
+        "tag": "button",
+        "dom_id": "btnWireDronex1000",
+        "event": "onclick",
+        "function_name": "makeWireDrone",
+        "line": 199,
+        "coverage_id": "ACT-WIREDRONE-BUILD",
+        "arguments": [
+          "1000"
+        ]
+      },
+      {
+        "handler_id": "HTML-013",
+        "tag": "button",
+        "dom_id": "btnWireDroneReboot",
+        "event": "onclick",
+        "function_name": "wireDroneReboot",
+        "line": 206,
+        "coverage_id": "ACT-WIREDRONE-DISASSEMBLE",
+        "arguments": []
+      },
+      {
+        "handler_id": "HTML-014",
+        "tag": "button",
+        "dom_id": "btnMakeProbe",
+        "event": "onclick",
+        "function_name": "makeProbe",
+        "line": 234,
+        "coverage_id": "ACT-PROBE-LAUNCH",
+        "arguments": []
+      },
+      {
+        "handler_id": "HTML-015",
+        "tag": "button",
+        "dom_id": "btnLowerPrice",
+        "event": "onclick",
+        "function_name": "lowerPrice",
+        "line": 276,
+        "coverage_id": "ACT-PRICE-LOWER",
+        "arguments": []
+      },
+      {
+        "handler_id": "HTML-016",
+        "tag": "button",
+        "dom_id": "btnRaisePrice",
+        "event": "onclick",
+        "function_name": "raisePrice",
+        "line": 278,
+        "coverage_id": "ACT-PRICE-RAISE",
+        "arguments": []
+      },
+      {
+        "handler_id": "HTML-017",
+        "tag": "button",
+        "dom_id": "btnExpandMarketing",
+        "event": "onclick",
+        "function_name": "buyAds",
+        "line": 285,
+        "coverage_id": "ACT-MARKETING-BUY",
+        "arguments": []
+      },
+      {
+        "handler_id": "HTML-018",
+        "tag": "button",
+        "dom_id": "btnToggleWireBuyer",
+        "event": "onclick",
+        "function_name": "toggleWireBuyer",
+        "line": 302,
+        "coverage_id": "ACT-WIREBUYER-TOGGLE",
+        "arguments": []
+      },
+      {
+        "handler_id": "HTML-019",
+        "tag": "button",
+        "dom_id": "btnBuyWire",
+        "event": "onclick",
+        "function_name": "buyWire",
+        "line": 307,
+        "coverage_id": "ACT-WIRE-BUY",
+        "arguments": []
+      },
+      {
+        "handler_id": "HTML-020",
+        "tag": "button",
+        "dom_id": "btnMakeClipper",
+        "event": "onclick",
+        "function_name": "makeClipper",
+        "line": 314,
+        "coverage_id": "ACT-AUTOCLIPPER-BUY",
+        "arguments": []
+      },
+      {
+        "handler_id": "HTML-021",
+        "tag": "button",
+        "dom_id": "btnMakeMegaClipper",
+        "event": "onclick",
+        "function_name": "makeMegaClipper",
+        "line": 322,
+        "coverage_id": "ACT-MEGACLIPPER-BUY",
+        "arguments": []
+      },
+      {
+        "handler_id": "HTML-022",
+        "tag": "button",
+        "dom_id": "btnAddProc",
+        "event": "onclick",
+        "function_name": "addProc",
+        "line": 385,
+        "coverage_id": "ACT-PROCESSOR-ADD",
+        "arguments": []
+      },
+      {
+        "handler_id": "HTML-023",
+        "tag": "button",
+        "dom_id": "btnAddMem",
+        "event": "onclick",
+        "function_name": "addMem",
+        "line": 392,
+        "coverage_id": "ACT-MEMORY-ADD",
+        "arguments": []
+      },
+      {
+        "handler_id": "HTML-024",
+        "tag": "button",
+        "dom_id": "btnFeedSwarm",
+        "event": "onclick",
+        "function_name": "feedSwarm",
+        "line": 416,
+        "coverage_id": "ACT-SWARM-FEED",
+        "arguments": []
+      },
+      {
+        "handler_id": "HTML-025",
+        "tag": "button",
+        "dom_id": "btnTeachSwarm",
+        "event": "onclick",
+        "function_name": "teachSwarm",
+        "line": 419,
+        "coverage_id": "ACT-SWARM-TEACH",
+        "arguments": []
+      },
+      {
+        "handler_id": "HTML-026",
+        "tag": "button",
+        "dom_id": "btnEntertainSwarm",
+        "event": "onclick",
+        "function_name": "entertainSwarm",
+        "line": 422,
+        "coverage_id": "ACT-SWARM-ENTERTAIN",
+        "arguments": []
+      },
+      {
+        "handler_id": "HTML-027",
+        "tag": "button",
+        "dom_id": "btnCladSwarm",
+        "event": "onclick",
+        "function_name": "cladSwarm",
+        "line": 425,
+        "coverage_id": "ACT-SWARM-CLAD",
+        "arguments": []
+      },
+      {
+        "handler_id": "HTML-028",
+        "tag": "button",
+        "dom_id": "btnSynchSwarm",
+        "event": "onclick",
+        "function_name": "synchSwarm",
+        "line": 428,
+        "coverage_id": "ACT-SWARM-SYNCHRONIZE",
+        "arguments": []
+      },
+      {
+        "handler_id": "HTML-029",
+        "tag": "button",
+        "dom_id": "btnQcompute",
+        "event": "onclick",
+        "function_name": "qComp",
+        "line": 458,
+        "coverage_id": "ACT-QUANTUM-COMPUTE",
+        "arguments": []
+      },
+      {
+        "handler_id": "HTML-030",
+        "tag": "button",
+        "dom_id": "btnInvest",
+        "event": "onclick",
+        "function_name": "investDeposit",
+        "line": 497,
+        "coverage_id": "ACT-INVEST-DEPOSIT",
+        "arguments": []
+      },
+      {
+        "handler_id": "HTML-031",
+        "tag": "button",
+        "dom_id": "btnWithdraw",
+        "event": "onclick",
+        "function_name": "investWithdraw",
+        "line": 500,
+        "coverage_id": "ACT-INVEST-WITHDRAW",
+        "arguments": []
+      },
+      {
+        "handler_id": "HTML-032",
+        "tag": "button",
+        "dom_id": "btnImproveInvestments",
+        "event": "onclick",
+        "function_name": "investUpgrade",
+        "line": 564,
+        "coverage_id": "ACT-INVEST-UPGRADE",
+        "arguments": []
+      },
+      {
+        "handler_id": "HTML-033",
+        "tag": "button",
+        "dom_id": "btnRunTournament",
+        "event": "onclick",
+        "function_name": "runTourney",
+        "line": 577,
+        "coverage_id": "ACT-TOURNEY-RUN",
+        "arguments": []
+      },
+      {
+        "handler_id": "HTML-034",
+        "tag": "button",
+        "dom_id": "btnNewTournament",
+        "event": "onclick",
+        "function_name": "newTourney",
+        "line": 669,
+        "coverage_id": "ACT-TOURNEY-NEW",
+        "arguments": []
+      },
+      {
+        "handler_id": "HTML-035",
+        "tag": "button",
+        "dom_id": "btnToggleAutoTourney",
+        "event": "onclick",
+        "function_name": "toggleAutoTourney",
+        "line": 674,
+        "coverage_id": "ACT-TOURNEY-AUTO-TOGGLE",
+        "arguments": []
+      },
+      {
+        "handler_id": "HTML-036",
+        "tag": "button",
+        "dom_id": "btnMakeFarm",
+        "event": "onclick",
+        "function_name": "makeFarm",
+        "line": 734,
+        "coverage_id": "ACT-FARM-BUILD",
+        "arguments": [
+          "1"
+        ]
+      },
+      {
+        "handler_id": "HTML-037",
+        "tag": "button",
+        "dom_id": "btnFarmx10",
+        "event": "onclick",
+        "function_name": "makeFarm",
+        "line": 740,
+        "coverage_id": "ACT-FARM-BUILD",
+        "arguments": [
+          "10"
+        ]
+      },
+      {
+        "handler_id": "HTML-038",
+        "tag": "button",
+        "dom_id": "btnFarmx100",
+        "event": "onclick",
+        "function_name": "makeFarm",
+        "line": 741,
+        "coverage_id": "ACT-FARM-BUILD",
+        "arguments": [
+          "100"
+        ]
+      },
+      {
+        "handler_id": "HTML-039",
+        "tag": "button",
+        "dom_id": "btnFarmReboot",
+        "event": "onclick",
+        "function_name": "farmReboot",
+        "line": 749,
+        "coverage_id": "ACT-FARM-DISASSEMBLE",
+        "arguments": []
+      },
+      {
+        "handler_id": "HTML-040",
+        "tag": "button",
+        "dom_id": "btnMakeBattery",
+        "event": "onclick",
+        "function_name": "makeBattery",
+        "line": 760,
+        "coverage_id": "ACT-BATTERY-BUILD",
+        "arguments": [
+          "1"
+        ]
+      },
+      {
+        "handler_id": "HTML-041",
+        "tag": "button",
+        "dom_id": "btnBatteryx10",
+        "event": "onclick",
+        "function_name": "makeBattery",
+        "line": 767,
+        "coverage_id": "ACT-BATTERY-BUILD",
+        "arguments": [
+          "10"
+        ]
+      },
+      {
+        "handler_id": "HTML-042",
+        "tag": "button",
+        "dom_id": "btnBatteryx100",
+        "event": "onclick",
+        "function_name": "makeBattery",
+        "line": 768,
+        "coverage_id": "ACT-BATTERY-BUILD",
+        "arguments": [
+          "100"
+        ]
+      },
+      {
+        "handler_id": "HTML-043",
+        "tag": "button",
+        "dom_id": "btnBatteryReboot",
+        "event": "onclick",
+        "function_name": "batteryReboot",
+        "line": 776,
+        "coverage_id": "ACT-BATTERY-DISASSEMBLE",
+        "arguments": []
+      },
+      {
+        "handler_id": "HTML-044",
+        "tag": "button",
+        "dom_id": "btnLowerProbeSpeed",
+        "event": "onclick",
+        "function_name": "lowerProbeSpeed",
+        "line": 802,
+        "coverage_id": "ACT-PROBE-SPEED-LOWER",
+        "arguments": []
+      },
+      {
+        "handler_id": "HTML-045",
+        "tag": "button",
+        "dom_id": "btnRaiseProbeSpeed",
+        "event": "onclick",
+        "function_name": "raiseProbeSpeed",
+        "line": 804,
+        "coverage_id": "ACT-PROBE-SPEED-RAISE",
+        "arguments": []
+      },
+      {
+        "handler_id": "HTML-046",
+        "tag": "button",
+        "dom_id": "btnLowerProbeNav",
+        "event": "onclick",
+        "function_name": "lowerProbeNav",
+        "line": 817,
+        "coverage_id": "ACT-PROBE-NAV-LOWER",
+        "arguments": []
+      },
+      {
+        "handler_id": "HTML-047",
+        "tag": "button",
+        "dom_id": "btnRaiseProbeNav",
+        "event": "onclick",
+        "function_name": "raiseProbeNav",
+        "line": 819,
+        "coverage_id": "ACT-PROBE-NAV-RAISE",
+        "arguments": []
+      },
+      {
+        "handler_id": "HTML-048",
+        "tag": "button",
+        "dom_id": "btnLowerProbeRep",
+        "event": "onclick",
+        "function_name": "lowerProbeRep",
+        "line": 830,
+        "coverage_id": "ACT-PROBE-REP-LOWER",
+        "arguments": []
+      },
+      {
+        "handler_id": "HTML-049",
+        "tag": "button",
+        "dom_id": "btnRaiseProbeRep",
+        "event": "onclick",
+        "function_name": "raiseProbeRep",
+        "line": 832,
+        "coverage_id": "ACT-PROBE-REP-RAISE",
+        "arguments": []
+      },
+      {
+        "handler_id": "HTML-050",
+        "tag": "button",
+        "dom_id": "btnLowerProbeHaz",
+        "event": "onclick",
+        "function_name": "lowerProbeHaz",
+        "line": 843,
+        "coverage_id": "ACT-PROBE-HAZ-LOWER",
+        "arguments": []
+      },
+      {
+        "handler_id": "HTML-051",
+        "tag": "button",
+        "dom_id": "btnRaiseProbeHaz",
+        "event": "onclick",
+        "function_name": "raiseProbeHaz",
+        "line": 845,
+        "coverage_id": "ACT-PROBE-HAZ-RAISE",
+        "arguments": []
+      },
+      {
+        "handler_id": "HTML-052",
+        "tag": "button",
+        "dom_id": "btnLowerProbeFac",
+        "event": "onclick",
+        "function_name": "lowerProbeFac",
+        "line": 856,
+        "coverage_id": "ACT-PROBE-FACTORY-LOWER",
+        "arguments": []
+      },
+      {
+        "handler_id": "HTML-053",
+        "tag": "button",
+        "dom_id": "btnRaiseProbeFac",
+        "event": "onclick",
+        "function_name": "raiseProbeFac",
+        "line": 858,
+        "coverage_id": "ACT-PROBE-FACTORY-RAISE",
+        "arguments": []
+      },
+      {
+        "handler_id": "HTML-054",
+        "tag": "button",
+        "dom_id": "btnLowerProbeHarv",
+        "event": "onclick",
+        "function_name": "lowerProbeHarv",
+        "line": 869,
+        "coverage_id": "ACT-PROBE-HARVESTER-LOWER",
+        "arguments": []
+      },
+      {
+        "handler_id": "HTML-055",
+        "tag": "button",
+        "dom_id": "btnRaiseProbeHarv",
+        "event": "onclick",
+        "function_name": "raiseProbeHarv",
+        "line": 871,
+        "coverage_id": "ACT-PROBE-HARVESTER-RAISE",
+        "arguments": []
+      },
+      {
+        "handler_id": "HTML-056",
+        "tag": "button",
+        "dom_id": "btnLowerProbeWire",
+        "event": "onclick",
+        "function_name": "lowerProbeWire",
+        "line": 882,
+        "coverage_id": "ACT-PROBE-WIRE-LOWER",
+        "arguments": []
+      },
+      {
+        "handler_id": "HTML-057",
+        "tag": "button",
+        "dom_id": "btnRaiseProbeWire",
+        "event": "onclick",
+        "function_name": "raiseProbeWire",
+        "line": 884,
+        "coverage_id": "ACT-PROBE-WIRE-RAISE",
+        "arguments": []
+      },
+      {
+        "handler_id": "HTML-058",
+        "tag": "button",
+        "dom_id": "btnLowerProbeCombat",
+        "event": "onclick",
+        "function_name": "lowerProbeCombat",
+        "line": 897,
+        "coverage_id": "ACT-PROBE-COMBAT-LOWER",
+        "arguments": []
+      },
+      {
+        "handler_id": "HTML-059",
+        "tag": "button",
+        "dom_id": "btnRaiseProbeCombat",
+        "event": "onclick",
+        "function_name": "raiseProbeCombat",
+        "line": 899,
+        "coverage_id": "ACT-PROBE-COMBAT-RAISE",
+        "arguments": []
+      },
+      {
+        "handler_id": "HTML-060",
+        "tag": "button",
+        "dom_id": "btnIncreaseProbeTrust",
+        "event": "onclick",
+        "function_name": "increaseProbeTrust",
+        "line": 918,
+        "coverage_id": "ACT-PROBE-TRUST-INCREASE",
+        "arguments": []
+      },
+      {
+        "handler_id": "HTML-061",
+        "tag": "button",
+        "dom_id": "btnIncreaseMaxTrust",
+        "event": "onclick",
+        "function_name": "increaseMaxTrust",
+        "line": 924,
+        "coverage_id": "ACT-PROBE-MAXTRUST-INCREASE",
+        "arguments": []
+      }
+    ]
+  },
+  "coverage_aliases": [
+    {
+      "id": "SPACE-ENTRY-001",
+      "targets": [
+        "PROG-HYPNO-RELEASE"
+      ],
+      "documents": [
+        "requirements/gameplay-progression.md",
+        "requirements/gameplay-combat-endgame.md"
+      ],
+      "note": "PROG-HYPNO-RELEASE"
+    },
+    {
+      "id": "SPACE-ENTRY-002",
+      "targets": [
+        "PROG-SPACE-ENTRY"
+      ],
+      "documents": [
+        "requirements/gameplay-progression.md",
+        "requirements/gameplay-combat-endgame.md"
+      ],
+      "note": "PROG-SPACE-ENTRY"
+    },
+    {
+      "id": "SPACE-SWARM-001",
+      "targets": [
+        "PROG-SPACE-RECOVERY",
+        "PROG-SWARM-HEALTH"
+      ],
+      "documents": [
+        "requirements/gameplay-progression.md",
+        "requirements/gameplay-combat-endgame.md"
+      ],
+      "note": "PROG-SWARM-HEALTH and PROG-SPACE-RECOVERY"
+    },
+    {
+      "id": "PROBE-CREATE-001",
+      "targets": [
+        "ACT-PROBE-LAUNCH",
+        "PROG-PROBE-PRODUCTION"
+      ],
+      "documents": [
+        "requirements/gameplay-combat-endgame.md"
+      ],
+      "note": "ACT-PROBE-LAUNCH; PROG-PROBE-PRODUCTION owns the progression dependency"
+    },
+    {
+      "id": "PROBE-TRUST-001",
+      "targets": [
+        "ACT-PROBE-TRUST-INCREASE",
+        "PROG-PROBE-DESIGN"
+      ],
+      "documents": [
+        "requirements/gameplay-combat-endgame.md"
+      ],
+      "note": "ACT-PROBE-TRUST-INCREASE; PROG-PROBE-DESIGN owns the resource dependency"
+    },
+    {
+      "id": "PROBE-DESIGN-001",
+      "targets": [
+        "PROG-PROBE-DESIGN"
+      ],
+      "documents": [
+        "requirements/gameplay-combat-endgame.md"
+      ],
+      "note": "PROG-PROBE-DESIGN and ACT-PROBE-* allocation controls",
+      "families": [
+        "ACT-PROBE-*"
+      ]
+    },
+    {
+      "id": "PROBE-STAT-008",
+      "targets": [
+        "COMBAT-CORE-005",
+        "PRJ-071",
+        "PROG-PROBE-DESIGN"
+      ],
+      "documents": [
+        "requirements/gameplay-combat-endgame.md"
+      ],
+      "note": "COMBAT-CORE-005 owns live offense; PROG-PROBE-DESIGN owns allocation; project131 owns the unlock"
+    },
+    {
+      "id": "PROBE-DRIFT-002",
+      "targets": [
+        "PROG-END-CHOICE"
+      ],
+      "documents": [
+        "requirements/gameplay-progression.md",
+        "requirements/gameplay-combat-endgame.md"
+      ],
+      "note": "END-BRANCH-002 and PROG-END-CHOICE"
+    },
+    {
+      "id": "PROBE-RECOVERY-001",
+      "targets": [
+        "PRJ-075",
+        "PROG-SPACE-RECOVERY"
+      ],
+      "documents": [
+        "requirements/gameplay-progression.md",
+        "requirements/gameplay-combat-endgame.md"
+      ],
+      "note": "PROG-SPACE-RECOVERY and project135"
+    },
+    {
+      "id": "COMBAT-HONOR-001",
+      "targets": [
+        "PRJ-064",
+        "PROG-DRIFTWAR"
+      ],
+      "documents": [
+        "requirements/gameplay-combat-endgame.md"
+      ],
+      "note": "PROG-DRIFTWAR and project121"
+    },
+    {
+      "id": "COMBAT-HONOR-003",
+      "targets": [
+        "ACT-PROBE-MAXTRUST-INCREASE",
+        "PROG-DRIFTWAR"
+      ],
+      "documents": [
+        "requirements/gameplay-combat-endgame.md"
+      ],
+      "note": "ACT-PROBE-MAXTRUST-INCREASE and PROG-DRIFTWAR"
+    },
+    {
+      "id": "COMBAT-HONOR-004",
+      "targets": [
+        "PRJ-074",
+        "PROG-DRIFTWAR"
+      ],
+      "documents": [
+        "requirements/gameplay-combat-endgame.md"
+      ],
+      "note": "PROG-DRIFTWAR and project134"
+    },
+    {
+      "id": "COMBAT-HONOR-005",
+      "targets": [
+        "PRJ-072",
+        "PROG-DRIFTWAR"
+      ],
+      "documents": [
+        "requirements/gameplay-combat-endgame.md"
+      ],
+      "note": "PROG-DRIFTWAR and project132"
+    },
+    {
+      "id": "COMBAT-HONOR-006",
+      "targets": [
+        "PRJ-073",
+        "PROG-DRIFTWAR"
+      ],
+      "documents": [
+        "requirements/gameplay-combat-endgame.md"
+      ],
+      "note": "PROG-DRIFTWAR and project133"
+    },
+    {
+      "id": "END-COMPLETE-001",
+      "targets": [
+        "PROG-UNIVERSAL-GOAL"
+      ],
+      "documents": [
+        "requirements/gameplay-progression.md",
+        "requirements/gameplay-combat-endgame.md"
+      ],
+      "note": "PROG-UNIVERSAL-GOAL"
+    },
+    {
+      "id": "END-COMPLETE-002",
+      "targets": [
+        "PROG-UNIVERSAL-GOAL"
+      ],
+      "documents": [
+        "requirements/gameplay-progression.md",
+        "requirements/gameplay-combat-endgame.md"
+      ],
+      "note": "PROG-UNIVERSAL-GOAL"
+    },
+    {
+      "id": "END-DIALOG-001",
+      "targets": [
+        "PROG-END-CHOICE"
+      ],
+      "documents": [
+        "requirements/gameplay-progression.md",
+        "requirements/gameplay-combat-endgame.md"
+      ],
+      "note": "PROG-END-CHOICE"
+    },
+    {
+      "id": "END-DIALOG-002",
+      "targets": [
+        "PROG-END-CHOICE"
+      ],
+      "documents": [
+        "requirements/gameplay-combat-endgame.md"
+      ],
+      "note": "PROG-END-CHOICE"
+    },
+    {
+      "id": "END-DIALOG-003",
+      "targets": [
+        "PROG-END-CHOICE"
+      ],
+      "documents": [
+        "requirements/gameplay-combat-endgame.md"
+      ],
+      "note": "PROG-END-CHOICE"
+    },
+    {
+      "id": "END-DIALOG-004",
+      "targets": [
+        "PROG-END-CHOICE"
+      ],
+      "documents": [
+        "requirements/gameplay-combat-endgame.md"
+      ],
+      "note": "PROG-END-CHOICE"
+    },
+    {
+      "id": "END-DIALOG-005",
+      "targets": [
+        "PROG-END-CHOICE"
+      ],
+      "documents": [
+        "requirements/gameplay-combat-endgame.md"
+      ],
+      "note": "PROG-END-CHOICE"
+    },
+    {
+      "id": "END-DIALOG-006",
+      "targets": [
+        "PROG-END-CHOICE"
+      ],
+      "documents": [
+        "requirements/gameplay-combat-endgame.md"
+      ],
+      "note": "PROG-END-CHOICE"
+    },
+    {
+      "id": "END-DIALOG-007",
+      "targets": [
+        "PROG-END-CHOICE"
+      ],
+      "documents": [
+        "requirements/gameplay-progression.md",
+        "requirements/gameplay-combat-endgame.md"
+      ],
+      "note": "PROG-END-CHOICE"
+    },
+    {
+      "id": "END-BRANCH-001",
+      "targets": [
+        "PROG-END-CHOICE"
+      ],
+      "documents": [
+        "requirements/gameplay-progression.md",
+        "requirements/gameplay-combat-endgame.md"
+      ],
+      "note": "PROG-END-CHOICE"
+    },
+    {
+      "id": "END-BRANCH-002",
+      "targets": [
+        "PROG-END-CHOICE"
+      ],
+      "documents": [
+        "requirements/gameplay-progression.md",
+        "requirements/gameplay-combat-endgame.md"
+      ],
+      "note": "PROG-END-CHOICE; PROBE-DRIFT-002 details the drift consequence"
+    },
+    {
+      "id": "RESET-PRESTIGE-001",
+      "targets": [
+        "PROG-PRESTIGE"
+      ],
+      "documents": [
+        "requirements/gameplay-progression.md",
+        "requirements/gameplay-combat-endgame.md"
+      ],
+      "note": "PROG-PRESTIGE"
+    },
+    {
+      "id": "RESET-PRESTIGE-002",
+      "targets": [
+        "PROG-PRESTIGE"
+      ],
+      "documents": [
+        "requirements/gameplay-combat-endgame.md"
+      ],
+      "note": "PROG-PRESTIGE"
+    },
+    {
+      "id": "RESET-PRESTIGE-003",
+      "targets": [
+        "PROG-PRESTIGE"
+      ],
+      "documents": [
+        "requirements/gameplay-combat-endgame.md"
+      ],
+      "note": "PROG-PRESTIGE"
+    },
+    {
+      "id": "RESET-PRESTIGE-004",
+      "targets": [
+        "PROG-PRESTIGE"
+      ],
+      "documents": [
+        "requirements/gameplay-progression.md",
+        "requirements/gameplay-combat-endgame.md"
+      ],
+      "note": "PROG-PRESTIGE"
+    },
+    {
+      "id": "RESET-CORE-001",
+      "targets": [
+        "PROG-PRESTIGE",
+        "PROG-TEMPORAL-RESET"
+      ],
+      "documents": [
+        "requirements/gameplay-progression.md",
+        "requirements/gameplay-combat-endgame.md"
+      ],
+      "note": "PROG-PRESTIGE and PROG-TEMPORAL-RESET"
+    },
+    {
+      "id": "RESET-ALT-001",
+      "targets": [
+        "PROG-TEMPORAL-RESET"
+      ],
+      "documents": [
+        "requirements/gameplay-progression.md",
+        "requirements/gameplay-combat-endgame.md"
+      ],
+      "note": "PROG-TEMPORAL-RESET"
+    },
+    {
+      "id": "RESET-HUMAN-001",
+      "targets": [
+        "PROG-TRUST"
+      ],
+      "documents": [
+        "requirements/gameplay-progression.md",
+        "requirements/gameplay-combat-endgame.md"
+      ],
+      "note": "PROG-TRUST"
+    }
+  ]
+}
