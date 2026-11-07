@@ -1,5 +1,12 @@
 # paperclip-game
 
-一个以服务器为权威状态源、持续推进的 Universal Paperclips 实时重实现项目。
+A server-authoritative, continuously running real-time reimplementation of Universal Paperclips.
 
-当前处于需求与开发流程定义阶段，尚未开始游戏实现。
+## Documentation
+
+- [Product and engineering requirements](requirements/README.md)
+- [Agent development workflow](AGENTS.md)
+
+## Current status
+
+The project is defining the complete gameplay feature inventory and milestone map. Gameplay implementation has not started.
