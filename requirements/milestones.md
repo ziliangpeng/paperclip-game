@@ -42,7 +42,7 @@ Every Milestone requires at least:
 
 ## 5. Current Status — OPEN
 
-- [ ] The complete official gameplay feature inventory has not yet been established;
+- [x] The complete official gameplay feature inventory is established in [the gameplay feature inventory](./gameplay-inventory.md);
 - [ ] The complete Milestone map has not yet been established;
 - [ ] The precise M1 scope and Exit criteria have not yet been confirmed;
 - [ ] Feature implementation Issues have not yet been created;

@@ -9,4 +9,4 @@ A server-authoritative, continuously running real-time reimplementation of Unive
 
 ## Current status
 
-The project is defining the complete gameplay feature inventory and milestone map. Gameplay implementation has not started.
+The [official gameplay feature inventory](requirements/gameplay-inventory.md) is established. The next step is a complete whole-game milestone map with dependency-aware implementation Issues. Gameplay implementation has not started.
