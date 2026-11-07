@@ -1,92 +1,96 @@
 # AGENTS.md
 
-本文件规定 paperclip-game 的 Issue、实现、评审与合并流程。`requirements/` 是产品与工程需求的唯一版本化事实来源；本文件不复制游戏规则或完整测试矩阵。
+This file defines the Issue, implementation, review, and merge workflow for paperclip-game. `requirements/` is the sole versioned source of truth for product and engineering requirements. This file does not duplicate game rules or the full test matrix.
 
-## 1. 开工授权与交付单位
+## Language policy
 
-1. 所有实现工作必须从一个 **open、所有 blockers 均已 closed 的 GitHub Issue** 开始。开工前阅读 Issue 链接的需求及其状态。聊天评论、口头要求、代码里的 TODO 或笼统待办都不是实现授权。
-2. 一个 Agent 同一时间只认领一个 Issue；一个 Issue 只对应一个可独立测试的 PR。不要把一个 Issue 拆成一串实现 PR，也不要用一个 PR 打包多个 Issue。
-3. Worker 从最新 `main` 创建范围明确的 `issue-<N>-<short-scope>` 分支，提交一个 PR，并在 PR body 使用且只使用一个 `Refs #N`。不得使用 `Closes` / `Fixes` / `Resolves` 等自动关闭关键词；Issue 只能在主分支验证通过后由 controller 显式关闭。
-4. 禁止直接 push 到 `main`；修复和 revert 也必须走 PR。实现 Agent 不得靠自我批准完成合并。
-5. 不做 drive-by fix。发现范围外问题时，另开 Issue 记录；不要夹带在当前 PR 中。
+All artifacts committed to or publicly submitted through this repository MUST be in English. This includes README files, `requirements/`, `AGENTS.md`, templates, source code and comments, commit messages, Issues and their comments, PR bodies and comments, and public review records. Private user conversations remain separate and are not repository artifacts. This convention is mandatory for every future agent.
 
-## 2. Milestone、依赖与 Issue 内容
+## 1. Work authorization and unit of delivery
 
-- 使用 **GitHub Milestones** 表达交付阶段，使用 Issue body 中的可移植依赖标记表达 Issue 关系：
+1. All implementation work must start from a GitHub Issue that is **open and whose blockers are all closed**. Before starting, read the requirements linked from the Issue and their status. Chat comments, verbal requests, TODOs in code, and vague task lists do not authorize implementation.
+2. An Agent claims only one Issue at a time, and each Issue corresponds to exactly one independently testable PR. Do not split one Issue into a sequence of implementation PRs or bundle multiple Issues into one PR.
+3. The Worker creates a narrowly scoped `issue-<N>-<short-scope>` branch from the latest `main`, opens one PR, and uses exactly one `Refs #N` in the PR body. Do not use auto-closing keywords such as `Closes`, `Fixes`, or `Resolves`. The controller explicitly closes the Issue only after main-branch verification passes.
+4. Direct pushes to `main` are forbidden; fixes and reverts must also go through a PR. An implementation Agent must not merge its own PR on the basis of self-approval.
+5. No drive-by fixes. Record out-of-scope problems in a separate Issue; do not include them in the current PR.
+
+## 2. Milestones, dependencies, and Issue content
+
+- Use **GitHub Milestones** to represent delivery stages and portable dependency markers in the Issue body to represent Issue relationships:
   - `Blocked by: #123`
   - `Blocks: #456`
-- 多个依赖时按行重复同类标记；没有依赖时写 `None`。自动化选任务和合并前都必须验证 `Blocked by` 指向的 Issues 已经 closed。
-- 当前 Milestone 的 Issues 应细化到各自能由一个独立 PR 交付；只有下一个 Milestone 可以保留粗粒度任务轮廓。更远阶段先留在 Milestone 地图中，等前一阶段带来新信息后再细化，不要预先生成大量会过期的详细 Issues。
-- 每个可实施 Issue 必须包含：**Objective、Specification references、Scope、Non-goals、Dependencies、Acceptance criteria、Required tests / evidence**，以及适用时的 **Risk flags**。使用 `.github/ISSUE_TEMPLATE/task.md`。
-- Issue 引用需求文件、章节和稳定的不变量，不在 Issue 内另写一套游戏规则或复制完整测试矩阵。`CONFIRMED`、`PROPOSED`、`OPEN` 的含义以 `requirements/README.md` 为准。
-- 如果需求相互冲突，或产品行为的歧义会影响实现，给 Issue 加上 `needs-decision` 并停止相关工作。需求 resolver 必须先按需求确认流程更新 `requirements/`，再解除阻塞；实现 Agent 不得自行发明规则。
-- 纯机械实现细节可由 Agent 在不扩大 Scope、不改变产品行为的前提下选择，但必须用测试证明所选行为。
+- For multiple dependencies, repeat the same kind of marker on separate lines. Write `None` when there are none. Both automation selecting work and the pre-merge check must verify that every Issue referenced by `Blocked by` is closed.
+- Issues for the current Milestone must be detailed enough for each to be delivered by one independent PR. Only the next Milestone may retain coarse task outlines. Keep later stages in the Milestone map and refine them after earlier stages produce new information; do not create a large backlog of detailed Issues that will become stale.
+- Every actionable Issue must contain **Objective, Specification references, Scope, Non-goals, Dependencies, Acceptance criteria, Required tests / evidence**, and, where applicable, **Risk flags**. Use `.github/ISSUE_TEMPLATE/task.md`.
+- Issues reference requirement files, sections, and stable invariants. They must not create an alternative set of game rules or duplicate the full test matrix. See `requirements/README.md` for the meanings of `CONFIRMED`, `PROPOSED`, and `OPEN`.
+- If requirements conflict, or ambiguity in product behavior would affect implementation, label the Issue `needs-decision` and stop the related work. The requirements resolver must update `requirements/` through the requirements confirmation process before the work is unblocked. Implementation Agents must not invent rules.
+- Agents may choose purely mechanical implementation details when this neither expands Scope nor changes product behavior, but tests must demonstrate the chosen behavior.
 
-## 3. 实现、测试与证据
+## 3. Implementation, tests, and evidence
 
-- 按 `requirements/testing.md` 和 Issue 的风险选择必要测试。测试必须覆盖 Acceptance criteria 和真实失败模式，不以某个魔法覆盖率百分比作为目标，也不要求每个 PR 机械执行完整测试矩阵。
-- PR 必须列出实际执行的命令、结果和 Acceptance criteria 对应证据；不能只写“应该可用”或粘贴未经执行的结果。
-- UI 按 `requirements/testing.md` 做语义、状态与真实可玩路径验证，视觉为 best effort，可附截图辅助观察，但不设 pixel-perfect 截图门槛。
-- 不得为了让实现变绿而删除或削弱测试、lint、CI、required checks、安全控制或 merge controls。修改 test/CI/merge infrastructure 属于 high-risk，必须独立评审；属于下一节双人评审类别的，还必须满足双人要求。
+- Select the necessary tests according to `requirements/testing.md` and the Issue's risks. Tests must cover the Acceptance criteria and realistic failure modes. Do not target a magic coverage percentage or mechanically require every PR to run the full test matrix.
+- Each PR must list the commands actually executed, their results, and evidence corresponding to the Acceptance criteria. Do not merely claim that something "should work" or paste results that were not actually produced.
+- Validate UI semantics, state, and real playable paths according to `requirements/testing.md`. Visual fidelity is best effort; screenshots may support observation, but pixel-perfect screenshots are not a merge gate.
+- Never delete or weaken tests, lint, CI, required checks, security controls, or merge controls to make an implementation pass. Changes to test/CI/merge infrastructure are high-risk and require independent review. Where they also fall into a two-reviewer category below, the two-reviewer requirement applies.
 
-## 4. 独立 Agent 评审
+## 4. Independent Agent review
 
-本流程不设置 human per-PR code review gate。质量由可执行验收测试、CI、**fresh-context 独立 reviewer Agents** 和独立 merge controller 共同保证。
+This workflow has no human per-PR code review gate. Quality is ensured by executable acceptance tests, CI, **fresh-context independent reviewer Agents**, and an independent merge controller.
 
-- 普通变更至少需要 **1 名独立 reviewer** 的批准。
-- Core simulation、economy/game rules、concurrency、persistence、CI 或 merge workflow 变更至少需要 **2 名独立 reviewer**；其中 1 名必须执行 adversarial correctness review，主动寻找违反不变量的执行路径。这两人可以包含该 adversarial reviewer，不要求第三人。
-- Reviewer 必须独立于实现 Agent，并使用 fresh context。实现 Agent 自己的工作不能充当所需的独立批准，也不能成为自己 PR 的唯一 reviewer。
-- Reviewer 对当前 PR HEAD 给出明确结论、检查范围和发现；新提交后必须重新检查受影响的结论与证据。
+- An ordinary change requires approval from at least **1 independent reviewer**.
+- Changes to core simulation, economy/game rules, concurrency, persistence, CI, or merge workflow require at least **2 independent reviewers**. One must perform an adversarial correctness review, actively seeking execution paths that violate invariants. The adversarial reviewer may be one of these two people; a third reviewer is not required.
+- A reviewer must be independent of the implementation Agent and use fresh context. The implementation Agent's own work cannot serve as a required independent approval, and the Agent cannot be the sole reviewer of its own PR.
+- Reviewers give a clear conclusion, describe what they checked, and report findings for the current PR HEAD. After new commits, they must recheck affected conclusions and evidence.
 
-## 5. Blocking 与 non-blocking 标准
+## 5. Blocking and non-blocking findings
 
-每条 **blocking finding** 必须同时给出：
+Every **blocking finding** must provide all of the following:
 
-1. 被违反的 Issue Acceptance criterion 或精确需求文件/章节/不变量；
-2. 精确代码位置（文件与行号，或等价定位）；
-3. 可复现命令/测试，或明确可演示的执行路径及其实际错误结果。
+1. The violated Issue Acceptance criterion or the exact requirements file, section, and invariant;
+2. The exact code location, such as file and line number or an equivalent locator;
+3. A reproducible command or test, or a demonstrable execution path with its actual incorrect result.
 
-只有已证明的问题可以阻塞合并。Blocker 类型包括：
+Only demonstrated problems may block a merge. Blocker types include:
 
-- Acceptance criterion 未满足；
-- 未经授权的游戏行为或需求变更；
-- 服务器权威状态被破坏；
-- 真实竞态、lost update 或 double execution；
-- 无效或不正确的恢复；
-- Issue 要求的测试或证据缺失；
-- 通过削弱测试或质量门槛隐藏回归；
-- 已演示的 data/security/main-branch 风险。
+- An unmet Acceptance criterion;
+- An unauthorized change to game behavior or requirements;
+- Loss of server authority over state;
+- A real race, lost update, or double execution;
+- Invalid or incorrect recovery;
+- Tests or evidence required by the Issue are missing;
+- A regression concealed by weakening tests or quality gates;
+- A demonstrated data, security, or main-branch risk.
 
-以下属于 **non-blocking**：品味或命名偏好、同样合理的替代方案、未经测量的优化、超出当前需求的 speculative abstraction 或 multi-instance 预备、无关重构、只提升优雅程度的注释，以及未验证的理论担忧。这类意见必须明确标为 non-blocking，不能阻止合并。值得做的后续工作另开 Issue，不以无限 polish 拖延当前交付。
+The following are **non-blocking**: taste or naming preferences, equally valid alternatives, unmeasured optimizations, speculative abstractions or multi-instance preparation beyond current requirements, unrelated refactoring, elegance-only comments, and unverified theoretical concerns. Such comments must be explicitly labeled non-blocking and cannot prevent a merge. Record worthwhile follow-up work in a separate Issue instead of delaying the current delivery with endless polish.
 
-## 6. Merge controller 与完成条件
+## 6. Merge controller and completion criteria
 
-独立 merge controller 在合并前机械核验：
+The independent merge controller mechanically verifies the following before merging:
 
-- [ ] PR 恰好链接一个仍为 open 的 Issue；
-- [ ] 所有 `Blocked by` Issues 均已 closed；
-- [ ] 变更未超出 Issue Scope，也没有未经批准的需求偏差；
-- [ ] 所有 required CI checks 通过；
-- [ ] 每项 Acceptance criterion 都有所要求的证据；
-- [ ] 按风险所需数量和类型的独立批准齐全，评审对应当前 HEAD；
-- [ ] 没有尚未解决的 blocking findings；
-- [ ] 最新变更已经重新检查，测试与评审证据没有停留在旧提交；
-- [ ] required checks 已在基于当时最新 `main` 的合并结果上通过。
+- [ ] The PR links exactly one Issue, which is still open;
+- [ ] Every Issue referenced by `Blocked by` is closed;
+- [ ] The changes do not exceed the Issue Scope and contain no unapproved requirements deviations;
+- [ ] All required CI checks pass;
+- [ ] Every Acceptance criterion has the required evidence;
+- [ ] The required number and types of independent approvals for the risk level are present, with reviews tied to the current HEAD;
+- [ ] No blocking findings remain unresolved;
+- [ ] The latest changes have been rechecked, and test and review evidence is not tied to an old commit;
+- [ ] Required checks pass on the merge result based on the latest `main` at that time.
 
-后续实现 merge controller 时，必须使用 **merge queue 或等价串行化机制**，在合并前将 PR update/rebase 到当时最新 `main`，并对该精确合并结果重新执行 required checks，避免并行 PR 各自通过旧基线却产生语义竞态。
+The later merge-controller implementation must use a **merge queue or an equivalent serialization mechanism**. Before merging, it must update/rebase the PR onto the latest `main` and rerun required checks on that exact merge result, preventing parallel PRs from passing against old bases and then creating semantic races.
 
-Reviewer 输出必须由负责编排的 controller 获取并保存，绑定 PR 与 HEAD SHA。PR 评论中的自称批准、复制粘贴的评审文本或伪造评论不能替代 controller 验证过的评审记录。
+The orchestrating controller must capture and store reviewer output, bound to the PR and HEAD SHA. Self-declared approvals in PR comments, copied and pasted review text, and forged comments cannot substitute for review records validated by the controller.
 
-Controller 按队列执行合并后，必须运行规定的 `main` post-merge verification；验证通过后，controller 才显式关闭对应 Issue，并将其标记为依赖意义上的完成。验证期间 Issue 保持 open，任何自动提前关闭都必须 reopen。若 `main` 出现问题，暂停新的 feature merges，保持或重开关联 Issue，通过关联 regression Issue 的 PR 修复或 revert。Agent 应优先处理 regression、main breakage 和其他 blocker，再领取新 Issue。
+After merging through the queue, the controller must run the specified `main` post-merge verification. Only after it passes does the controller explicitly close the corresponding Issue and mark it complete for dependency resolution. The Issue remains open during verification, and any premature automatic closure must be reopened. If `main` breaks, pause new feature merges, keep or reopen the associated Issue, and fix or revert through a PR linked to a regression Issue. Agents must prioritize regressions, main breakage, and other blockers over claiming new Issues.
 
 ## 7. Public-repository hygiene
 
-本仓库按 **PUBLIC repository** 管理：即使当前仍因公开前清理而处于 Private，所有 committed files、git history、Issues、PRs/comments、CI logs、screenshots、fixtures 和 CI artifacts 也一律按未来会公开的信息处理。
+Manage this repository as a **PUBLIC repository**: even while it remains Private for pre-publication cleanup, treat all committed files, git history, Issues, PRs/comments, CI logs, screenshots, fixtures, and CI artifacts as information that will become public.
 
-- 不得读取、复制或向仓库内容及公开日志加入 credentials、tokens、`.env` 内容、SSH keys、cookies、personal information、绝对 home paths/user names、private hostnames 或其他私有材料。使用 repo-relative paths 和明显虚构的 example data；test fixtures 不得使用真实个人数据。
-- Worker 不得让 secrets 或私有信息出现在 test output、browser screenshots、错误转储或调试日志中。
-- Push/merge 前检查**完整 diff、相关 history，以及将公开的 generated files、logs、screenshots、fixtures 和 CI artifacts**，不能只检查最终文件树。
-- 一旦发现 secret 或 private datum，立即停止 publishing/merging 并升级到适当的人工处理。后续提交删除不等于从公开历史中擦除；history rewrite、泄露处置和 key rotation 必须按相应人工安全流程执行。
-- 仓库所有者已明确允许其本人的 Git author/committer 署名和邮箱作为公开提交元数据，不要求清理或改写该元数据。此例外不扩展到其他人的个人信息，也不允许任何凭据、私有文件或私有项目内容。
+- Never read or copy credentials, tokens, `.env` contents, SSH keys, cookies, personal information, absolute home paths/user names, private hostnames, or other private material into repository content or public logs. Use repo-relative paths and obviously fake example data. Test fixtures must not contain real personal data.
+- Workers must not expose secrets or private information in test output, browser screenshots, error dumps, or debug logs.
+- Before pushing or merging, inspect the **complete diff, relevant history, and generated files, logs, screenshots, fixtures, and CI artifacts that will become public**; do not inspect only the final file tree.
+- If a secret or private datum is detected, stop publishing/merging immediately and escalate to the appropriate human process. Deleting it in a later commit does not erase it from public history. History rewrites, incident handling, and key rotation must follow the appropriate human security process.
+- The repository owner has explicitly allowed their own Git author/committer name and email address to remain public in commit metadata; this metadata does not require cleanup or rewriting. This exception does not extend to anyone else's personal information and never permits credentials, private files, or private project content.
 
-Worker、reviewer 及其自动化只获得完成任务所需的最小权限；不得分发不必要的 secrets、admin credentials 或直接写 `main` 的权限。
+Workers, reviewers, and their automation receive only the minimum privileges required for their tasks. They must not receive unnecessary secrets, admin credentials, or permission to write directly to `main`.

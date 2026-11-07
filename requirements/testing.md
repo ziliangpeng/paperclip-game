@@ -1,58 +1,58 @@
 # Testing and Acceptance Strategy
 
-## 1. 原则 — CONFIRMED
+## 1. Principles — CONFIRMED
 
-- 测试来自需求、风险和 Acceptance Criteria，不追求魔法覆盖率百分比。
-- 每个 Issue 必须定义验证方式，每个 PR 必须提供对应证据。
-- 关键路径应有大量有针对性的正反测试、序列测试和并发测试，而不是重复描述实现的低价值断言。
-- 不得通过删除测试、降低断言或修改质量门槛来让实现变绿。
-- 纯引擎测试可直接推进 ticks，生产 gameplay 和 Agent API 没有暂停或步进能力。
-- 需要真实时间的集成测试必须有界，不用长时间 `sleep` 模拟所有规则。
+- Tests derive from requirements, risks, and Acceptance Criteria, not from a pursuit of magic coverage percentages.
+- Every Issue must define its verification method, and every PR must provide corresponding evidence.
+- Critical paths should have extensive targeted positive and negative tests, sequence tests, and concurrency tests, rather than low-value assertions that repeat implementation descriptions.
+- Tests must not be deleted, assertions weakened, or quality gates changed to make an implementation pass.
+- Pure engine tests may advance ticks directly; production gameplay and the Agent API have no pause or step capability.
+- Integration tests that require real time must be bounded and must not use long `sleep` calls to simulate every rule.
 
-## 2. 分层矩阵
+## 2. Layered Matrix
 
-| 层次 | 必须覆盖的关注点 |
+| Layer | Concerns That Must Be Covered |
 |---|---|
-| 规则单元测试 | 初始状态、资源变化、边界、错误输入、解锁和数值边界 |
-| 状态序列测试 | Commands 与 ticks 的不同顺序、长 progression、状态机可达性 |
-| Property-based tests | 大量操作序列下不重复执行、不丢失更新、不破坏资源不变量 |
-| 并发测试 | 多客户端竞争同一资源、同时合法命令、tick 与命令竞争、重试去重 |
-| API 契约测试 | Command/View schema、错误原因、未知动作、未知字段策略，以及所采用的重试/幂等契约 |
-| SSE 测试 | 初始快照、更新顺序、断线重连、迟到 View、崩溃恢复后的重同步与旧 View 隔离 |
-| 持久化测试 | 快照完整性与原子性、恢复、无 backfill、丢失窗口、重复启动 |
-| Gameplay 场景测试 | 从规定初始状态完成当前 Milestone 的真实出口 |
-| 浏览器 E2E | 点击只发请求、显示服务器状态、刷新不回滚、两个页面共享游戏 |
-| 长模拟与稳定性 | 经济链和状态机在中长期运行下不死锁、不产生非法状态 |
+| Rule unit tests | Initial state, resource changes, boundaries, invalid input, unlocks, and numeric limits |
+| State sequence tests | Different orderings of Commands and ticks, long progression, and state-machine reachability |
+| Property-based tests | No duplicate execution, lost updates, or violations of resource invariants across large operation sequences |
+| Concurrency tests | Multiple clients competing for the same resource, simultaneously legal commands, tick-command races, and retry deduplication |
+| API contract tests | Command/View schemas, error reasons, unknown actions, unknown-field policy, and the adopted retry/idempotence contract |
+| SSE tests | Initial snapshot, update ordering, disconnection and reconnection, late Views, resynchronization after crash recovery, and isolation from old Views |
+| Persistence tests | Snapshot completeness and atomicity, recovery, no backfill, the loss window, and repeated startup |
+| Gameplay scenario tests | Reaching the current Milestone's actual exit criteria from a specified initial state |
+| Browser E2E | Clicks only send requests, server state is displayed, refresh does not roll back, and two pages share the game |
+| Long simulation and stability | Economic chains and state machines do not deadlock or produce illegal states during medium- and long-term operation |
 
-每个 Issue 只要求与其风险相关的层次，不要求所有 PR 机械执行所有层次；Milestone 验收必须包含对应端到端 gameplay 场景。
+Each Issue requires only the layers relevant to its risks; not every PR must mechanically execute every layer. Milestone acceptance must include the corresponding end-to-end gameplay scenario.
 
-## 3. 规则与数值验证 — CONFIRMED
+## 3. Rule and Numeric Verification — CONFIRMED
 
-- 原版作为游戏设计参考，不要求逐 tick、逐浮点尾数或随机序列做 bit-for-bit 对拍。
-- 初始资源、动作效果、解锁关系和主要经济平衡通过 gameplay 场景和可检查规则验证。
-- 如果实现选择改变数值表示，必须证明不改变有意义的 gameplay 结果。
-- 随机测试使用可控随机源以复现失败，但生产规则不要求与原浏览器产生相同随机序列。
+- The original game is a game-design reference; bit-for-bit differential comparisons of individual ticks, floating-point mantissas, or random sequences are not required.
+- Initial resources, action effects, unlock relationships, and major economic balance are verified through gameplay scenarios and inspectable rules.
+- If an implementation chooses to change numeric representation, it must demonstrate that meaningful gameplay outcomes are unchanged.
+- Random tests use controlled random sources to reproduce failures, but production rules are not required to produce the same random sequence as the original browser version.
 
-## 4. 并发与持久化专项 — CONFIRMED / PROPOSED
+## 4. Concurrency and Persistence Focus — CONFIRMED / PROPOSED
 
-至少建立以下可重复场景；其中标注 PROPOSED 的用例验收所选协议，而不是把建议字段名提升为用户确认：
+At least the following repeatable scenarios must be established; cases marked PROPOSED validate the selected protocol rather than elevating proposed field names to user-confirmed requirements:
 
-1. 两个客户端同时竞争资源，只有实际可承担的 Commands 成功；
-2. **CONFIRMED 状态底线**：当前进程内同一逻辑 Command 的并发与顺序幂等重试至多应用一次状态变化，不能只验证 HTTP 成功次数；
-3. **PROPOSED `command_id` 契约**：同键同参重试共享首次终态结果；同键异参得到 Conflict 且不破坏已有绑定；规则拒绝后的重试行为与文档一致；
-4. 大量 Commands 与 ticks 后，状态等于按明确顺序应用的结果，无 lost update；
-5. 保存期间继续模拟，不产生半写入快照；
-6. 在快照后产生变化再模拟崩溃，恢复到最后成功快照且不补离线进度；
-7. 客户端重连后接受恢复状态，不让崩溃前 View 覆盖新服务器状态；
-8. 没有浏览器或 SSE 连接时模拟仍推进。
+1. Two clients compete for resources simultaneously, and only Commands that can actually be afforded succeed;
+2. **CONFIRMED state baseline**: Within the current process, concurrent and sequential idempotent retries of the same logical Command apply state changes at most once; verification must not merely count HTTP successes;
+3. **PROPOSED `command_id` contract**: Retries with the same key and same arguments share the first terminal result; the same key with different arguments produces a Conflict without damaging the existing binding; retry behavior after rule rejection is consistent with the documentation;
+4. After many Commands and ticks, the state equals the result of applying them in a well-defined order, with no lost update;
+5. Simulation continues during saves without producing partially written snapshots;
+6. Make changes after a snapshot and then simulate a crash; recovery restores the last successful snapshot and does not backfill offline progress;
+7. After reconnecting, clients accept the recovered state and do not allow a pre-crash View to overwrite the new server state;
+8. Simulation continues to advance when there are no browser or SSE connections.
 
-## 5. UI 验收 — CONFIRMED
+## 5. UI Acceptance — CONFIRMED
 
-- 使用语义化结构、关键按钮和服务器状态正确性验证。
-- 使用两个独立页面验证共享状态和并发动作。
-- 对 best effort 视觉可以用截图辅助人工或 Agent 观察，但不采用严格 pixel-perfect gate。
-- 未来不同 UI 必须复用同一公开 View/Command 语义，而不是复制规则。
+- Verify semantic structure, key buttons, and the correctness of server state.
+- Use two independent pages to verify shared state and concurrent actions.
+- Screenshots may assist human or Agent observation of best effort visuals, but no strict pixel-perfect gate is used.
+- Future different UIs must reuse the same public View/Command semantics rather than duplicate the rules.
 
-## 6. Review 与 merge evidence
+## 6. Review and Merge Evidence
 
-Issue/PR 流程、独立 Agent Review、blocking/non-blocking 标准和自动 Merge 机械门槛统一由根目录 `AGENTS.md` 规定。本文件负责说明哪些测试证据能够证明需求，不另建一套冲突流程。
+The Issue/PR process, independent Agent Review, blocking/non-blocking criteria, and automatic Merge mechanical gates are governed uniformly by `AGENTS.md` in the repository root. This file explains which test evidence can demonstrate the requirements; it does not create a separate conflicting process.

@@ -1,33 +1,33 @@
 # Requirements
 
-本目录是 **paperclip-game 产品与工程需求的唯一版本化事实来源**。聊天记录、Issue 评论和 Agent 的记忆不能替代这里的明确要求。
+This directory is the **sole versioned source of truth for the product and engineering requirements of paperclip-game**. Chat records, Issue comments, and Agent memories cannot replace the explicit requirements here.
 
-## 状态约定
+## Status Conventions
 
-- **CONFIRMED**：用户已经确认，不得由实现 Agent 擅自改变。
-- **PROPOSED**：当前推荐设计。若与需求不冲突，可在对应 Issue 中实施；若实施中发现代价或行为差异，应先更新本文并获得适当确认。
-- **OPEN**：尚未明确、会影响产品行为或验收的内容。依赖它的实现工作必须保持阻塞，直到它被解决。
+- **CONFIRMED**: Confirmed by the user; implementation Agents must not change it without authorization.
+- **PROPOSED**: The currently recommended design. If it does not conflict with the requirements, it may be implemented in the corresponding Issue; if implementation reveals costs or behavioral differences, this document must be updated and appropriate confirmation obtained first.
+- **OPEN**: Matters that remain unspecified and affect product behavior or acceptance. Implementation work that depends on them must remain blocked until they are resolved.
 
-纯内部实现细节不要求逐项经过产品讨论，但必须在相关 Issue 中明确选择和验证方式。不得把 `PROPOSED` 写成 `CONFIRMED`。
+Purely internal implementation details do not require item-by-item product discussion, but the choices and verification methods must be made explicit in the relevant Issue. `PROPOSED` must never be represented as `CONFIRMED`.
 
-## 文档索引
+## Document Index
 
-| 文档 | 范围 |
+| Document | Scope |
 |---|---|
-| [Product](./product.md) | 产品目标、gameplay 与 UI 保真边界、客户端角色 |
-| [Runtime](./runtime.md) | 实时模拟、并发、实例边界、技术栈与持久化 |
-| [Clients and API](./clients.md) | 默认寻址、Commands、GameView、SSE 与浏览器边界 |
-| [Testing](./testing.md) | 分层测试、场景验收与证据要求 |
-| [Milestones](./milestones.md) | 完整 Milestone 地图的形成方式与当前规划状态 |
+| [Product](./product.md) | Product goals, gameplay and UI fidelity boundaries, and client roles |
+| [Runtime](./runtime.md) | Real-time simulation, concurrency, instance boundaries, technology stack, and persistence |
+| [Clients and API](./clients.md) | Default addressing, Commands, GameView, SSE, and browser boundaries |
+| [Testing](./testing.md) | Layered testing, scenario acceptance, and evidence requirements |
+| [Milestones](./milestones.md) | How the complete Milestone map is developed and the current planning status |
 
-## 变更与冲突
+## Changes and Conflicts
 
-1. 项目级 Agent 开发流程见根目录 `AGENTS.md`，本目录不复制整套开发规范。
-2. Issue 只能引用需求，不能在 Issue body 中制造另一套相互冲突的游戏规则。
-3. 如果实现发现需求内部矛盾或产品歧义，应停止相关工作，标记 `needs-decision`，解决后先更新需求再继续。
-4. 官方 HTML 是原版游戏设计的主要参考；本项目明确记录的服务器实时模型和状态管理方式优先于原版浏览器实现。
-5. 需求变更通过 Issue 和 PR 留痕。实现 PR 不得顺手夹带未批准的需求变化。
+1. See `AGENTS.md` in the repository root for the project-level Agent development process; this directory does not duplicate the full development rules.
+2. Issues may only reference requirements; an Issue body must not create another set of conflicting game rules.
+3. If implementation reveals an internal contradiction in the requirements or product ambiguity, stop the related work, mark it `needs-decision`, and update the requirements after resolution before continuing.
+4. The official HTML is the primary reference for the original game design; the server real-time model and state management approach explicitly recorded for this project take precedence over the original browser implementation.
+5. Requirement changes are recorded through Issues and PRs. Implementation PRs must not include unapproved requirement changes incidentally.
 
-## 当前阶段
+## Current Stage
 
-当前只完成文档与开发流程初始化。完整 gameplay 功能清单、Milestone 地图和可实施 Issues 尚未全部完成，**尚未授权开始游戏功能实现**。
+Only documentation and development process initialization are complete at present. The complete gameplay feature inventory, Milestone map, and actionable Issues are not all complete, and **implementation of game functionality has not yet been authorized**.

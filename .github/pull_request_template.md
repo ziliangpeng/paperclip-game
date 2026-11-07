@@ -2,7 +2,7 @@
 
 Refs #N
 
-<!-- 必须且只能引用一个 Issue；只使用 Refs，不用 Closes/Fixes/Resolves。controller 在 main post-merge verification 通过后显式关闭 Issue；范围外工作另开 Issue 和 PR。 -->
+<!-- Reference exactly one Issue. Use only Refs, not Closes/Fixes/Resolves. The controller explicitly closes the Issue after main post-merge verification passes. Put out-of-scope work in a separate Issue and PR. -->
 
 ## Acceptance evidence / tests
 
@@ -10,27 +10,27 @@ Refs #N
 |---|---|---|
 |  |  |  |
 
-<!-- 填写实际执行的命令、结果与证据位置，并注明测试所针对的 HEAD SHA。 -->
+<!-- Provide the commands actually executed, their results, and evidence locations. Include the HEAD SHA against which the tests ran. -->
 
 ## Independent review summary
 
 - Reviewer 1 — conclusion / HEAD SHA:
-- Reviewer 2 — conclusion / HEAD SHA（高风险变更需要；标明 adversarial correctness reviewer）:
+- Reviewer 2 — conclusion / HEAD SHA (required for high-risk changes; identify the adversarial correctness reviewer):
 - Resolved blockers — findings / evidence:
 - Unresolved blockers: None
 - Controller review record / capture:
 
-<!-- 评审人数、独立性与 fresh context 按 AGENTS.md；评论不能替代 controller 获取的评审输出。 -->
+<!-- Reviewer count, independence, and fresh context follow AGENTS.md. Comments cannot substitute for reviewer output captured by the controller. -->
 
 ## Scope / spec deviations
 
 None
 
-<!-- 正常应为 None；如有偏差，必须链接事前批准及先行更新的 requirements，否则不得合并。 -->
+<!-- This should normally be None. Any deviation must link prior approval and requirements updated in advance; otherwise the PR must not merge. -->
 
 ## Public-repository check
 
-- [ ] 已按 AGENTS.md 检查完整 diff、相关 history 及将公开的 logs / screenshots / fixtures / CI artifacts；无私有信息，示例数据均为虚构。
+- [ ] I have followed AGENTS.md to inspect the complete diff, relevant history, and public logs / screenshots / fixtures / CI artifacts. They contain no private information, and all example data is fake.
 
 ## Rollback / risk notes
 

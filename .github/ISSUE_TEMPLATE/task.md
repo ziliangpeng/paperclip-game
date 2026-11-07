@@ -1,43 +1,43 @@
 ---
 name: Implementation task
-about: 由一个独立可测试 PR 交付的任务
+about: A task delivered by one independently testable PR
 title: "[Task] "
 labels: ""
 assignees: ""
 ---
 
-<!-- 创建后选择 GitHub Milestone。一个 Agent 一次只认领一个 Issue；施工规则见根目录 AGENTS.md。 -->
+<!-- Select a GitHub Milestone after creation. An Agent claims only one Issue at a time; see the root AGENTS.md for implementation rules. -->
 
 ## Objective
 
-<!-- 用一两句话说明要交付的可验证结果。 -->
+<!-- State the verifiable outcome to deliver in one or two sentences. -->
 
 ## Specification references
 
-- `requirements/<file>.md` §`<section>` — <!-- 相关状态与不变量；只引用，不复述一套规则。 -->
+- `requirements/<file>.md` §`<section>` — <!-- Relevant status and invariants; reference them instead of restating an alternative set of rules. -->
 
 ## Scope
 
-- <!-- 本 Issue 包含的可交付范围。 -->
+- <!-- The deliverable scope included in this Issue. -->
 
 ## Non-goals
 
-- <!-- 明确排除、需要另开 Issue 的工作。 -->
+- <!-- Explicitly excluded work that requires a separate Issue. -->
 
 ## Dependencies
 
 Blocked by: None
 Blocks: None
 
-<!-- 有依赖时把 None 换成 #123；多个依赖按行重复同一 marker。 -->
+<!-- When dependencies exist, replace None with #123. For multiple dependencies, repeat the same marker on separate lines. -->
 
 ## Acceptance criteria
 
-- [ ] <!-- 可独立验证、能追溯到需求的结果。 -->
+- [ ] <!-- An independently verifiable outcome traceable to requirements. -->
 
 ## Required tests / evidence
 
-<!-- 按 requirements/testing.md 选择与风险相关的验证，不复制完整测试矩阵。 -->
+<!-- Select risk-appropriate validation according to requirements/testing.md; do not duplicate the full test matrix. -->
 - Tests / commands:
 - Expected results / artifacts:
 
@@ -47,6 +47,6 @@ Blocks: None
 - [ ] Concurrency / persistence / recovery
 - [ ] Test / CI / merge infrastructure
 - [ ] Security / data / main-branch risk
-- [ ] 以上均不适用
+- [ ] None of the above
 
-<!-- 需求冲突或产品歧义：标记 needs-decision 并停止实现，先解决需求。 -->
+<!-- Conflicting requirements or product ambiguity: label the Issue needs-decision, stop implementation, and resolve the requirements first. -->

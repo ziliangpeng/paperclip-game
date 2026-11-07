@@ -1,104 +1,104 @@
 # Product Requirements
 
-## 1. 产品愿景 — CONFIRMED
+## 1. Product Vision — CONFIRMED
 
-建立一个以服务器为唯一权威状态源的 Universal Paperclips 重实现。
+Build a reimplementation of Universal Paperclips in which the server is the sole authoritative source of state.
 
-- 游戏世界由服务器持续推进。
-- 网页、人类 harness、一个或多个 Agent 都只是客户端。
-- 客户端发送动作并接收用于观察的状态；客户端不拥有游戏规则。
-- 项目最终目标是完整 gameplay clone，而不是只做一个 paperclip 主题的按钮演示。
+- The game world is advanced continuously by the server.
+- Web pages, human harnesses, and one or more Agents are all merely clients.
+- Clients send actions and receive state for observation; clients do not own the game rules.
+- The project's ultimate goal is a complete gameplay clone, not merely a paperclip-themed button demo.
 
-## 2. 完整范围与增量交付 — CONFIRMED
+## 2. Full Scope and Incremental Delivery — CONFIRMED
 
 ### Full clone
 
-Full clone 指**完整忠实复刻原版游戏的高层与中层游戏设计、内容和 gameplay 体验**。
+Full clone means a **complete and faithful reproduction of the original game's high-level and mid-level game design, content, and gameplay experience**.
 
-应保留：
+The following must be preserved:
 
-- 原版的主要阶段、进程和结局；
-- 资源、动作、生产、销售、自动化、升级和解锁之间的设计关系；
-- 初始状态、主要经济数值、增长曲线和平衡所体现的 gameplay；
-- 核心战略取舍、节奏和关键反馈；
-- 让玩家能够经历原版完整进程的全部主要机制。
+- The original game's major stages, progression, and ending;
+- The design relationships among resources, actions, production, sales, automation, upgrades, and unlocks;
+- The gameplay embodied by the initial state, major economic values, growth curves, and balance;
+- The core strategic trade-offs, pacing, and key feedback;
+- All major mechanics that allow players to experience the original game's complete progression.
 
-完整游戏通过多个可玩 Milestones 增量交付。每个 Milestone：
+The complete game will be delivered incrementally through multiple playable Milestones. Each Milestone:
 
-- 必须实现最终游戏中的真实子集；
-- 不得先用自创简化规则占位，再把 simplification 当作 clone 验收；
-- 未达到完整功能清单前，只能称为阶段性版本，不能声称 full clone 完成。
+- Must implement a genuine subset of the final game;
+- Must not use invented simplified rules as placeholders and then treat the simplification as clone acceptance;
+- Until the complete feature inventory has been implemented, may only be called an interim version and must not be described as a completed full clone.
 
-### Inspired game — 后续方向
+### Inspired game — Future direction
 
-受启发的新游戏、额外机制或非原版玩法，必须等完整 gameplay clone 完成后再规划。它不属于当前 clone 的验收范围。
+New games inspired by the original, additional mechanics, or gameplay not found in the original must not be planned until the complete gameplay clone is finished. They are outside the acceptance scope of the current clone.
 
-## 3. 官方参考 — CONFIRMED
+## 3. Official Reference — CONFIRMED
 
-主要参考为官方页面及其正常加载的游戏内容：
+The primary reference is the official page and the game content it loads normally:
 
 - `https://www.decisionproblem.com/paperclips/index2.html`
 
-2026-11-07 初次核对时，页面加载了带 `?v3` 参数的主要游戏脚本。Wiki、视频、记忆和其他资料只能辅助理解；游戏设计冲突时以官方参考为准。
+On the initial check on 2026-11-07, the page loaded its main game script with the `?v3` parameter. Wikis, videos, memories, and other materials may only assist understanding; the official reference takes precedence when game designs conflict.
 
-官方参考用于确定 gameplay，不要求逐行移植其 JavaScript。
+The official reference is used to determine gameplay; line-by-line porting of its JavaScript is not required.
 
-## 4. Gameplay 保真边界 — CONFIRMED
+## 4. Gameplay Fidelity Boundaries — CONFIRMED
 
-### 保留
+### Retain
 
-- 原版游戏设计和 gameplay 体验；
-- 资源关系、动作效果、主要解锁与 progression；
-- 经济系统的有实际 gameplay 意义的规则；
-- 阶段内容和战略选择。
+- The original game design and gameplay experience;
+- Resource relationships, action effects, major unlocks, and progression;
+- Rules of the economy that have material gameplay significance;
+- Stage content and strategic choices.
 
-### 不要求保留
+### Not required to retain
 
-- JavaScript 变量、模块和 DOM 的内部组织；
-- 多个 `setInterval` 的具体调度顺序；
-- 后台标签页 timer 限速；
-- 浮点尾数、无 gameplay 意义的舍入差异或浏览器数值副作用；
-- DevTools 修改变量、负数内部参数和直接调用内部函数等越权行为；
-- 仅依赖 DOM `disabled` 的资源校验方式；
-- `localStorage` 格式、刷新回滚和浏览器多标签状态分裂；
-- 与原版浏览器完全一致的随机数序列或逐 tick 浮点轨迹。
+- The internal organization of JavaScript variables, modules, and the DOM;
+- The specific scheduling order of multiple `setInterval` calls;
+- Timer throttling in background tabs;
+- Floating-point mantissas, rounding differences with no gameplay significance, or browser numeric side effects;
+- Unauthorized behavior such as modifying variables through DevTools, using negative internal parameters, or directly calling internal functions;
+- Resource validation that relies solely on DOM `disabled` states;
+- The `localStorage` format, refresh rollback, and state divergence across multiple browser tabs;
+- Random number sequences or per-tick floating-point trajectories identical to those of the original browser version.
 
-这意味着：
+This means:
 
-- 不进行 bit-for-bit、pixel-for-bit 或原版 JS 状态轨迹对拍；
-- 数值和公式有 gameplay 意义的部分仍需保持原版设计，不得以“实现细节”为理由改成另一套平衡；
-- 疑似原版 bug 若会影响产品设计，先归类并记录；实现 Agent 不得自行决定隐藏修改；
-- 服务器应正确处理越权输入和并发，不复制客户端信任缺陷。
+- No bit-for-bit, pixel-for-bit, or original-JavaScript state-trajectory differential comparisons will be performed;
+- Values and formulas that have gameplay significance must still preserve the original design and must not be replaced with a different balance on the grounds that they are "implementation details";
+- Suspected original bugs that would affect product design must first be classified and recorded; implementation Agents must not decide to make silent changes themselves;
+- The server must handle unauthorized inputs and concurrency correctly rather than replicate client-trust flaws.
 
-## 5. 客户端与操作者 — CONFIRMED
+## 5. Clients and Operators — CONFIRMED
 
-- Human、Agent 和其他程序都使用同类 Command/View 交互。
-- 游戏服务器不知道操作者类型；Command 不含 `actor` 身份字段。
-- 不存在当前玩家、Human/Agent 回合或控制权接管流程。
-- 同一局允许多个 Humans、多个 Agents 和多个网页同时发送 Commands。
-- 只观察而不发送 Command 是自然行为，不需要特殊服务器角色。
-- 任何客户端的思考、推理或犹豫都不暂停世界。
-- 相同当前状态和相同 Command 产生相同的规则结果，不因来源不同而变化。
+- Humans, Agents, and other programs all use the same kind of Command/View interaction.
+- The game server does not know the operator type; Commands contain no `actor` identity field.
+- There is no current player, Human/Agent turn, or control handoff process.
+- Multiple Humans, multiple Agents, and multiple web pages may all send Commands to the same game simultaneously.
+- Observing without sending Commands is natural behavior and requires no special server role.
+- Thinking, reasoning, or hesitation by any client does not pause the world.
+- The same current state and the same Command produce the same rule outcome regardless of their source.
 
-## 6. 第一版 Web UI — CONFIRMED
+## 6. First Web UI — CONFIRMED
 
-第一版 UI 是对原版的 **best effort visual clone**：
+The first UI is a **best effort visual clone** of the original:
 
-- 尽量保留极简黑白风格、主要面板、按钮、信息层级和浏览体验；
-- 让熟悉原版的玩家能够自然识别和操作；
-- 不要求 pixel-perfect；
-- 不要求 DOM、CSS、事件绑定或静态资源与官方文件一致；
-- 不以逐像素截图一致作为 merge gate；
-- UI 只显示服务器状态并发送 Commands，不在本地推进或计算权威游戏状态。
+- Preserve the minimalist black-and-white style, main panels, buttons, information hierarchy, and browsing experience as much as possible;
+- Allow players familiar with the original to recognize and operate it naturally;
+- Pixel-perfect fidelity is not required;
+- The DOM, CSS, event bindings, and static assets are not required to match the official files;
+- Pixel-by-pixel screenshot equality is not a merge gate;
+- The UI only displays server state and sends Commands; it does not advance the game locally or compute authoritative game state.
 
-后续可以设计不同 UI、Dashboard、监控和调试视图，但不提前扩大当前范围。
+Different UIs, dashboards, monitoring, and debugging views may be designed later, but the current scope must not be expanded prematurely.
 
-## 7. 最终验收原则 — CONFIRMED
+## 7. Final Acceptance Principles — CONFIRMED
 
-Full clone 只有在下列条件满足后才可宣称完成：
+Full clone may be declared complete only when all of the following conditions are met:
 
-1. 官方功能清单全部被映射到已完成的 Milestones；
-2. 游戏能从原版初始状态推进到原有主要阶段与结局；
-3. 核心资源、策略、progression 和 gameplay 体验保持原版设计；
-4. 所有关键行为有分层的可执行验证；
-5. 整个过程中服务器始终保持唯一权威状态和实时模拟语义。
+1. Every item in the official feature inventory has been mapped to completed Milestones;
+2. The game can progress from the original initial state through the original major stages to the ending;
+3. Core resources, strategies, progression, and gameplay experience preserve the original design;
+4. All critical behavior has layered executable verification;
+5. Throughout the entire process, the server remains the sole authority over state and preserves real-time simulation semantics.

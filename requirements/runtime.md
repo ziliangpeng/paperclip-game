@@ -1,108 +1,108 @@
 # Runtime, Concurrency and Persistence
 
-## 1. 权威状态 — CONFIRMED
+## 1. Authoritative State — CONFIRMED
 
-- 服务器内存中的游戏状态是运行时唯一权威状态。
-- 浏览器和 Agent 只能发送意图，不能提交“计算后的新资源总数”要求服务器信任。
-- 每条 Command 在实际执行时重新校验当前状态，而不是信任按钮是否 disabled。
-- 客户端观察可能过时；过时本身不是系统错误。
-- 不得仅因为观察版本已经过时就一律拒绝在当前状态下仍合法的 Command。
-- 不为了网络并发或多个客户端而回滚全局时间。
+- The in-memory game state on the server is the sole authoritative runtime state.
+- Browsers and Agents may only submit intent; they cannot submit "computed new resource totals" for the server to trust.
+- Every Command is revalidated against the current state when it is actually executed, rather than trusting whether a button is disabled.
+- Client observations may be stale; staleness alone is not a system error.
+- A Command that remains legal under the current state must not be rejected categorically merely because the observed version is stale.
+- Global time must not be rolled back because of network concurrency or multiple clients.
 
-## 2. 实时模拟 — CONFIRMED
+## 2. Real-Time Simulation — CONFIRMED
 
-- 只要游戏服务器正常运行，世界就持续推进。
-- 是否有网页、SSE 连接或 Agent 在线不影响推进。
-- Human 或 Agent 思考时不暂停，不提供 Agent 时间预算。
-- 不存在回合制、“收到 Command 后推进一步”或公开的玩家手动步进接口。
-- 测试可以驱动纯引擎推进 tick，但那不是生产 API 或玩家能力。
-- 服务器崩溃或停机不属于正常在线实时运行；恢复规则见下文。
+- The world advances continuously whenever the game server is running normally.
+- Advancement is unaffected by whether any web page, SSE connection, or Agent is online.
+- The world does not pause while a Human or Agent thinks, and no Agent time budget is provided.
+- There are no turns, no "advance one step after receiving a Command" model, and no public interface for players to step the game manually.
+- Tests may drive tick advancement in the pure engine, but that is not a production API or player capability.
+- A server crash or downtime is not part of normal online real-time operation; recovery rules are described below.
 
-## 3. 并发命令语义 — CONFIRMED
+## 3. Concurrent Command Semantics — CONFIRMED
 
-同一游戏的任意数量客户端可以同时发起网络请求，但状态变化必须有明确顺序。
+Any number of clients may issue network requests to the same game simultaneously, but state changes must have a well-defined order.
 
-必须保证：
+The following must be guaranteed:
 
-- 不丢失更新；
-- 校验和状态应用是原子的；
-- 多个请求不能利用同一份旧状态重复消费同一资源；
-- 两个都合法的 Commands 可以都执行，不因来自不同客户端而互相排斥；
-- 只有一个购买仍有资源时，不允许两笔购买都成功；
-- Command 的首次执行结果反映实际执行时的状态；
-- 当前进程运行期间，同一逻辑 Command 的幂等重试不得重复应用状态变化；崩溃恢复窗口按第 7 节处理；
-- 模拟 tick 和 Commands 不会各自无约束地并发修改同一状态。
+- No lost updates;
+- Validation and state application are atomic;
+- Multiple requests cannot use the same stale state to consume the same resource repeatedly;
+- Two Commands that are both legal may both execute and are not mutually exclusive merely because they come from different clients;
+- When resources are sufficient for only one purchase, two purchases must not both succeed;
+- The first execution result of a Command reflects the state at the time it is actually executed;
+- During the current process lifetime, idempotent retries of the same logical Command must not apply state changes more than once; the crash recovery window is covered by Section 7;
+- Simulation ticks and Commands must not concurrently modify the same state without constraints.
 
-操作可以混乱，但状态更新不能混乱。
+Operations may be chaotic, but state updates must not be.
 
-### 推荐实现 — PROPOSED
+### Recommended Implementation — PROPOSED
 
-- 每个游戏由一个显式 `GameRuntime` 持有 `GameState`，避免模块级可变全局状态；HTTP handlers 不直接修改 GameState。
-- 每个 Runtime 使用一个 command queue 和单 writer，将 Commands 与 ticks 串行化。
-- Command 去重、订阅和持久化在内部使用游戏 ID 作为边界；V1 只需装配 `default`，此项不授权建设多实例 Registry 或管理功能。
-- 第一版只有单进程，不使用分布式锁或跨进程 actor 框架。
+- Each game has an explicit `GameRuntime` that owns its `GameState`, avoiding mutable module-level global state; HTTP handlers do not modify GameState directly.
+- Each Runtime uses one command queue and a single writer to serialize Commands and ticks.
+- Command deduplication, subscriptions, and persistence internally use the game ID as their boundary; V1 only wires up `default`, and this does not authorize building a multi-instance Registry or management features.
+- The first version is single-process and uses neither distributed locks nor a cross-process actor framework.
 
-### `command_id` 重试契约 — PROPOSED
+### `command_id` Retry Contract — PROPOSED
 
-推荐使用客户端生成的 `command_id` 表达逻辑命令身份，实现上述运行期幂等要求；具体结果、冲突和测试语言见 `clients.md`。具体字段及其终态结果绑定是 PROPOSED，不改变上节 CONFIRMED 的状态应用底线。
+A client-generated `command_id` is recommended to express logical Command identity and implement the runtime idempotence requirement above; see `clients.md` for the specific result, conflict, and testing language. The specific fields and their binding to terminal results are PROPOSED and do not change the CONFIRMED state-application baseline in the preceding section.
 
-## 4. 当前实例模型 — CONFIRMED
+## 4. Current Instance Model — CONFIRMED
 
-- 第一版只运行一局游戏，内部 ID 为 `default`。
-- 用户和 Agent 不需要选择实例，外部请求自动映射到 `default`。
-- 打开新页面不会创建或重置游戏。
-- 不提供创建、列举、删除、切换多实例的产品功能。
-- 当前唯一游戏在内部统一由 `game_id = default` 标识。
+- The first version runs only one game, with internal ID `default`.
+- Users and Agents do not need to select an instance; external requests automatically map to `default`.
+- Opening a new page does not create or reset a game.
+- No product functionality is provided to create, list, delete, or switch among multiple instances.
+- The current sole game is uniformly identified internally by `game_id = default`.
 
-### 明确非目标 — CONFIRMED
+### Explicit Non-Goals — CONFIRMED
 
-当前不建设 GameRegistry 多实例管理、大厅、多个 simulation loops 的管理 UI 或分布式实例调度。
+The current scope does not include GameRegistry multi-instance management, a lobby, management UI for multiple simulation loops, or distributed instance scheduling.
 
-## 5. 技术栈 — CONFIRMED
+## 5. Technology Stack — CONFIRMED
 
 - Rust stable
 - Axum
 - Tokio
 - Serde
 - SQLite
-- SSE 用于服务器到客户端的状态流
-- 原生 HTML、CSS、JavaScript，不引入第一版前端构建链
+- SSE for server-to-client state streaming
+- Native HTML, CSS, and JavaScript, with no frontend build chain in the first version
 
-Python 可用于 Agent 客户端、研究或分析，但不再建设第二个 Python 权威游戏服务器。
+Python may be used for Agent clients, research, or analysis, but a second authoritative game server in Python will not be built.
 
-## 6. 在线持久化 — CONFIRMED
+## 6. Online Persistence — CONFIRMED
 
-- 以定期完整快照持久化，不追求零数据丢失。
-- 初始默认保存间隔为 **30 秒**；这是本项目基础设施参数，不是原版游戏数值。
-- 快照必须在逻辑上是一致状态，不能保存到一半而留下彼此不匹配的资源值。
-- 快照必须包含继续模拟需要的全部状态，包括内部计时器、累积器、随机状态和 progression，而不只是 UI 数字。
-- SQLite 写入需使用事务保证快照原子性。
-- 正常关闭时可以 best effort 再保存一次，但不把它当作崩溃保证。
-- 运行期间可以接受最后约一个保存间隔的进度丢失。
+- Persist periodic full snapshots; zero data loss is not a goal.
+- The initial default save interval is **30 seconds**; this is an infrastructure parameter for this project, not a value from the original game.
+- A snapshot must represent a logically consistent state and must not be saved partially in a way that leaves resource values inconsistent with one another.
+- A snapshot must contain all state needed to continue simulation, including internal timers, accumulators, random state, and progression, not merely UI numbers.
+- SQLite writes must use transactions to guarantee snapshot atomicity.
+- A best effort additional save may be performed during normal shutdown, but this is not a crash guarantee.
+- Loss of approximately the last save interval's worth of progress is acceptable during operation.
 
-### 保存调度实现 — PROPOSED
+### Save Scheduling Implementation — PROPOSED
 
-保存不能通过长期占用游戏 writer 或执行不受控阻塞 I/O 来破坏在线模拟。具体快照捕获与异步写入方式由对应工程 Issue 确定并用测试验证。
+Saving must not disrupt online simulation by holding the game writer for an extended period or performing uncontrolled blocking I/O. The specific snapshot capture and asynchronous write mechanism will be determined in the corresponding engineering Issue and verified with tests.
 
-## 7. 崩溃与恢复 — CONFIRMED
+## 7. Crash and Recovery — CONFIRMED
 
-- 启动时加载最后一次成功提交的 `default` 快照；首次启动则建立初始游戏。
-- 从快照恢复后继续实时运行。
-- 不补算停机期间的生产、销售或其他进度。
-- 恢复允许回滚尚未保存的 Commands 和状态。
-- 跨崩溃不承诺去重记录一定保留；客户端重连后必须重新读取服务器状态，不能假定崩溃前的提交仍有效。
+- On startup, load the last successfully committed `default` snapshot; on first startup, create the initial game.
+- Resume real-time operation after restoring from a snapshot.
+- Do not backfill production, sales, or other progress for the downtime.
+- Recovery may roll back Commands and state that had not yet been saved.
+- Preservation of deduplication records across crashes is not guaranteed; after reconnecting, clients must reread server state and must not assume that pre-crash commits remain valid.
 
-上述 CONFIRMED 运行期幂等不包括未持久化窗口的崩溃恢复，不承诺跨崩溃 exactly-once。若采用 `command_id`，其结果绑定也不保证跨越该窗口保留。
+The CONFIRMED runtime idempotence above does not include crash recovery within the unpersisted window and does not guarantee exactly-once behavior across crashes. If `command_id` is adopted, its result binding is likewise not guaranteed to survive that window.
 
-### Revision 与恢复 — PROPOSED
+### Revision and Recovery — PROPOSED
 
-使用递增 `revision` 标识同一次服务器运行中的状态顺序，并为每次进程运行生成 `run_id`：
+Use an increasing `revision` to identify state order within a single server run, and generate a `run_id` for each process run:
 
-- 同一 `run_id` 内，客户端不得让迟到的低 revision 覆盖高 revision；
-- `run_id` 改变时，客户端先接受恢复后的完整快照，再重新比较 revision。
+- Within the same `run_id`, clients must not allow a late lower revision to overwrite a higher revision;
+- When `run_id` changes, clients must first accept the recovered full snapshot before comparing revisions again.
 
-具体字段和编码由 API Issue 固化。
+The specific fields and encoding will be fixed by the API Issue.
 
-## 8. 后续实施细节 — PROPOSED / OPEN
+## 8. Subsequent Implementation Details — PROPOSED / OPEN
 
-具体 tick 常量、调度落后处理、数值表示、状态序列化 schema 和 SQLite 文件布局在对应设计 Issue 中明确。它们不得以模糊产品语义为理由自行改变“在线持续推进、崩溃不 backfill”的 CONFIRMED 行为。
+Specific tick constants, scheduling lag handling, numeric representation, state serialization schema, and SQLite file layout will be defined in the corresponding design Issues. They must not use vague product semantics as a reason to change the CONFIRMED behavior of "continuous online advancement, no backfill after a crash".
