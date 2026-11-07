@@ -6,7 +6,7 @@ This document is the source-grounded inventory of the progression spine, resourc
 
 The evidence is the official source snapshot identified by issue #3. Locators such as `main.js:3455-3549` name files and line ranges in that snapshot; public source URLs and snapshot hashes are maintained with the reference snapshot rather than repeated here. Official JavaScript identifiers are factual locators, not required names for a new implementation.
 
-Related inventories are [actions, controls, resources, and UI](gameplay-actions.md), [the complete project catalog](gameplay-projects.md), and [combat, probes, space, endings, and resets](gameplay-combat-endgame.md). This document owns the high-level progression capabilities listed in `features-systems.json`; detailed space/combat/endgame IDs cross-reference their canonical progression owner instead of creating a second copy of the same feature.
+Related inventories are [actions, controls, resources, and UI](gameplay-actions.md), [the complete project catalog](gameplay-projects.md), and [combat, probes, space, endings, and resets](gameplay-combat-endgame.md). This document owns the high-level progression capabilities listed in [`data/gameplay-inventory.json`](data/gameplay-inventory.json); detailed space/combat/endgame IDs cross-reference their canonical progression owner instead of creating a second copy of the same feature.
 
 ### Requirement conventions
 
@@ -74,7 +74,7 @@ Every successful clip conversion adds the amount actually produced to three ledg
 
 A fresh run starts with zero lifetime, unsold, and unused clips; zero funds; 1,000 wire; clip price $0.25; wire quote $20; and marketing level 1. Computing starts hidden with Trust 2, one processor, one memory, and a 1,000-op cap. Earth has `6e27` available matter and the universe has `3e55` total matter.
 
-Making a clip consumes one wire, or the remaining fractional amount if less than one is available, and adds the amount actually produced to all three clip ledgers. Wire is required for every manual or automatic clip. Selling drains only unsold inventory; construction drains only unused capital; neither changes lifetime clips. Total clips, inventory, wire, funds, price, and demand are essential feedback. Large-number spelling is presentation, not an additional economic model.
+Ordinary conversion occurs only when available Wire covers the requested production amount, consumes that amount, and adds the same produced amount to all three clip ledgers. Ordinary manual `clipClick(1)` therefore requires at least one Wire and converts exactly one Wire into one clip in each ledger. Fractional producer rates or resource residue do not create a general below-one manual conversion; the only authorized positive-sub-one exception belongs to the final Reject stage owned by `PROG-REJECT-END`. Selling drains only unsold inventory; construction drains only unused capital; neither changes lifetime clips. Total clips, inventory, wire, funds, price, and demand are essential feedback. Large-number spelling is presentation, not an additional economic model.
 
 `ACT-CLIP-MANUAL` and the actions inventory own the button contract. This feature owns the conversion and ledger consequences.
 
@@ -307,11 +307,11 @@ The implementation must **not** use the old `(2*S+B-D)/D` expression and must no
 
 ### PROG-SWARM-GIFTS — Swarm Computing, Work/Think, and computational gifts
 
-**Sources:** `project126`, `projects.js:1683-1705`; `main.js:2644-2830`, `main.js:3385-3411`; `index2.html:409-439`.
+**Sources:** `project126`, `projects.js:1683-1705`; `main.js:2644-2830,3385-3411`, especially `main.js:2707-2723,2762-2765`; `globals.js:121-126`; `index2.html:409-439`.
 
 Swarm Computing requires at least 200 combined terrestrial drones and costs 36,000 Yomi. The 0–200 slider trades Work for Think. Work boosts harvesting and processing as in `PROG-MATTER-PIPELINE`; Think drives deterministic gift accumulation. Let `Think = sliderPos/100`; next gift size is at least one and otherwise rounds `log10(drones) * Think`, while continuous gift-bit generation uses `ln(drones) * Think`.
 
-A gift is one unit of additional computational capacity. In the humanless stage, adding a processor or memory consumes one gift, replacing normal Trust-funded expansion after release. Gifts are not ops and do not buy projects directly. Normal gift-bit accumulation requires Active status, not Sleeping, Bored, Disorganized, Lonely/no-drone, or space NO RESPONSE states. `SYS-SWARM-HEALTH-GATES` specifies that only zero power performance causes power-based Sleeping and that partial `powMod` does not scale gifts. Drone/gift counts, next-gift countdown, slider position, and status are required feedback.
+A gift is one unit of additional computational capacity. In the humanless stage, adding a processor or memory consumes one gift, replacing normal Trust-funded expansion after release. Gifts are not ops and do not buy projects directly. Each gift award requires **125,000 accumulated gift bits** (`giftPeriod`). During Active status the countdown is `(giftPeriod - giftBits) / giftBitGenerationRate`; when it reaches the award condition, grant the gift and reset `giftBits` to **0**, without carrying excess generated bits into the next period. Normal gift-bit accumulation requires Active status, not Sleeping, Bored, Disorganized, Lonely/no-drone, or space NO RESPONSE states. The active gift-bit/reset path is authoritative, not the commented "OLD WAY" elapsed-time accumulator. `SYS-SWARM-HEALTH-GATES` specifies that only zero power performance causes power-based Sleeping and that partial `powMod` does not scale gifts. Drone/gift counts, next-gift countdown, slider position, and status are required feedback.
 
 ### PROG-SWARM-HEALTH — Boredom, Disorganization, and swarm recovery
 

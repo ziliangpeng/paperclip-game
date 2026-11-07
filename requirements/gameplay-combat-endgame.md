@@ -6,7 +6,7 @@ This document preserves all 68 detailed coverage IDs from the combat/probe/endga
 
 Evidence locators refer to the official issue #3 source snapshot. Public official URLs and source hashes belong to that snapshot; no local capture path is part of this repository reference. JavaScript names are source locators, not required implementation names.
 
-Canonical high-level progression owners are in [gameplay progression](gameplay-progression.md). Direct HTML commands are in [actions and controls](gameplay-actions.md); individual project prices/offers are in the [project catalog](gameplay-projects.md). An ID below may provide exact detail for one of those canonical capabilities without becoming a second feature in `features-systems.json`. Independent simulation and state-transition capabilities are included once in the machine fragment.
+Canonical high-level progression owners are in [gameplay progression](gameplay-progression.md). Direct HTML commands are in [actions and controls](gameplay-actions.md); individual project prices/offers are in the [project catalog](gameplay-projects.md). An ID below may provide exact detail for one of those canonical capabilities without becoming a second feature in [`data/gameplay-inventory.json`](data/gameplay-inventory.json). Independent simulation and state-transition capabilities are included once in the machine index.
 
 ### Conventions and fidelity boundary
 

@@ -18,9 +18,61 @@ from urllib.parse import urlparse
 
 
 ID_PATTERN = re.compile(r"^[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)+$")
+REQUIRED_SOURCE_FILENAMES = ("index2.html", "globals.js", "combat.js", "projects.js", "main.js")
+PROJECT_COVERAGE_IDS = tuple(f"PRJ-{position:03d}" for position in range(1, 97))
 PROJECT_PATTERN = re.compile(r"\bvar\s+(project\w+)\s*=\s*\{")
 PROJECT_PUSH_PATTERN = re.compile(r"projects\.push\((project\w+)\)")
 FUNCTION_PATTERN = re.compile(r"([A-Za-z_$][\w$]*)\((.*)\)")
+
+
+def mask_javascript_non_code(source: str) -> str:
+    """Mask comments and quoted content for structural matching, without executing JavaScript."""
+    result = list(source)
+    quote: str | None = None
+    index = 0
+    while index < len(source):
+        char = source[index]
+        next_char = source[index + 1] if index + 1 < len(source) else ""
+        if quote is not None:
+            if char not in "\r\n":
+                result[index] = " "
+            if char == "\\":
+                if index + 1 < len(source):
+                    if next_char not in "\r\n":
+                        result[index + 1] = " "
+                    index += 2
+                else:
+                    index += 1
+                continue
+            if char == quote:
+                quote = None
+            index += 1
+            continue
+        if char in "'\"`":
+            quote = char
+            result[index] = " "
+            index += 1
+            continue
+        if char == "/" and next_char in ("/", "*"):
+            line_comment = next_char == "/"
+            result[index] = " "
+            result[index + 1] = " "
+            index += 2
+            while index < len(source):
+                char = source[index]
+                next_char = source[index + 1] if index + 1 < len(source) else ""
+                if line_comment and char in "\r\n":
+                    break
+                if char not in "\r\n":
+                    result[index] = " "
+                if not line_comment and char == "*" and next_char == "/":
+                    result[index + 1] = " "
+                    index += 2
+                    break
+                index += 1
+            continue
+        index += 1
+    return "".join(result)
 
 
 class InlineHandlerParser(HTMLParser):
@@ -129,13 +181,23 @@ def main() -> int:
             errors.append(f"{identifier} is absent from {document}")
         if not isinstance(row.get("name"), str) or not row["name"].strip():
             errors.append(f"{identifier} has no human-readable name")
-        if row in exclusions and not isinstance(row.get("reason"), str):
-            errors.append(f"Exclusion {identifier} has no reason")
+        if row in exclusions and (
+            not isinstance(row.get("reason"), str) or not row["reason"].strip()
+        ):
+            errors.append(f"Exclusion {identifier} has no nonblank reason")
 
     snapshot = data.get("reference_snapshot", {})
     files = snapshot.get("files", [])
-    if len(files) != 5:
-        errors.append("The reference snapshot must identify index2.html and four scripts")
+    file_names = [item.get("name") for item in files]
+    if (
+        len(files) != len(REQUIRED_SOURCE_FILENAMES)
+        or set(file_names) != set(REQUIRED_SOURCE_FILENAMES)
+        or len(file_names) != len(set(file_names))
+    ):
+        errors.append(
+            "The reference snapshot must contain exactly these five unique files: "
+            + ", ".join(REQUIRED_SOURCE_FILENAMES)
+        )
     for item in files:
         if not re.fullmatch(r"[0-9a-f]{64}", item.get("sha256", "")):
             errors.append(f"Invalid reference hash for {item.get('name')!r}")
@@ -155,6 +217,8 @@ def main() -> int:
     for row in project_bindings:
         if row.get("coverage_id") in exclusion_index:
             errors.append(f"Project {row.get('official_id')} cannot be excluded from behavioral coverage")
+    if [row.get("coverage_id") for row in project_bindings] != list(PROJECT_COVERAGE_IDS):
+        errors.append("Project coverage must be exactly PRJ-001 through PRJ-096 in official array order")
 
     coverage_aliases = data.get("coverage_aliases", [])
     alias_index = unique_index("coverage_aliases", coverage_aliases)
@@ -190,13 +254,15 @@ def main() -> int:
                 continue
             text = document_path.read_text(encoding="utf-8")
             document_cache[document_path] = text
-            if alias_id in text:
+            if re.search(rf"(?<![A-Za-z0-9-]){re.escape(alias_id)}(?![A-Za-z0-9-])", text):
                 found_in_document = True
         if documents and not found_in_document:
             errors.append(f"Alias {alias_id} is absent from its trace documents")
 
     if args.source_dir:
         for item in files:
+            if item.get("name") not in REQUIRED_SOURCE_FILENAMES:
+                continue
             candidate = args.source_dir / item["name"]
             if not candidate.is_file():
                 errors.append(f"Missing source snapshot file: {item['name']}")
@@ -207,7 +273,7 @@ def main() -> int:
         project_path = args.source_dir / "projects.js"
         html_path = args.source_dir / "index2.html"
         if project_path.is_file():
-            source = project_path.read_text(encoding="utf-8")
+            source = mask_javascript_non_code(project_path.read_text(encoding="utf-8"))
             declarations = PROJECT_PATTERN.findall(source)
             pushes = PROJECT_PUSH_PATTERN.findall(source)
             expected = [row.get("official_id") for row in project_bindings]
