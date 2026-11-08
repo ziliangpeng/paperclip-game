@@ -1,10 +1,14 @@
 //! Typed persistence health without host paths, SQL text, payloads or raw I/O errors.
 
+use crate::game::clock::UPDATE_QUANTUM_NANOS;
+use serde::{Deserialize, Serialize};
 use std::sync::{Mutex, MutexGuard};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum PersistencePhase {
+    Unconfigured,
     Ready,
     Saving,
     Retrying,
@@ -12,7 +16,8 @@ pub enum PersistencePhase {
     Stopped,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum PersistenceFailure {
     DatabaseBusy,
     OpenFailed,
@@ -59,7 +64,8 @@ struct HealthState {
     current_attempt: u32,
     consecutive_failures: u32,
     last_failure: Option<PersistenceFailure>,
-    last_commit_time: Option<Instant>,
+    last_commit_update: Option<u64>,
+    latest_observed_update: Option<u64>,
     snapshot_interval: Duration,
 }
 
@@ -75,6 +81,15 @@ impl PersistenceHealth {
         committed_revision: u64,
         committed_sequence: u64,
     ) -> Self {
+        Self::new_at_update(snapshot_interval, committed_revision, committed_sequence, 0)
+    }
+
+    pub fn new_at_update(
+        snapshot_interval: Duration,
+        committed_revision: u64,
+        committed_sequence: u64,
+        initial_update_count: u64,
+    ) -> Self {
         Self {
             inner: std::sync::Arc::new(Mutex::new(HealthState {
                 live: true,
@@ -89,7 +104,32 @@ impl PersistenceHealth {
                 current_attempt: 0,
                 consecutive_failures: 0,
                 last_failure: None,
-                last_commit_time: Some(Instant::now()),
+                last_commit_update: Some(initial_update_count),
+                latest_observed_update: Some(initial_update_count),
+                snapshot_interval,
+            })),
+        }
+    }
+
+    /// Explicit state for pure transport fixtures that have no configured store.
+    /// Production startup does not use this constructor.
+    pub fn unconfigured_for_testing(snapshot_interval: Duration) -> Self {
+        Self {
+            inner: std::sync::Arc::new(Mutex::new(HealthState {
+                live: true,
+                ready: false,
+                phase: PersistencePhase::Unconfigured,
+                last_committed_revision: None,
+                last_committed_sequence: None,
+                latest_captured_revision: None,
+                latest_captured_sequence: None,
+                write_in_progress: false,
+                pending_snapshot: false,
+                current_attempt: 0,
+                consecutive_failures: 0,
+                last_failure: None,
+                last_commit_update: None,
+                latest_observed_update: None,
                 snapshot_interval,
             })),
         }
@@ -97,9 +137,20 @@ impl PersistenceHealth {
 
     pub fn snapshot(&self) -> HealthSnapshot {
         let state = self.lock();
-        let approximate_unsaved_elapsed = state.last_commit_time.map(|then| then.elapsed());
-        let snapshot_overdue = approximate_unsaved_elapsed
-            .is_some_and(|elapsed| elapsed > state.snapshot_interval.saturating_mul(2));
+        let unsaved_updates = state
+            .latest_observed_update
+            .zip(state.last_commit_update)
+            .map(|(observed, committed)| observed.saturating_sub(committed));
+        let approximate_unsaved_elapsed = unsaved_updates.map(logical_duration);
+        let update_tolerance = u64::try_from(
+            (state.snapshot_interval.as_nanos() / UPDATE_QUANTUM_NANOS)
+                .saturating_mul(2)
+                .min(u128::from(u64::MAX)),
+        )
+        .unwrap_or(u64::MAX);
+        // Overdue follows only the real runtime's published logical updates.
+        // Downtime, host suspension and wall-clock jumps create no game progress.
+        let snapshot_overdue = unsaved_updates.is_some_and(|updates| updates > update_tolerance);
         HealthSnapshot {
             live: state.live,
             ready: state.ready && !snapshot_overdue,
@@ -123,10 +174,24 @@ impl PersistenceHealth {
         }
     }
 
-    pub(crate) fn captured(&self, revision: u64, sequence: u64) {
+    pub(crate) fn observe(&self, update_count: u64) {
+        let mut state = self.lock();
+        state.latest_observed_update = Some(
+            state
+                .latest_observed_update
+                .map_or(update_count, |previous| previous.max(update_count)),
+        );
+    }
+
+    pub(crate) fn captured(&self, revision: u64, sequence: u64, update_count: u64) {
         let mut state = self.lock();
         state.latest_captured_revision = Some(revision);
         state.latest_captured_sequence = Some(sequence);
+        state.latest_observed_update = Some(
+            state
+                .latest_observed_update
+                .map_or(update_count, |previous| previous.max(update_count)),
+        );
         state.pending_snapshot = true;
     }
 
@@ -143,7 +208,11 @@ impl PersistenceHealth {
         } else {
             PersistencePhase::Saving
         };
-        state.ready = !retrying;
+        if retrying {
+            state.ready = false;
+        }
+        // A fresh attempt after a degraded save stays unready until a real
+        // commit clears the previous failure; healthy in-flight saves stay ready.
     }
 
     pub(crate) fn write_failed(
@@ -165,11 +234,16 @@ impl PersistenceHealth {
         };
     }
 
-    pub(crate) fn committed(&self, revision: u64, sequence: u64) {
+    pub(crate) fn committed(&self, revision: u64, sequence: u64, update_count: u64) {
         let mut state = self.lock();
         state.last_committed_revision = Some(revision);
         state.last_committed_sequence = Some(sequence);
-        state.last_commit_time = Some(Instant::now());
+        state.last_commit_update = Some(update_count);
+        state.latest_observed_update = Some(
+            state
+                .latest_observed_update
+                .map_or(update_count, |previous| previous.max(update_count)),
+        );
         state.write_in_progress = false;
         state.current_attempt = 0;
         state.consecutive_failures = 0;
@@ -193,14 +267,22 @@ impl PersistenceHealth {
     }
 }
 
+fn logical_duration(updates: u64) -> Duration {
+    let nanos = u128::from(updates) * UPDATE_QUANTUM_NANOS;
+    Duration::new(
+        u64::try_from(nanos / 1_000_000_000).unwrap_or(u64::MAX),
+        u32::try_from(nanos % 1_000_000_000).unwrap_or(0),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn health_projection_tracks_pending_retry_overdue_recovery_and_stop() {
-        let health = PersistenceHealth::new(Duration::from_secs(30), 4, 7);
-        health.captured(9, 8);
+    fn health_tracks_pending_retry_logical_overdue_recovery_and_stop() {
+        let health = PersistenceHealth::new_at_update(Duration::from_secs(30), 4, 7, 100);
+        health.captured(9, 8, 150);
         assert!(health.snapshot().pending_snapshot);
         health.pending_taken();
         health.write_started(1, false);
@@ -217,21 +299,34 @@ mod tests {
         assert_eq!(failed.current_attempt, 0);
         assert!(!failed.write_in_progress);
         assert!(failed.live);
-        health.committed(9, 8);
+        health.write_started(1, false);
+        assert!(!health.snapshot().ready, "recovery requires a real commit");
+        health.committed(9, 8, 150);
         assert!(health.snapshot().ready);
 
-        health.lock().last_commit_time = Instant::now().checked_sub(Duration::from_secs(90));
+        health.observe(6_150);
+        assert!(!health.snapshot().snapshot_overdue);
+        health.observe(6_151);
         let overdue = health.snapshot();
         assert!(overdue.snapshot_overdue);
         assert!(!overdue.ready);
         assert_eq!(overdue.phase, PersistencePhase::Degraded);
-        assert!(overdue.approximate_unsaved_elapsed.is_some_and(|elapsed| {
-            (Duration::from_secs(90)..Duration::from_secs(91)).contains(&elapsed)
-        }));
-        health.committed(10, 9);
+        assert_eq!(
+            overdue.approximate_unsaved_elapsed,
+            Some(Duration::from_millis(60_010))
+        );
+        health.committed(10, 9, 6_151);
         assert!(!health.snapshot().snapshot_overdue);
         health.stopped();
         assert!(!health.snapshot().live);
         assert_eq!(health.snapshot().last_committed_revision, Some(10));
+
+        let unconfigured = PersistenceHealth::unconfigured_for_testing(Duration::from_secs(30));
+        let unavailable = unconfigured.snapshot();
+        assert!(!unavailable.ready);
+        assert_eq!(unavailable.phase, PersistencePhase::Unconfigured);
+        assert_eq!(unavailable.last_committed_revision, None);
+        assert_eq!(unavailable.latest_captured_revision, None);
+        assert!(!unavailable.snapshot_overdue);
     }
 }

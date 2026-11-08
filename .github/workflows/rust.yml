@@ -59,6 +59,9 @@ jobs:
       - name: Check real API process contracts
         run: python3 -B scripts/check_api_process.py target/debug/paperclip-game --repo .
 
+      - name: Check real persistence process contracts
+        run: python3 -B scripts/check_persistence_process.py target/debug/paperclip-game
+
       - name: Validate public repository hygiene
         run: python3 -B scripts/check_public_hygiene.py
 

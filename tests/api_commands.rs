@@ -1,4 +1,5 @@
 use paperclip_game::api::{GameView, MAX_COMMAND_BODY_BYTES, MAX_COMMAND_ID_BYTES, serve};
+use paperclip_game::health::PersistenceHealth;
 use paperclip_game::runtime::GameRuntime;
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
@@ -38,7 +39,8 @@ impl TestServer {
                 address_tx
                     .send(address)
                     .map_err(|_| "test readiness receiver stopped".to_owned())?;
-                serve(listener, game, async {
+                let health = PersistenceHealth::unconfigured_for_testing(Duration::from_secs(30));
+                serve(listener, game, health, async {
                     let _ = shutdown_rx.await;
                 })
                 .await

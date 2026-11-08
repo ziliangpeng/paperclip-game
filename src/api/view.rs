@@ -3,6 +3,7 @@
 use crate::game::amount::{Amount, IntegralAmount, NonNegativeAmount, SafeU64};
 use crate::game::clock::ClockState;
 use crate::game::state::ProState;
+use crate::health::{HealthSnapshot, PersistenceFailure, PersistencePhase};
 use crate::runtime::RuntimeView;
 use serde::{Deserialize, Serialize};
 use std::error::Error;
@@ -18,6 +19,24 @@ pub struct GameView {
     pub revision: SafeU64,
     pub clock: ClockView,
     pub game: ProductionView,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct HealthView {
+    pub live: bool,
+    pub ready: bool,
+    pub phase: PersistencePhase,
+    pub last_committed_revision: Option<SafeU64>,
+    pub last_committed_sequence: Option<SafeU64>,
+    pub latest_captured_revision: Option<SafeU64>,
+    pub latest_captured_sequence: Option<SafeU64>,
+    pub pending_snapshot_count: u8,
+    pub write_in_progress: bool,
+    pub current_attempt: u32,
+    pub consecutive_failures: u32,
+    pub snapshot_overdue: bool,
+    pub last_failure_code: Option<PersistenceFailure>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -74,6 +93,36 @@ impl GameView {
             revision: SafeU64::new(snapshot.revision).map_err(|_| ViewLimitError)?,
             clock: ClockView::try_from(&snapshot.game.clock)?,
             game: ProductionView::from(&snapshot.game.pro),
+        })
+    }
+}
+
+impl HealthView {
+    fn checked_counter(value: Option<u64>) -> Result<Option<SafeU64>, ViewLimitError> {
+        value
+            .map(|value| SafeU64::new(value).map_err(|_| ViewLimitError))
+            .transpose()
+    }
+}
+
+impl TryFrom<HealthSnapshot> for HealthView {
+    type Error = ViewLimitError;
+
+    fn try_from(health: HealthSnapshot) -> Result<Self, Self::Error> {
+        Ok(Self {
+            live: health.live,
+            ready: health.ready,
+            phase: health.phase,
+            last_committed_revision: Self::checked_counter(health.last_committed_revision)?,
+            last_committed_sequence: Self::checked_counter(health.last_committed_sequence)?,
+            latest_captured_revision: Self::checked_counter(health.latest_captured_revision)?,
+            latest_captured_sequence: Self::checked_counter(health.latest_captured_sequence)?,
+            pending_snapshot_count: u8::from(health.pending_snapshot),
+            write_in_progress: health.write_in_progress,
+            current_attempt: health.current_attempt,
+            consecutive_failures: health.consecutive_failures,
+            snapshot_overdue: health.snapshot_overdue,
+            last_failure_code: health.last_failure,
         })
     }
 }

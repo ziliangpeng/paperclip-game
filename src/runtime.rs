@@ -230,6 +230,15 @@ impl GameRuntime {
         Self::start_with_clock(RealClock::new(), state)
     }
 
+    /// Start a new process identity over a fully validated logical snapshot.
+    /// Process-local retry records, lag debt and wall-clock baselines stay fresh.
+    pub fn start_from_snapshot(state: GameState, revision: u64) -> Result<Self, RuntimeStartError> {
+        if revision > MAX_SAFE_JSON_INTEGER {
+            return Err(RuntimeStartError::RevisionOutOfRange);
+        }
+        Self::start_with_clock_at_revision(RealClock::new(), state, revision)
+    }
+
     pub fn handle(&self) -> RuntimeHandle {
         self.handle.clone()
     }
@@ -238,13 +247,27 @@ impl GameRuntime {
     where
         C: MonotonicClock,
     {
+        Self::start_with_clock_at_revision(clock, state, 0)
+    }
+
+    fn start_with_clock_at_revision<C>(
+        clock: C,
+        state: GameState,
+        revision: u64,
+    ) -> Result<Self, RuntimeStartError>
+    where
+        C: MonotonicClock,
+    {
+        if revision > MAX_SAFE_JSON_INTEGER {
+            return Err(RuntimeStartError::RevisionOutOfRange);
+        }
         #[cfg(not(test))]
         {
-            Self::start_with_gate(clock, state, ())
+            Self::start_with_gate(clock, state, revision, ())
         }
         #[cfg(test)]
         {
-            Self::start_with_gate(clock, state, None)
+            Self::start_with_gate(clock, state, revision, None)
         }
     }
 
@@ -257,12 +280,13 @@ impl GameRuntime {
     where
         C: MonotonicClock,
     {
-        Self::start_with_gate(clock, state, Some(gate))
+        Self::start_with_gate(clock, state, 0, Some(gate))
     }
 
     fn start_with_gate<C>(
         clock: C,
         state: GameState,
+        revision: u64,
         test_gate: TestGate,
     ) -> Result<Self, RuntimeStartError>
     where
@@ -271,7 +295,7 @@ impl GameRuntime {
         let runtime =
             tokio::runtime::Handle::try_current().map_err(|_| RuntimeStartError::NoRuntime)?;
         let run_id = fresh_run_id().map_err(RuntimeStartError::Entropy)?;
-        let writer = Writer::new(clock, state, run_id, test_gate);
+        let writer = Writer::new(clock, state, run_id, revision, test_gate);
         let (sender, receiver) = mpsc::channel(COMMAND_QUEUE_CAPACITY);
         let initial = writer.view();
         let (view_sender, views) = watch::channel(initial);
@@ -322,6 +346,7 @@ impl Drop for GameRuntime {
 #[derive(Debug)]
 pub enum RuntimeStartError {
     NoRuntime,
+    RevisionOutOfRange,
     Entropy(getrandom::Error),
 }
 
@@ -329,6 +354,9 @@ impl fmt::Display for RuntimeStartError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NoRuntime => formatter.write_str("GameRuntime must start inside a Tokio runtime"),
+            Self::RevisionOutOfRange => {
+                formatter.write_str("restored revision exceeds the safe JSON range")
+            }
             Self::Entropy(_) => formatter.write_str("operating-system entropy is unavailable"),
         }
     }
@@ -428,14 +456,20 @@ struct Writer<C> {
 }
 
 impl<C: MonotonicClock> Writer<C> {
-    fn new(clock: C, state: GameState, run_id: String, _test_gate: TestGate) -> Self {
+    fn new(
+        clock: C,
+        state: GameState,
+        run_id: String,
+        revision: u64,
+        _test_gate: TestGate,
+    ) -> Self {
         let last_observation = clock.now();
         Self {
             clock,
             #[cfg(test)]
             test_gate: _test_gate,
             state,
-            revision: 0,
+            revision,
             run_id,
             retries: HashMap::new(),
             status: ProcessStatus::default(),
@@ -738,6 +772,190 @@ mod tests {
         })
         .await
         .expect("bounded fake-clock progress")
+    }
+
+    struct RuntimeDatabase(std::path::PathBuf);
+
+    impl RuntimeDatabase {
+        fn new(label: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "paperclip-game-runtime-persistence-{label}-{}.sqlite3",
+                std::process::id()
+            ));
+            let fixture = Self(path);
+            fixture.remove_files();
+            fixture
+        }
+
+        fn remove_files(&self) {
+            for suffix in ["", "-journal", "-shm", "-wal"] {
+                let _ = std::fs::remove_file(format!("{}{suffix}", self.0.display()));
+            }
+        }
+    }
+
+    impl Drop for RuntimeDatabase {
+        fn drop(&mut self) {
+            self.remove_files();
+        }
+    }
+
+    fn persistent_runtime(
+        label: &str,
+    ) -> (
+        GameRuntime,
+        RuntimeHandle,
+        crate::persistence::RuntimePersistence,
+        Arc<FakeClock>,
+        RuntimeDatabase,
+    ) {
+        use crate::persistence::{RuntimePersistence, SnapshotStore};
+        use crate::snapshot::SnapshotV1;
+
+        let database = RuntimeDatabase::new(label);
+        let mut state = GameState::fresh(GameRng::from_test_seed([23_u8; 32]));
+        state.pro.wire = Amount::parse("100").unwrap().nonnegative().unwrap();
+        let initial = SnapshotV1::capture(&state, 0).unwrap();
+        let (store, stored) = SnapshotStore::open_or_initialize(&database.0, &initial).unwrap();
+        let clock = Arc::new(FakeClock::new());
+        let runtime = GameRuntime::start_with_clock_at_revision(clock.clone(), state, 0).unwrap();
+        let handle = runtime.handle();
+        let persistence =
+            RuntimePersistence::start(&handle, store, 0, stored.capture_sequence).unwrap();
+        (runtime, handle, persistence, clock, database)
+    }
+
+    async fn wait_for_health(
+        persistence: &crate::persistence::RuntimePersistence,
+        predicate: impl Fn(&crate::health::HealthSnapshot) -> bool,
+    ) -> crate::health::HealthSnapshot {
+        timeout(Duration::from_secs(3), async {
+            loop {
+                let health = persistence.health().snapshot();
+                if predicate(&health) {
+                    return health;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "bounded persistence health transition: {:?}",
+                persistence.health().snapshot()
+            )
+        })
+    }
+
+    fn restore_database(path: &std::path::Path) -> (u64, u64, GameState) {
+        use crate::persistence::SnapshotStore;
+        use crate::snapshot::SnapshotV1;
+
+        let candidate = GameState::fresh(GameRng::from_test_seed([24_u8; 32]));
+        let candidate = SnapshotV1::capture(&candidate, 0).unwrap();
+        let (_store, stored) = SnapshotStore::open_or_initialize(path, &candidate).unwrap();
+        let restored = stored.snapshot.restore().unwrap();
+        (restored.revision, stored.capture_sequence, restored.state)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn persistence_publisher_observes_29999_and_30000_millisecond_boundary() {
+        use crate::health::PersistencePhase;
+
+        let (runtime, handle, persistence, clock, database) = persistent_runtime("cadence");
+        clock.advance(Duration::from_millis(29_999));
+        let before = wait_for(&handle, |view| view.game.clock.update_count() == 2_999).await;
+        assert_eq!(before.revision, 2_999);
+        let no_early_commit = timeout(Duration::from_millis(25), async {
+            loop {
+                if persistence.health().snapshot().last_committed_sequence > Some(0) {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        assert!(no_early_commit.is_err(), "no snapshot before 30 seconds");
+
+        clock.advance(Duration::from_millis(1));
+        let saved = wait_for_health(&persistence, |health| {
+            health.last_committed_revision == Some(3_000)
+        })
+        .await;
+        assert_eq!(saved.last_committed_sequence, Some(1));
+        assert_eq!(saved.latest_captured_revision, Some(3_000));
+        assert_eq!(saved.phase, PersistencePhase::Ready);
+
+        let final_view = handle.view();
+        runtime.shutdown().await.unwrap();
+        let stopped = persistence.shutdown(final_view).await.unwrap();
+        assert_eq!(stopped.phase, PersistencePhase::Stopped);
+        assert_eq!(stopped.last_committed_revision, Some(3_000));
+        let (revision, sequence, restored) = restore_database(&database.0);
+        assert_eq!(revision, 3_000);
+        assert_eq!(
+            sequence, 2,
+            "normal shutdown saves the final view once more"
+        );
+        assert_eq!(restored.clock.update_count(), 3_000);
+        assert_eq!(restored.rng_state_hex(), handle.view().game.rng_state_hex());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn persistence_blocking_does_not_stop_runtime_and_valid_commit_recovers_health() {
+        use crate::health::{PersistenceFailure, PersistencePhase};
+
+        let (runtime, handle, persistence, clock, database) = persistent_runtime("blocking");
+        let blocker = rusqlite::Connection::open(&database.0).unwrap();
+        blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+        clock.advance(Duration::from_secs(30));
+        let degraded = wait_for_health(&persistence, |health| {
+            health.last_failure == Some(PersistenceFailure::DatabaseBusy) && !health.ready
+        })
+        .await;
+        assert!(degraded.live);
+        assert!(degraded.last_committed_revision == Some(0));
+        assert!(matches!(
+            degraded.phase,
+            PersistencePhase::Retrying | PersistencePhase::Degraded
+        ));
+
+        let receipt = handle.execute(command(7_777)).await.unwrap();
+        assert_eq!(receipt.result, Ok(()));
+        clock.advance(Duration::from_millis(10));
+        let live = wait_for(&handle, |view| view.game.clock.update_count() >= 3_001).await;
+        assert!(live.revision > receipt.revision);
+        assert_eq!(live.game.pro.wire.to_string(), "99");
+        assert_eq!(live.game.pro.lifetime_clips.to_string(), "1");
+        clock.advance(Duration::from_secs(30));
+        let still_degraded = wait_for_health(&persistence, |health| {
+            health.latest_captured_revision >= Some(6_000)
+        })
+        .await;
+        assert!(still_degraded.latest_captured_revision > still_degraded.last_committed_revision);
+        assert!(!still_degraded.ready);
+        assert!(still_degraded.live);
+
+        blocker.execute_batch("ROLLBACK").unwrap();
+        // One further capture opportunity proves recovery even if the blocked
+        // attempt already exhausted its bounded retries while fake time advanced.
+        clock.advance(Duration::from_secs(30));
+        let recovered = wait_for_health(&persistence, |health| {
+            health.ready && health.last_committed_revision >= Some(9_000)
+        })
+        .await;
+        assert_eq!(recovered.current_attempt, 0);
+        assert_eq!(recovered.consecutive_failures, 0);
+        assert_eq!(recovered.last_failure, None);
+
+        let final_view = handle.view();
+        runtime.shutdown().await.unwrap();
+        persistence.shutdown(final_view).await.unwrap();
+        let (revision, _sequence, restored) = restore_database(&database.0);
+        assert_eq!(revision, handle.view().revision);
+        assert_eq!(restored.clock, handle.view().game.clock);
+        assert_eq!(restored.pro, handle.view().game.pro);
+        assert_eq!(restored.rng_state_hex(), handle.view().game.rng_state_hex());
     }
 
     #[tokio::test]

@@ -22,9 +22,11 @@ target/debug/paperclip-game \
   --database-path data/paperclip.sqlite3
 ```
 
-Invalid options, nonnumeric listener addresses, and missing option values exit with a configuration error. Listener addresses are numeric IP addresses and ports; hostnames are not resolved. On Unix, `SIGINT` and `SIGTERM` trigger graceful HTTP/runtime shutdown. Graceful stop closes runtime admission, drains every already accepted command through the ordinary bounded writer turns, and joins tracked terminal-result publication before returning. This is an in-memory normal-stop guarantee, not crash persistence or cross-process exactly-once behavior.
+Invalid options, nonnumeric listener addresses, and missing option values exit with a configuration error. Listener addresses are numeric IP addresses and ports; hostnames are not resolved. On Unix, `SIGINT` and `SIGTERM` trigger graceful HTTP/runtime shutdown. Graceful stop closes runtime admission, drains every already accepted command through the ordinary bounded writer turns, and joins tracked terminal-result publication before returning. Issue #10 then offers the final coherent writer view to the bounded best-effort persistence worker and joins it. This is an ordinary-stop persistence guarantee, not crash zero-loss or cross-process exactly-once behavior.
 
-`--database-path` is only the validated configuration seam for Issue #10. The current service does not initialize SQLite, create that file, restore a snapshot, or claim cross-process durability. Each process starts an in-memory game, a new `run_id`, and a real-time writer that advances without clients.
+`--database-path` selects the real SQLite persistence file (default `data/paperclip.sqlite3`). A nonexistent or empty file initializes schema version 1, WAL, `synchronous=FULL`, and one committed `default` full-snapshot row. A valid existing row restores the complete current logical state, revision, exact `Amount` strings, clock/phase/remainder state, and RNG stream. Each process still generates a new opaque `run_id`, starts with zero lag debt and empty retry records, and performs no offline production, sales, timer, or RNG catch-up. Existing invalid or unsupported data fails startup before the listener; it is never silently reset, quarantined, deleted, or overwritten.
+
+The runtime observes coherent writer views and captures approximately every 30 logical seconds (3,000 fixed 10 ms updates), then every normal shutdown performs a final best-effort capture after the accepted-command/publication drain. A single worker outside the game writer owns SQLite work: at most one in-flight write plus one replaceable latest full snapshot. Busy/error retries use a bounded busy timeout, three attempts, and bounded exponential backoff. Each attempted row replacement is atomic and contains deterministic snapshot-v1 JSON `TEXT`, checked integer revision/sequence metadata, and a SHA-256 checksum. Normal-stop capture is not a crash zero-loss claim; after a crash, changes after the latest committed snapshot may roll back. Clients must resynchronize after restart and have no cross-process idempotency guarantee.
 
 ## HTTP contract
 
@@ -39,6 +41,16 @@ Returns a complete, statically typed public `GameView`. Its top-level fields are
 - `game`: all currently implemented public M1 production state.
 
 Every `Amount` is serialized as a canonical ASCII decimal JSON string, preserving `10^-18`, values beyond `2^53`, and larger exact values without a JSON float. Views are cloned projections of one runtime snapshot. They contain no RNG state, retry records, process lag/health, database path, or mutable references. GET does not advance the logical clock, execute a command, grant production, or draw random numbers.
+
+### GET `/api/health/live`
+
+While the HTTP service is serving, returns 200 with exactly `{ "status": "ok" }`. Failure of snapshot readiness does not pause, rewind, recreate, or stop the authoritative game. Other HTTP methods receive 405 and do not mutate game state.
+
+### GET `/api/health/ready`
+
+Returns a fixed, statically typed JSON projection with these fields: `live`, `ready`, `phase`, `last_committed_revision`, `last_committed_sequence`, `latest_captured_revision`, `latest_captured_sequence`, `pending_snapshot_count`, `write_in_progress`, `current_attempt`, `consecutive_failures`, `snapshot_overdue`, and `last_failure_code`. Revision/sequence counters are nullable checked safe JSON integers; absent values are `null`, not a fabricated zero. `pending_snapshot_count` is zero or one for the coalesced pending slot and excludes the single in-flight write. Failure codes are closed enum strings, never free-form backend messages.
+
+A healthy initialized persistence pipeline returns 200 with `ready=true`. A post-start write error or overdue checkpoint returns 503 with `ready=false`, while the same live runtime continues ticks and commands. A valid commit can restore 200. `snapshot_overdue` is based on the runtime's published logical update count: no committed checkpoint for more than two snapshot intervals (6,000 updates). Host suspension, downtime, and wall-clock jumps do not manufacture logical progress. Pure transport tests without a configured store use the explicit `unconfigured` phase and never represent a validated production restore. These routes expose no actor/world selector, resource input, SQL, file path, payload, RNG, retry record, or private error string.
 
 ### POST `/api/game/commands`
 
@@ -91,10 +103,11 @@ cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked --all-targets
 cargo build --locked
 python3 -B scripts/check_api_process.py target/debug/paperclip-game --repo .
+python3 -B scripts/check_persistence_process.py target/debug/paperclip-game
 ```
 
-The Rust suites include duplicate/unknown-field and primitive negative tables, real HTTP client/socket checks, deterministic real-writer gates for in-flight coalescing and conflicts, terminal success/rejection replay, final-stock contention, accepted disconnect behavior, exact Amount view fixtures, and independent-client writes. The process checker additionally starts the default and explicit listeners, performs 1,000 distinct legal writes, reaches a real stock-exhaustion rejection, checks terminal replay/conflict, verifies `SIGTERM`, and protects existing-data sentinels.
+The Rust suites include duplicate/unknown-field and primitive negative tables, real HTTP client/socket checks, deterministic real-writer gates for in-flight coalescing and conflicts, terminal success/rejection replay, final-stock contention, accepted disconnect behavior, exact Amount view fixtures, independent-client writes, strict snapshot/clock/RNG checks, real SQLite rollback/busy/coalescing failures, fake-time 30-second publication, and logical-clock readiness recovery. The API process checker starts the default and explicit listeners, performs 1,000 distinct legal writes, reaches a real stock-exhaustion rejection, checks terminal replay/conflict and health, verifies `SIGTERM`, and protects existing-data sentinels. The persistence process checker injects a real SQLite busy transaction, observes 503 while game progress continues, requires a valid commit to restore 200, rejects corrupt startup without source changes, and uses actual process `kill`/`wait` for bounded rollback and repeated-restart evidence.
 
 ## Current limits
 
-Issue #9 implements only the two HTTP routes above. SQLite persistence/snapshot recovery (#10), SSE (#11), browser UI (#12), automated production and other feature packs (#14-#16), and full playable integration (#17) remain separate work. Unsupported actions are never accepted placeholders.
+Issue #10 implements schema-v1 snapshots and observational persistence health. Later logical fields require explicit versioned migrations in the same PR that introduces those fields; no later-game state, unrestricted save/debug command, multi-instance registry, per-actor database, SSE (#11), browser UI (#12), automated production and other feature packs (#14-#16), or full playable integration (#17) is implemented by this issue. Unsupported actions are never accepted placeholders.

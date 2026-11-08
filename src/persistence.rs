@@ -1,7 +1,9 @@
 //! Real SQLite snapshots and one serialized, coalescing blocking worker.
 
 use crate::game::amount::{MAX_SAFE_JSON_INTEGER, SafeU64};
+use crate::game::clock::UPDATE_QUANTUM_NANOS;
 use crate::health::{HealthSnapshot, PersistenceFailure, PersistenceHealth};
+use crate::runtime::{RuntimeHandle, RuntimeView};
 use crate::snapshot::{SNAPSHOT_VERSION, SnapshotError, SnapshotV1};
 use rusqlite::types::ValueRef;
 use rusqlite::{Connection, OpenFlags, TransactionBehavior};
@@ -13,6 +15,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
+use tokio::sync::oneshot;
+use tokio::task::JoinHandle as AsyncJoinHandle;
 
 pub const DEFAULT_SNAPSHOT_INTERVAL: Duration = Duration::from_secs(30);
 pub const DEFAULT_BUSY_TIMEOUT: Duration = Duration::from_millis(100);
@@ -142,6 +146,7 @@ impl PersistenceFailure {
 struct PreparedSnapshot {
     sequence: u64,
     revision: u64,
+    update_count: u64,
     payload: String,
     checksum: String,
 }
@@ -153,9 +158,11 @@ impl PreparedSnapshot {
         let checksum = sha256_hex(&payload);
         let payload = String::from_utf8(payload).map_err(|_| SnapshotError::EncodingFailed)?;
         let revision = snapshot.revision.get();
+        let update_count = snapshot.clock.update_count.get();
         Ok(Self {
             sequence,
             revision,
+            update_count,
             payload,
             checksum,
         })
@@ -642,8 +649,8 @@ impl fmt::Display for WorkerShutdownError {
 
 impl Error for WorkerShutdownError {}
 
-/// The authoritative writer only calls `submit`: canonicalize/clone, lock a tiny
-/// latest-slot, and return. A dedicated thread owns every blocking SQLite call.
+/// The observer canonicalizes complete writer views, locks a tiny latest-slot,
+/// and returns. A dedicated thread owns every blocking SQLite call.
 pub struct PersistenceWorker {
     shared: Arc<SharedQueue>,
     health: PersistenceHealth,
@@ -685,11 +692,13 @@ impl PersistenceWorker {
 
     pub fn submit(&self, snapshot: SnapshotV1) -> Result<u64, SubmitError> {
         let revision = snapshot.revision.get();
+        let update_count = snapshot.clock.update_count.get();
         // Encoding and digest work occurs before taking the queue mutex.
         let payload = snapshot.to_canonical_bytes()?;
         let encoded = PreparedSnapshot {
             sequence: 0,
             revision,
+            update_count,
             checksum: sha256_hex(&payload),
             payload: String::from_utf8(payload).map_err(|_| SnapshotError::EncodingFailed)?,
         };
@@ -713,7 +722,7 @@ impl PersistenceWorker {
             // Replacing an unsent full snapshot is safe; the in-flight write is untouched.
             queue.pending = Some(prepared);
             // Keep queue/health order coherent while never holding this lock over I/O.
-            self.health.captured(revision, next);
+            self.health.captured(revision, next, update_count);
             next
         };
         self.shared.wake.notify_one();
@@ -781,7 +790,7 @@ fn worker_loop(
             health.write_started(attempt, attempt > 1);
             match store.commit_prepared(&job) {
                 Ok(()) => {
-                    health.committed(job.revision, job.sequence);
+                    health.committed(job.revision, job.sequence, job.update_count);
                     break;
                 }
                 Err(error) => {
@@ -811,4 +820,185 @@ fn lock_queue(shared: &SharedQueue) -> MutexGuard<'_, QueueState> {
         .state
         .lock()
         .unwrap_or_else(|error| error.into_inner())
+}
+
+const UPDATES_PER_SNAPSHOT: u64 =
+    (DEFAULT_SNAPSHOT_INTERVAL.as_nanos() / UPDATE_QUANTUM_NANOS) as u64;
+
+#[derive(Debug)]
+pub enum RuntimePersistenceStartError {
+    NoRuntime,
+    Worker(WorkerStartError),
+}
+
+impl fmt::Display for RuntimePersistenceStartError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::NoRuntime => "runtime persistence must start inside a Tokio runtime",
+            Self::Worker(_) => "persistence worker initialization failed",
+        })
+    }
+}
+
+impl Error for RuntimePersistenceStartError {}
+
+#[derive(Debug)]
+pub enum RuntimePersistenceError {
+    Capture(SnapshotError),
+    Submit(SubmitError),
+    WorkerShutdown(WorkerShutdownError),
+    PublisherTaskEnded,
+}
+
+impl fmt::Display for RuntimePersistenceError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Capture(_) => "final snapshot capture failed",
+            Self::Submit(error) => {
+                return write!(formatter, "final snapshot was not queued: {error}");
+            }
+            Self::WorkerShutdown(_) => "persistence worker shutdown failed",
+            Self::PublisherTaskEnded => "snapshot publisher terminated unexpectedly",
+        })
+    }
+}
+
+impl Error for RuntimePersistenceError {}
+
+/// Owns the asynchronous observer and SQLite worker for one ordinary runtime.
+/// The caller supplies the final view only after the API's accepted-work drain.
+pub struct RuntimePersistence {
+    health: PersistenceHealth,
+    final_view: Option<oneshot::Sender<RuntimeView>>,
+    publisher: Option<AsyncJoinHandle<Result<HealthSnapshot, RuntimePersistenceError>>>,
+}
+
+impl RuntimePersistence {
+    pub fn start(
+        runtime: &RuntimeHandle,
+        store: SnapshotStore,
+        committed_revision: u64,
+        committed_sequence: u64,
+    ) -> Result<Self, RuntimePersistenceStartError> {
+        let executor = tokio::runtime::Handle::try_current()
+            .map_err(|_| RuntimePersistenceStartError::NoRuntime)?;
+        let mut views = runtime.subscribe();
+        let initial_update_count = views.borrow_and_update().game.clock.update_count();
+        let health = PersistenceHealth::new_at_update(
+            DEFAULT_SNAPSHOT_INTERVAL,
+            committed_revision,
+            committed_sequence,
+            initial_update_count,
+        );
+        let worker = PersistenceWorker::start(store, health.clone(), WorkerOptions::default())
+            .map_err(RuntimePersistenceStartError::Worker)?;
+        let (final_view, final_receiver) = oneshot::channel();
+        let publisher = executor.spawn(run_snapshot_publisher(
+            views,
+            worker,
+            health.clone(),
+            final_receiver,
+            initial_update_count,
+        ));
+        Ok(Self {
+            health,
+            final_view: Some(final_view),
+            publisher: Some(publisher),
+        })
+    }
+
+    pub fn health(&self) -> PersistenceHealth {
+        self.health.clone()
+    }
+
+    pub async fn shutdown(
+        mut self,
+        final_view: RuntimeView,
+    ) -> Result<HealthSnapshot, RuntimePersistenceError> {
+        if let Some(sender) = self.final_view.take() {
+            let _ = sender.send(final_view);
+        }
+        self.publisher
+            .take()
+            .expect("runtime persistence owns one publisher")
+            .await
+            .map_err(|_| RuntimePersistenceError::PublisherTaskEnded)?
+    }
+}
+
+async fn run_snapshot_publisher(
+    mut views: tokio::sync::watch::Receiver<RuntimeView>,
+    worker: PersistenceWorker,
+    health: PersistenceHealth,
+    mut final_view: oneshot::Receiver<RuntimeView>,
+    initial_update_count: u64,
+) -> Result<HealthSnapshot, RuntimePersistenceError> {
+    // Subscribe/read synchronously in start(), not on this task's first poll.
+    // Otherwise fast fake time can finish the first interval before observation.
+    let mut last_update = initial_update_count;
+    let mut updates_since_save = 0_u64;
+    let final_view = loop {
+        tokio::select! {
+            biased;
+            requested = &mut final_view => {
+                break requested.unwrap_or_else(|_| views.borrow_and_update().clone());
+            }
+            changed = views.changed() => {
+                if changed.is_err() {
+                    break views.borrow_and_update().clone();
+                }
+                let view = views.borrow_and_update().clone();
+                let update_count = view.game.clock.update_count();
+                health.observe(update_count);
+                let new_updates = update_count.saturating_sub(last_update);
+                last_update = update_count;
+                updates_since_save = updates_since_save.saturating_add(new_updates);
+                if updates_since_save >= UPDATES_PER_SNAPSHOT {
+                    if let Err(error) = capture_and_submit(&worker, &view) {
+                        note_capture_failure(&health, &error);
+                    }
+                    updates_since_save = 0;
+                }
+            }
+        }
+    };
+    let captured = capture_and_submit(&worker, &final_view);
+    if let Err(error) = &captured {
+        note_capture_failure(&health, error);
+    }
+    let stopped = worker
+        .shutdown()
+        .map_err(RuntimePersistenceError::WorkerShutdown);
+    match (captured, stopped) {
+        (Err(error), _) => Err(error),
+        (Ok(_), Err(error)) => Err(error),
+        (Ok(_), Ok(health)) => Ok(health),
+    }
+}
+
+fn capture_and_submit(
+    worker: &PersistenceWorker,
+    view: &RuntimeView,
+) -> Result<u64, RuntimePersistenceError> {
+    let snapshot =
+        SnapshotV1::capture(&view.game, view.revision).map_err(RuntimePersistenceError::Capture)?;
+    worker
+        .submit(snapshot)
+        .map_err(RuntimePersistenceError::Submit)
+}
+
+fn note_capture_failure(health: &PersistenceHealth, error: &RuntimePersistenceError) {
+    let failure = match error {
+        RuntimePersistenceError::Capture(_) => PersistenceFailure::InvalidSnapshot,
+        RuntimePersistenceError::Submit(SubmitError::StaleCapture) => {
+            PersistenceFailure::StaleCapture
+        }
+        RuntimePersistenceError::Submit(SubmitError::SequenceExhausted) => {
+            PersistenceFailure::SequenceConflict
+        }
+        RuntimePersistenceError::Submit(_) => PersistenceFailure::CommitOutcomeUnknown,
+        RuntimePersistenceError::WorkerShutdown(_)
+        | RuntimePersistenceError::PublisherTaskEnded => PersistenceFailure::TransactionFailed,
+    };
+    health.write_failed(failure, false, 0);
 }
