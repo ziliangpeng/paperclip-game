@@ -461,6 +461,9 @@ def _output_findings(stdout: Path, stderr: Path, status: str, probe: str) -> tup
         return 2, [Finding("workflow-input", "probe identity must be api or persistence")]
     if not re.fullmatch(r"-?[0-9]+", status):
         return 2, [Finding("workflow-input", "probe status must be an integer")]
+    decimal_digits = status[1:] if status.startswith("-") else status
+    if len(decimal_digits) > 3:
+        return 2, [Finding("workflow-input", "probe status is outside the supported range")]
     numeric_status = int(status)
     if not -255 <= numeric_status <= 255:
         return 2, [Finding("workflow-input", "probe status is outside the supported range")]
@@ -698,7 +701,17 @@ def _runtime_self_test(script: Path, root: Path) -> tuple[int, list[dict[str, ob
     results: list[dict[str, object]] = []
     case_number = 0
 
-    def check(name: str, stdout: Path, stderr: Path, status: str, expected: int, code: str | None, detail: str | None = None) -> bool:
+    def check(
+        name: str,
+        stdout: Path,
+        stderr: Path,
+        status: str,
+        expected: int,
+        code: str | None,
+        detail: str | None = None,
+        auxiliary_code: str | None = None,
+        forbid_status_echo: bool = False,
+    ) -> bool:
         nonlocal case_number
         case_number += 1
         completed = _run_cli([
@@ -708,6 +721,14 @@ def _runtime_self_test(script: Path, root: Path) -> tuple[int, list[dict[str, ob
         ])
         passed, record = _case_result(name, expected, code, detail, completed)
         combined = completed.stdout + completed.stderr
+        if auxiliary_code is not None:
+            passed = passed and auxiliary_code in combined
+            record["auxiliary_code_observed"] = auxiliary_code in combined
+        if forbid_status_echo:
+            passed = passed and "Traceback" not in combined and str(script) not in combined and status not in combined
+            record["no_traceback_checker_path_or_full_status"] = all(
+                value not in combined for value in ("Traceback", str(script), status)
+            )
         if PROCESS_CANARY in combined:
             passed = False
             record["literal_leaked"] = True
@@ -720,12 +741,21 @@ def _runtime_self_test(script: Path, root: Path) -> tuple[int, list[dict[str, ob
     healthy_out.write_text("paperclip HTTP writes passed\n", encoding="utf-8")
     healthy_err.write_text("paperclip-game: listening on http://127.0.0.1:3000\n", encoding="utf-8")
 
-    def variant(name: str, out: bytes, err: bytes, status: str, expected: int, code: str | None, detail: str | None = None) -> bool:
+    def variant(
+        name: str,
+        out: bytes,
+        err: bytes,
+        status: str,
+        expected: int,
+        code: str | None,
+        detail: str | None = None,
+        auxiliary_code: str | None = None,
+    ) -> bool:
         out_path = root / f"{name}.stdout"
         err_path = root / f"{name}.stderr"
         out_path.write_bytes(out)
         err_path.write_bytes(err)
-        return check(name, out_path, err_path, status, expected, code, detail)
+        return check(name, out_path, err_path, status, expected, code, detail, auxiliary_code)
 
     if not check("runtime-healthy", healthy_out, healthy_err, "0", 0, None):
         return 1, results
@@ -741,7 +771,7 @@ def _runtime_self_test(script: Path, root: Path) -> tuple[int, list[dict[str, ob
         return 1, results
     if not variant("runtime-nonzero", b"native failure\n", b"", "1", 1, "workflow-process-exit", "nonzero status"):
         return 1, results
-    if not variant("runtime-nonzero-with-canary", b"", PROCESS_CANARY.encode(), "7", 1, "workflow-process-exit", "nonzero status"):
+    if not variant("runtime-nonzero-with-canary", b"", PROCESS_CANARY.encode(), "7", 1, "workflow-process-exit", "nonzero status", "[workflow-process-output]"):
         return 1, results
     missing = root / "missing.stdout"
     if not check("runtime-missing-stdout", missing, healthy_err, "0", 2, "workflow-io", "readable, regular"):
@@ -761,6 +791,10 @@ def _runtime_self_test(script: Path, root: Path) -> tuple[int, list[dict[str, ob
     if not variant("runtime-oversized", b"x" * (MAX_OUTPUT_BYTES + 1), b"", "0", 2, "workflow-io", "byte bound"):
         return 1, results
     if not check("runtime-invalid-status", healthy_out, healthy_err, PROCESS_CANARY, 2, "workflow-input", "integer"):
+        return 1, results
+    if not check("runtime-negative-status", healthy_out, healthy_err, "-1", 1, "workflow-process-exit", "nonzero status"):
+        return 1, results
+    if not check("runtime-long-decimal-status", healthy_out, healthy_err, "9" * 5000, 2, "workflow-input", "outside the supported range", forbid_status_echo=True):
         return 1, results
     return 0, results
 
