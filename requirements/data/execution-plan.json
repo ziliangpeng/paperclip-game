@@ -31,9 +31,9 @@
       "id": "M1",
       "name": "Human clips, Wire, sales, and first automation",
       "granularity": "current_detailed",
-      "entry": "Fresh authoritative run: clips/lifetime, Unsold Inventory, and Unused Clips all 0; Funds 0; Wire 1000 with 1000-inch spools at $20; Price $0.25; Marketing level 1; Trust 2, one Processor, one Memory, and computing/projects hidden. Matter and all future-phase state use the documented initial values even before becoming visible.",
-      "playable": "The player makes individual clips, buys Wire, changes price in $0.01 steps, buys Marketing, receives stock-limited stochastic sales, and after Funds first reach $5 buys AutoClippers. Production is server-generated with no clients connected. Sales reduce only Unsold Inventory; every conversion increases all three clip ledgers equally.",
-      "exit": "From fresh state through the real UI, the player has sold clips, bought replacement Wire, adjusted Price and Marketing, and purchased at least one AutoClipper; the AutoClipper continues legal Wire-limited production through refresh/reconnect and while no browser or Agent observes. Computing, Projects, and MegaClippers are not required for exit.",
+      "entry": "Fresh authoritative run: clips/lifetime, Unsold Inventory, and Unused Clips all 0; Funds 0; Wire 1000 with 1000-inch spools at $20; Price $0.25; Marketing level 1; Trust 2, one Processor, one Memory, and computing/projects hidden. Matter and all future-phase state use the documented initial values even before becoming visible. AutoClippers begin at count zero with reveal false and stored current cost $5, independent of the successor formula.",
+      "playable": "The player first makes individual clips and sells Unsold Inventory. Before any successful Wire or initial Marketing purchase, the player observes the actual first Funds>=5 reveal and stored cost $5. The first AutoClipper costs $5, gives count 1 and next cost $6.10; a later distinct purchase at $6.10 gives count 2 and next cost $6.21. Required current-quote Wire and Price/Marketing actions follow the first reveal, which remains latched after Funds falls below $5. Production is server-generated with no clients connected. Sales reduce only Unsold Inventory; every conversion increases all three clip ledgers equally.",
+      "exit": "From fresh state through the real UI, the player observes first $5 before any successful Wire/Marketing buy, purchases the first AutoClipper at exact stored cost 5/next 6.10 and a later one at 6.10/next 6.21, also sells clips, buys replacement Wire and adjusts Price/Marketing after reveal. At least one real producer continues legal Wire-limited production through refresh/reconnect and with no observer. Stored cost/count/reveal survive snapshot without backfill. Computing, Projects, and MegaClippers are not required for exit.",
       "depends_on_milestones": [],
       "features": [
         "ACT-CLIP-MANUAL",
@@ -139,13 +139,15 @@
         "The shared internal conversion passes Wire 5/request 10 => produced 5 and Wire 0; Wire 0.5/request 0.2 => produced 0 and Wire 0.5; Wire 1/request 0.2 => produced 0.2 and Wire 0.8, adding the actual amount equally to all three ledgers.",
         "A controlled sale consumes Unsold Inventory only and credits Funds at current Price; an empty-stock opportunity adds no Funds; simultaneous purchases cannot overspend one Funds balance.",
         "Price bottoms at $0.01 through the legal control, Marketing doubles/floors its next dollar cost, and a purchased spool yields 1000 Wire while raising base quote $0.05 and resetting inactivity.",
-        "Funds reaching $5 permanently reveals AutoClippers; buying one charges its actual cost, and its nominal 1 clip/s request remains stock-capped. SSE disconnect, long Agent inactivity, snapshotting, refresh, and two pages never pause or fork the game."
+        "The actual first Funds>=5 reveal and stored cost $5 are observed before every successful Wire or initial Marketing purchase, whose prices require later earnings. Replacement-Wire and Marketing purchases then occur legally and the latch survives subsequent Funds drops below $5.",
+        "Threshold purchase at Funds 5/current cost 5/count 0 charges exactly 5, leaves Funds 0/count 1/next cost 6.10; the next distinct legal purchase at current cost 6.10 charges 6.10, gives count 2/next cost 6.21. Below-price intent has no Funds/count/cost/ledger effect; duplicate ID replays the first receipt only and snapshots recover stored count/cost/reveal without offline gains or level-zero recomputation."
       ],
       "testing_evidence": [
         "Rule tests for initial state, conversion floor/cap, ledger identity, Wire purchase/repricing/inactivity and sales distributions using controlled RNG; property tests for nonnegative conserved resource transfers.",
         "Command execution tests for stale-view legality, malformed/unknown actions, legal concurrent commands versus one-resource contention, and same-process retry/dedup semantics selected by the API task.",
         "Browser E2E proves clicks submit intent rather than locally award resources, server-derived views update, refresh does not roll back, and two pages share the sole default game.",
-        "Persistence tests prove atomic full-state snapshots, last-successful recovery, no offline catch-up, complete RNG/timer/accumulator state, and continued simulation during saves."
+        "Persistence tests prove atomic full-state snapshots, last-successful recovery, no offline catch-up, complete RNG/timer/accumulator state, and continued simulation during saves.",
+        "Rule/API/native-browser first-crossing and exact current-cost tests prove $5 initial charge, $6.10 successor charge and $6.21 next quote, below-cost no-ops, duplicate-ID receipt replay, permanent reveal and exact stored snapshot state without backfill."
       ],
       "risks": [
         "Do not confuse an outer Wire >=1 gate with a requirement to cover the whole automatic request. Do not expose arbitrary-number free-clip production as a player command.",
@@ -166,7 +168,7 @@
       "granularity": "next_coarse",
       "entry": "M1 economy works. Computing and Projects still start locked; the state can reach either 2000 lifetime clips or the independent deadlock with Unsold <1, Funds below the current Wire quote, and Wire <1.",
       "playable": "The player allocates Human Trust between Processors and Memory, generates 10 Ops/s per Processor up to Memory*1000, buys project offers, unlocks Creativity at cap, and purchases the first 18 canonical projects plus RevTracker. Beg for More Wire supplies the genuine Trust-cost recovery path.",
-      "exit": "Both computing unlock routes are demonstrated; a player can buy and use Creativity, additive AutoClipper upgrades, cumulative Wire-extrusion upgrades including project10b, Trust/creativity projects, and RevTracker. Displayed offers follow their PROPOSED source-preserving latch while purchase affordability remains server-authoritative.",
+      "exit": "Both computing unlock routes are demonstrated; a player can buy and use Creativity, additive AutoClipper upgrades, cumulative Wire-extrusion upgrades including project10b, Trust/creativity projects, and RevTracker. Displayed offers follow their PROPOSED source-preserving latch while purchase affordability remains server-authoritative. M2 independently proves ordinary allocation/Ops/creativity/panel/snapshot continuity without requiring an offered or purchased Xavier.",
       "depends_on_milestones": [
         "M1"
       ],
@@ -217,7 +219,7 @@
       ],
       "scenario_ids": [
         "ENG-PROJECT-OFFER-LATCH",
-        "E2E-XAVIER-ALLOCATION-RESET",
+        "ENG-TRUST-OPS-CREATIVITY",
         "E2E-FULL-PHASE-ENGINE-TRACE"
       ],
       "test_layers": [
@@ -225,6 +227,7 @@
         "browser_e2e",
         "gameplay_scenario",
         "long_simulation",
+        "persistence",
         "property",
         "rule_unit",
         "state_sequence"
@@ -267,12 +270,14 @@
         "Fresh Creativity speed remains 1 although evaluating the recomputation formula at P=1 yields zero. While Ops are held at cap after project3, Creativity accrues; spending below cap pauses it.",
         "PRJ-001/004/005 add +0.25/+0.50/+0.75 to one multiplier and PRJ-018 adds +5, never compounding those additions. PRJ-007..010 follow supply thresholds; PRJ-011 project10b uses the stochastic Wire quote and multiplies current supply by 11.",
         "A displayed offer remains eligible after its entry trigger ceases, until consumed or explicitly cancelled, but an unaffordable purchase is rejected at execution. Repeatable PRJ-002 requires its crisis trigger for each new offer; a purchase allowed at Trust -100 leaves -101 and no further affordable bailout.",
-        "PRJ-039 RevTracker uses analytic demand estimates when stock suffices and rolling realized revenue when stock-limited; it does not itself sell clips or alter demand."
+        "PRJ-039 RevTracker uses analytic demand estimates when stock suffices and rolling realized revenue when stock-limited; it does not itself sell clips or alter demand.",
+        "ENG-TRUST-OPS-CREATIVITY independently validates M2 allocation and exact speed arithmetic without requiring offered or purchased Xavier: fresh speed 1 versus P=1 recomputation zero, P=2 positive and 20 Ops/s, legal capacity, full-cap Creativity and complete snapshots without offline gains."
       ],
       "testing_evidence": [
         "Per-project tests verify trigger, separate cost, exact effect, one-shot/repeat behavior, and downstream flag for every owned PRJ row; source-array position is not treated as an execution prerequisite.",
         "Sequence tests cover offer creation/latching/re-offer/cancellation, concurrency between an offer purchase and resource ticks, additive boost stacking, Wire-supply thresholds, both computation gates, and Trust target Fibonacci-thousand progression.",
-        "UI/API tests expose Trust, next target, Processors, Memory, standard/temporary Operations, Creativity, project costs and meaningful rejection reasons without making client-disabled state authoritative."
+        "UI/API tests expose Trust, next target, Processors, Memory, standard/temporary Operations, Creativity, project costs and meaningful rejection reasons without making client-disabled state authoritative.",
+        "M2-only rule/API/browser/snapshot cases test exact Trust capacity, processor/Memory additions, 10/20 Ops/s, fresh-versus-recomputed nonlinear speed, full-cap Creativity, complete compute continuation and no M3 project purchase."
       ],
       "risks": [
         "The offer latch is PROPOSED, not CONFIRMED. Do not replace it with a continuously re-evaluated trigger or reproduce DOM nodes as authority.",
@@ -382,11 +387,11 @@
         "WireBuyer is offered after 15 purchases, starts internally ON, toggles without price, invokes the ordinary affordable purchase only at Wire <=1 in Human play, and never discounts or bypasses Funds.",
         "Quantum Computing requires five Processors before PRJ-046. Compute without an active chip says Need Photonic Chips. PRJ-047 buys exactly ten chips at 10000 then +5000 Ops each, with deterministic signed sinusoidal values rather than loot RNG.",
         "Overflow uses raw Q=ceil(360*sum), free capacity B and D=tempOps/100+5; if Q>B the actual immediate positive credit is based on ceil(Q/D), while feedback still reports raw Q. Negative qOps can expose PRJ-094 at Operations <=-10000.",
-        "Xavier PRJ-096 costs 100000 Creativity, sets Processors/Memory/speed to zero, and leaves Trust available for reallocation. The first re-added Processor still has zero speed; the second enables positive generation. It can repeat only while Human and is not a run reset.",
+        "Each Human-stage PRJ-096 purchase costs 100000 Creativity and sets Processors/Memory/speed to zero, leaving Trust available and other ordinary run/prestige state intact. The first re-added Processor still has zero speed; the exact P=2 curve is positive. A second sufficiently funded distinct purchase charges another 100000 Creativity without a full-run/prestige reset.",
         "Confirming PRJ-094 adds 10000 standard Ops before full current-run reset, grants no prestige, clears project/strategy state, and retains separately stored U/S. Cancelling does not consume the offer."
       ],
       "testing_evidence": [
-        "Rule/sequence tests cover baseline and boosted Mega rates, all boost combinations, WireBuyer at empty/low Funds and ON/OFF, ten-chip limit/cost, signed sums, overflow fade/merge, negative trigger, and Xavier first/second-Processor recovery.",
+        "Rule/sequence tests cover baseline and boosted Mega rates, all boost combinations, WireBuyer at empty/low Funds and ON/OFF, ten-chip limit/cost, signed sums, overflow fade/merge, negative trigger, the exact nonlinear curve, two real 100000-Creativity Xavier purchases and first/second-Processor recovery.",
         "Reset/persistence tests distinguish full run reset from last-snapshot crash recovery and prove no ordinary project, strategy, timer, or resource carryover after Temporal Reversion, while existing U/S survive unchanged.",
         "No arbitrary negative Compute input or debug reset is exposed. Controlled engine time/RNG is used for tests, never a public clock or resource-write API."
       ],
@@ -4380,7 +4385,7 @@
         "tests/"
       ]
     },
-{
+    {
       "id": "M1-G02",
       "milestone_id": "M1",
       "detail": "detailed",
@@ -4604,9 +4609,10 @@
         }
       ],
       "scope": [
-        "Permanent Funds>=5 reveal and escalating actual AutoClipper cost",
-        "Nominal one clip/s per AutoClipper through M1-G01 internal conversion; add the legal buy_auto_clipper typed intent, public cost/reveal/rate feedback, and all new producer/reveal/cost continuation fields to the same-PR snapshot migration",
-        "Manufacturing levels/cost/Wire/production feedback and the general five-line console message history"
+        "Observe the actual first Funds>=5 reveal before any successful Wire or initial Marketing purchase, retaining the permanent latch and initial stored current cost $5 rather than a level-zero successor formula",
+        "At execution, charge the existing current cost only on success: threshold $5 -> Funds $0/count 1/next $6.10, then a distinct successor purchase at $6.10 -> count 2/next $6.21; below-current-price intent has no Funds/count/cost/ledger mutation",
+        "Nominal one clip/s per AutoClipper through M1-G01 internal conversion; add the legal buy_auto_clipper typed intent, public count/cost/reveal/rate feedback, and all new producer/reveal/current-cost continuation fields to the same-PR snapshot migration",
+        "Manufacturing levels/current cost/Wire/production feedback and the general five-line console message history"
       ],
       "non_goals": [
         "No additive boost projects or MegaClippers until later milestones",
@@ -4638,14 +4644,14 @@
       "acceptance_criteria": [
         {
           "id": "AC1",
-          "statement": "Funds-first threshold is permanent even if Funds later falls; unaffordable purchase changes nothing",
+          "statement": "The actual first Funds>=5 reveal occurs before any successful Wire/Marketing purchase and is permanent after Funds later falls below $5. Threshold $5 charges exactly $5, producing count 1/next $6.10; a distinct later purchase charges $6.10, producing count 2/next $6.21. Below-current-price and stale-view-forgery attempts mutate no Funds/count/current cost/ledgers and never silently reprice.",
           "scenario_ids": [
             "E2E-M1-DECLARED-PLAYABLE-EXIT"
           ]
         },
         {
           "id": "AC2",
-          "statement": "At least one purchased AutoClipper generates capped production during no-browser, no-SSE and Agent-inactive periods",
+          "statement": "The first and second purchased AutoClippers each generate capped baseline one-clip/s production during no-browser, no-SSE and Agent-inactive periods, without free production or caller-selected cost.",
           "scenario_ids": [
             "RT-NO-CLIENTS-CONTINUOUS",
             "E2E-M1-DECLARED-PLAYABLE-EXIT"
@@ -4653,7 +4659,7 @@
         },
         {
           "id": "AC3",
-          "statement": "Refresh/two pages observe the same producers/resources and snapshot recovery preserves producer/cost state without offline catch-up",
+          "statement": "Refresh/two pages observe identical producers/count/current cost/reveal. Snapshots restore stored $5/$6.10/$6.21 states without level-zero recomputation or offline gain. Same-ID retry replays the first stored receipt with no second mutation; a distinct legal intent after replenishment can buy at the successor $6.10.",
           "scenario_ids": [
             "UI-TWO-ANONYMOUS-PAGES",
             "PERSIST-CRASH-LOSS-NO-BACKFILL",
@@ -4665,12 +4671,14 @@
         {
           "layers": [
             "rule_unit",
+            "api_contract",
+            "browser_e2e",
             "state_sequence"
           ],
           "acceptance_ids": [
             "AC1"
           ],
-          "method": "Reveal/cost/purchase sequence and automatic Wire-exhaustion tests",
+          "method": "First-crossing and current-cost lifecycle: observe actual first $5 reveal before any Wire/Marketing buy; assert $5 -> 0/count 1/next $6.10, successor $6.10 -> count 2/next $6.21, below-price no-op, permanent latch and execute-time atomicity through rule/API/native-browser tests",
           "scenario_ids": [
             "E2E-M1-DECLARED-PLAYABLE-EXIT"
           ]
@@ -4684,7 +4692,7 @@
           "acceptance_ids": [
             "AC2"
           ],
-          "method": "Continuous production with zero clients and during atomic save; bounded integration timing rather than long sleep-based full simulation",
+          "method": "Continuous first/second producer output with zero clients and during atomic save; verify ordinary Wire-limited conversion and bounded fake-time behavior rather than long sleeps or free production",
           "scenario_ids": [
             "RT-NO-CLIENTS-CONTINUOUS",
             "PERSIST-SNAPSHOT-30S-NONBLOCK"
@@ -4699,7 +4707,7 @@
           "acceptance_ids": [
             "AC3"
           ],
-          "method": "Refresh/reconnect/two-page E2E plus last-snapshot recovery test",
+          "method": "Refresh/reconnect/two-page E2E plus exact stored producer-count/current-cost/reveal recovery, first-terminal same-ID receipt replay without mutation, distinct successor purchase, and no offline backfill or level-zero cost reconstruction",
           "scenario_ids": [
             "UI-TWO-ANONYMOUS-PAGES",
             "SSE-RECOVERED-RUN-RESYNC",
@@ -4708,9 +4716,9 @@
         }
       ],
       "evidence_requirements": [
-        "Current-HEAD results for: Reveal/cost/purchase sequence and automatic Wire-exhaustion tests",
+        "Current-HEAD first-crossing and exact receipt evidence for $5 -> $6.10 -> $6.21, below-cost rejection, permanent latch, and zero Wire/Marketing purchases before first reveal",
         "Current-HEAD results for: Continuous production with zero clients and during atomic save; bounded integration timing rather than long sleep-based full simulation",
-        "Current-HEAD results for: Refresh/reconnect/two-page E2E plus last-snapshot recovery test",
+        "Current-HEAD snapshot/retry evidence preserving exact stored producer count/current cost/reveal, duplicate terminal result and successor state, with no offline catch-up or level-zero recomputation",
         "A criteria-to-feature evidence ledger showing each task-owned M1 feature without claiming ownership of shared technical primitives."
       ],
       "risk_flags": [
@@ -5055,7 +5063,7 @@
         }
       ],
       "scope": [
-        "Both unlock routes, Trust allocation, 10 Ops/s per Processor, Memory cap and initial/future state. Detailed Issues deferred."
+        "Both unlock routes, Trust allocation, exact nonlinear speed arithmetic, 10 Ops/s per Processor and 20 at P=2, Memory cap and initial/future state. Detailed Issues deferred. M2 does not require an offered or purchased Xavier."
       ],
       "non_goals": [],
       "depends_on": [
@@ -5066,7 +5074,7 @@
       ],
       "scenario_ids": [
         "ENG-PROJECT-OFFER-LATCH",
-        "E2E-XAVIER-ALLOCATION-RESET",
+        "ENG-TRUST-OPS-CREATIVITY",
         "E2E-FULL-PHASE-ENGINE-TRACE"
       ],
       "acceptance_criteria": [],
@@ -5116,7 +5124,7 @@
       ],
       "scenario_ids": [
         "ENG-PROJECT-OFFER-LATCH",
-        "E2E-XAVIER-ALLOCATION-RESET",
+        "ENG-TRUST-OPS-CREATIVITY",
         "E2E-FULL-PHASE-ENGINE-TRACE"
       ],
       "acceptance_criteria": [],
@@ -5155,7 +5163,7 @@
         }
       ],
       "scope": [
-        "Creativity curve/generation, PRJ-039 feedback, project buttons, complete M2 entry-to-exit scenario. Detailed Issues deferred."
+        "Creativity curve/generation at cap and pause below cap, PRJ-039 feedback, project buttons, M2 entry-to-exit scenario, and complete compute/counter/panel snapshots without requiring the M3 Xavier purchase. Detailed Issues deferred."
       ],
       "non_goals": [],
       "depends_on": [
@@ -5170,7 +5178,7 @@
       ],
       "scenario_ids": [
         "ENG-PROJECT-OFFER-LATCH",
-        "E2E-XAVIER-ALLOCATION-RESET",
+        "ENG-TRUST-OPS-CREATIVITY",
         "E2E-FULL-PHASE-ENGINE-TRACE"
       ],
       "acceptance_criteria": [],
@@ -6437,6 +6445,7 @@
         "M2"
       ],
       "scenario_ids": [
+        "ENG-TRUST-OPS-CREATIVITY",
         "E2E-XAVIER-ALLOCATION-RESET",
         "E2E-FULL-PHASE-ENGINE-TRACE"
       ],
@@ -6447,7 +6456,7 @@
         "ACT-PROCESSOR-ADD",
         "ACT-MEMORY-ADD"
       ],
-      "resolution_note": "PROG-TRUST Preserve this alias/detail view in the target milestone acceptance; it adds no canonical feature owner row."
+      "resolution_note": "PROG-TRUST remains M2-owned and PRJ-096 remains M3-related, with no canonical ownership change. M2 independently accepts ordinary allocation/Ops/creativity/UI/snapshots through ENG-TRUST-OPS-CREATIVITY; M3 separately accepts actual Human PRJ-096 purchase at 100000 Creativity, its allocation-only reset and valid repetition through E2E-XAVIER-ALLOCATION-RESET."
     }
   ],
   "source_binding_owners": {
@@ -8663,42 +8672,114 @@
           "memory": 1,
           "auto_clippers": 0,
           "auto_clipper_reveal_latch": false,
-          "computing_and_projects_visible": false
+          "computing_and_projects_visible": false,
+          "auto_clipper_current_cost": 5.0
         },
         "clients": "Anonymous Human/Agent clients share default; no actor or instance selector",
         "public_resource_write_api": false,
-        "public_pause_step_api": false
+        "public_pause_step_api": false,
+        "auto_clipper_cost_cases": [
+          {
+            "case": "exact_threshold_first_purchase",
+            "funds_before": 5.0,
+            "current_cost_before": 5.0,
+            "producer_count_before": 0,
+            "accepted": true,
+            "charge": 5.0,
+            "funds_after": 0.0,
+            "producer_count_after": 1,
+            "current_cost_after": 6.1,
+            "reveal_after": true
+          },
+          {
+            "case": "successor_second_distinct_purchase",
+            "funds_before": 20.0,
+            "current_cost_before": 6.1,
+            "producer_count_before": 1,
+            "accepted": true,
+            "charge": 6.1,
+            "funds_after": 13.9,
+            "producer_count_after": 2,
+            "current_cost_after": 6.21,
+            "reveal_after": true
+          },
+          {
+            "case": "rejected_below_current_price",
+            "funds_before": 4.99,
+            "current_cost_before": 5.0,
+            "producer_count_before": 0,
+            "accepted": false,
+            "charge": 0.0,
+            "funds_after": 4.99,
+            "producer_count_after": 0,
+            "current_cost_after": 5.0,
+            "reveal_after": true
+          }
+        ],
+        "retry_expectation": {
+          "command_id": "first-auto-threshold",
+          "receipt_charge": 5.0,
+          "receipt_producer_count": 1,
+          "receipt_next_cost": 6.1,
+          "additional_charge": 0.0,
+          "additional_producer_count": 0,
+          "producer_count_after": 2,
+          "current_cost_after": 6.21
+        },
+        "snapshot_expectations": [
+          {
+            "producer_count": 1,
+            "current_cost": 6.1,
+            "reveal": true,
+            "offline_progress": 0
+          },
+          {
+            "producer_count": 2,
+            "current_cost": 6.21,
+            "reveal": true,
+            "offline_progress": 0
+          }
+        ],
+        "cost_oracle_authority": "Expected outcomes from legal commands at current server state only; never a state-write/debug setup or caller-selected effect."
       },
       "steps": [
         {
           "op": "start_fresh_default_server_and_open_two_anonymous_pages_plus_one_agent"
         },
         {
-          "op": "use_only_make_paperclip_until_unsold_stock_exists_and_observe_equal_three_ledger_updates"
+          "op": "produce_and_sell_manually_until_first_funds_5_with_zero_successful_wire_or_marketing_purchases_before_observation"
         },
         {
-          "op": "use_normal_online_sales_to_gain_funds_and_verify_only_unsold_inventory_decreases"
+          "op": "observe_first_funds_5_reveal_and_stored_cost_5_before_any_wire_or_marketing_purchase"
         },
         {
-          "op": "buy_wire_at_the_current_server_quote_and_change_price_and_marketing_through_legal_controls"
+          "op": "purchase_first_auto_clipper_at_stored_cost_5_charge_5_count_1_next_cost_6_10"
         },
         {
-          "op": "continue_legal_play_until_funds_first_reach_5_and_verify_permanent_auto_clipper_reveal"
+          "op": "attempt_below_current_cost_and_verify_no_funds_count_cost_or_ledger_mutation"
         },
         {
-          "op": "buy_one_auto_clipper_at_the_server_cost_and_observe_real_wire_limited_production"
+          "op": "fund_current_quote_wire_and_initial_marketing_after_first_reveal_and_verify_permanent_latch_after_funds_fall_below_5"
+        },
+        {
+          "op": "purchase_second_auto_clipper_with_distinct_intent_at_current_cost_6_10_count_2_next_cost_6_21"
+        },
+        {
+          "op": "retry_first_threshold_command_id_and_receive_first_terminal_receipt_without_mutation"
         },
         {
           "op": "close_pages_and_streams_then_reconnect_and_snapshot_restart_to_verify_no_pause_backfill_or_fork"
         }
       ],
       "assertions": [
-        "The player sells at least one clip, buys replacement Wire, adjusts Price and Marketing, and purchases at least one AutoClipper using only legal public controls.",
-        "The AutoClipper produces through the shared Wire floor/cap while no browser, SSE client, or active Agent observes; recovery restores only the last snapshot with no offline gains.",
-        "All 19 M1 feature owners have appropriate engine/API/UI/snapshot evidence; Computing, Projects, MegaClippers, and other later features are not claimed.",
-        "No debug setup, public resource write, frontend counter, placeholder success, pixel gate, or official-script execution is used."
+        "The actual first Funds>=5 observation and permanent reveal occur before every successful Wire or Marketing purchase; both pre-observation purchase counters are zero. Later spending below $5 never clears the latch.",
+        "At Funds 5/current cost 5/count 0 the first accepted purchase charges exactly 5, leaves Funds 0/count 1/next stored cost 6.10, and retains reveal. A second distinct legal intent at 6.10 charges 6.10, gives count 2/next cost 6.21; a below-current-price attempt changes no Funds, count, cost, or ledger.",
+        "The required replacement-Wire/current-quote/base+$0.05/inactivity and initial Marketing purchases occur only after the first reveal and retain current-cost-at-execution validation and the permanent reveal.",
+        "The first and second producers each use the ordinary Wire-limited shared conversion with no free production. The duplicate threshold command ID returns its first stored receipt with no extra charge or producer and no overwrite of later current state.",
+        "Snapshots persist exact producer count, stored current cost and reveal across 6.10 and 6.21 states, never run a level-zero successor formula on restore, resume timers/RNG correctly, and backfill nothing.",
+        "All 19 M1 feature owners have appropriate engine/API/UI/snapshot evidence; the scenario uses only legal public controls and no debug/state-write endpoint, local success fabrication, pixel gate, or official-script execution."
       ],
-      "notes": "This is a mandatory scenario template; integration must bind it to the actual M1 tasks and source refs without expanding M1 independently."
+      "notes": "The initial current cost is 5; only a successful purchase updates it from the new machine count. First threshold and later successor receipts are separate legal command IDs. All receipts/state here are future design expectations, not executed evidence."
     },
     {
       "id": "ENG-PROJECT-OFFER-LATCH",
@@ -8754,6 +8835,95 @@
         "The already displayed offer remains under the PROPOSED preserved lifecycle until consumed or explicitly cancelled.",
         "The server does not accept an unaffordable purchase; current affordability is always revalidated at execution.",
         "A consumed repeatable offer does not reappear without its creation trigger and remaining-use conditions."
+      ]
+    },
+    {
+      "id": "ENG-TRUST-OPS-CREATIVITY",
+      "title": "M2 independently validates Trust allocation, Ops, and nonlinear Creativity continuity",
+      "status": "DESIGN_ONLY_NOT_EXECUTED",
+      "milestone_ids": [
+        "M2"
+      ],
+      "layers": [
+        "rule_unit",
+        "state_sequence",
+        "api_contract",
+        "browser_e2e",
+        "persistence"
+      ],
+      "spec_refs": [
+        {
+          "document": "requirements/gameplay-progression.md",
+          "heading": "PROG-TRUST — Trust, production targets, and processor-memory allocation"
+        },
+        {
+          "document": "requirements/gameplay-progression.md",
+          "heading": "PROG-OPS — Operations, processors, memory, and temporary overflow"
+        },
+        {
+          "document": "requirements/gameplay-progression.md",
+          "heading": "SYS-OPS-CREATIVITY-CURVES — Exact processor rates, Creativity curve, and Xavier recovery"
+        }
+      ],
+      "canonical_coverage_ids": [
+        "ACT-PROCESSOR-ADD",
+        "ACT-MEMORY-ADD",
+        "PROG-TRUST",
+        "PROG-OPS",
+        "PROG-CREATIVITY",
+        "RES-TRUST",
+        "RES-COMPUTE",
+        "RES-CREATIVITY",
+        "SYS-TRUST-OPS-CREATIVITY",
+        "SYS-OPS-CREATIVITY-CURVES",
+        "UI-COMPUTATION",
+        "UI-TRUST",
+        "UI-CREATIVITY"
+      ],
+      "run_policy": "Run only for M2 allocation/Ops/Creativity/UI/snapshot owners and later changes to those shared contracts. M2 requires neither an offered nor purchased Xavier; the actual PRJ-096 purchase belongs to M3.",
+      "fixture": {
+        "kind": "pure_engine_fixture_only_with_api_browser_snapshot_companions",
+        "initial_state": {
+          "human": true,
+          "trust": 4,
+          "processors": 1,
+          "memory": 1,
+          "fresh_creativity_speed": 1,
+          "creativity_unlocked_by_prj003": true,
+          "prestige_s": "known value for zero-speed counterexample"
+        },
+        "clock": "Direct bounded pure-engine advancement; production exposes no pause/step endpoint",
+        "rng": "Controlled only where required by an implementation scheduler; no official RNG equivalence",
+        "public_resource_write_api": false,
+        "public_pause_step_api": false
+      },
+      "steps": [
+        {
+          "op": "allocate_second_processor_then_memory_with_legal_unspent_capacity_without_decrementing_trust"
+        },
+        {
+          "op": "advance_normalized_compute_time_and_verify_10_ops_per_processor_then_20_ops_at_p2_and_memory_cap_1000_then_2000"
+        },
+        {
+          "op": "reject_further_allocation_at_p2_m2_trust4_even_though_total_trust_is_positive_and_do_not_use_gifts"
+        },
+        {
+          "op": "compare_fresh_speed_1_with_recomputed_p1_zero_then_p2_log10_2_times_2_pow_1_1_plus_1_positive_and_confirm_prestige_cannot_make_p1_zero_positive"
+        },
+        {
+          "op": "hold_operations_at_cap_after_prj003_for_creativity_accrual_then_spend_below_cap_and_verify_pause_with_one_shared_ops_pool"
+        },
+        {
+          "op": "read_api_native_compute_trust_creativity_panels_and_snapshot_restore_all_ops_processing_timers_accumulators_and_allocations_without_offline_gains_or_xavier_offer_purchase"
+        }
+      ],
+      "assertions": [
+        "Processor and Memory additions require processors+memory<trust, use no Gift, and do not decrement total Trust configuration; when no capacity remains, even positive Trust cannot authorize another addition.",
+        "Processors generate 10 Ops/s each and P=2 generates 20 Ops/s; each Memory adds 1000 maximum standard Ops. Standard and temporary Operations are distinguished in state and UI.",
+        "Fresh speed 1 differs from evaluating log10(P)*P^1.1+P-1 at P=1, which is 0. At P=2 the exact expression log10(2)*2^1.1+1 is positive; prestige cannot turn the P=1 zero into a positive value.",
+        "After PRJ-003, Creativity accrues while the shared Operations pool is held at cap and pauses when spending drops below cap, with no independent project-spending pool fabricated.",
+        "Native/API Computation, Trust and Creativity panels expose actual fields. Snapshot restore retains allocations, capacity, standard/temporary Ops, speed and all continuing counters/timers/accumulators with no offline gains.",
+        "No step calls purchase_Xavier, requires an offer, or asserts an M3 project effect. PRJ-096 remains with M3 while these independent M2 allocation/curve/panel cases satisfy M2 acceptance."
       ]
     },
     {
@@ -9505,18 +9675,22 @@
       "title": "Xavier resets allocation rather than the universe or prestige",
       "status": "DESIGN_ONLY_NOT_EXECUTED",
       "milestone_ids": [
-        "M2",
         "M3"
       ],
       "layers": [
         "rule_unit",
         "state_sequence",
-        "browser_e2e"
+        "browser_e2e",
+        "persistence"
       ],
       "spec_refs": [
         {
           "document": "requirements/gameplay-progression.md",
           "heading": "PROG-TRUST — Trust, production targets, and processor-memory allocation"
+        },
+        {
+          "document": "requirements/gameplay-progression.md",
+          "heading": "SYS-OPS-CREATIVITY-CURVES — Exact processor rates, Creativity curve, and Xavier recovery"
         }
       ],
       "canonical_coverage_ids": [
@@ -9524,14 +9698,15 @@
         "RESET-HUMAN-001",
         "PRJ-096"
       ],
-      "run_policy": "Run for the task owning the referenced feature and whenever its rules or shared engine change; include in the owning milestone exit evidence.",
+      "run_policy": "Run only for M3/PRJ-096 Human-stage project ownership and changes to its allocation-reset or persistence contracts. M2 independently validates ordinary compute through ENG-TRUST-OPS-CREATIVITY instead of requiring this M3 purchase.",
       "fixture": {
         "kind": "pure_engine_fixture_only",
         "initial_state": {
           "human": true,
-          "creativity": "sufficient",
-          "processors_and_memory": "nontrivial",
-          "trust": "unchanged configuration capacity"
+          "creativity": 200000,
+          "processors_and_memory": "nontrivial lawful allocation",
+          "trust": "unchanged configuration capacity",
+          "ordinary_run_and_prestige_markers": "nontrivial preserved values"
         },
         "clock": "Direct test advancement of pure-engine ticks; never a production pause/step endpoint",
         "rng": "Seeded controlled source where randomness is involved; no official RNG stream equivalence",
@@ -9539,16 +9714,29 @@
       },
       "steps": [
         {
-          "op": "purchase_Xavier"
+          "op": "purchase_Xavier",
+          "creativity_spent": 100000,
+          "expected": "processors, memory, and current creativity speed are zero; Trust capacity and other run/prestige state are intact"
         },
         {
-          "op": "add_one_processor_then_second"
+          "op": "add_one_processor_then_second",
+          "expected": "the first re-added processor still has speed 0; the second uses log10(2)*2^1.1+1 and enables positive Creativity speed"
+        },
+        {
+          "op": "purchase_Xavier_again_with_new_legal_intent_after_reallocation",
+          "creativity_spent": 100000,
+          "expected": "a second real charge is allowed only while Human and conditions hold; no free retry or full-run/prestige reset occurs"
+        },
+        {
+          "op": "snapshot_and_resume_project_allocations_speed_and_timers",
+          "expected": "stored ordinary-run and prestige state plus exact project effects resume coherently without offline gains or conflation with process recovery"
         }
       ],
       "assertions": [
-        "Processors, memory, and current creativity speed reset to zero while Trust capacity and ordinary run/prestige state are not reset.",
-        "One re-added processor still has zero recomputed creativity speed; a second is needed for positive speed.",
-        "The project can repeat only while its Human-stage conditions hold and is not a debug/prestige reset control."
+        "Each legal Human-stage PRJ-096 purchase costs exactly 100000 Creativity and zeroes processors, memory, and current creativity speed while leaving Trust configuration and other ordinary run/prestige state intact.",
+        "The first re-added processor still produces zero recomputed speed through log10(P)*P^1.1+P-1 at P=1; the second makes the exact P=2 expression log10(2)*2^1.1+1 positive.",
+        "Two distinct sufficiently funded purchases each charge 100000 Creativity and repeat the allocation-only reset, not a free reticket. The project cannot repeat outside Human play and never awards U/S or resets the universe.",
+        "Snapshots preserve these actual M3 project effects and retry/current state coherently without offline gains; bare reset/debug controls and process run/retry semantics are not substituted for the source project."
       ]
     },
     {
@@ -10190,6 +10378,7 @@
         "E2E-PRESTIGE-NEXT-DOOR",
         "E2E-PRESTIGE-WITHIN",
         "E2E-TEMPORAL-RESET",
+        "ENG-TRUST-OPS-CREATIVITY",
         "E2E-XAVIER-ALLOCATION-RESET",
         "RESET-INPROCESS-RETRY-RETENTION"
       ],

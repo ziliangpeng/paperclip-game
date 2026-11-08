@@ -504,9 +504,10 @@ The single final assembly is `M1-PLAYABLE-INTEGRATION`; there is no separate dup
 - [requirements/clients.md](./clients.md) — `6. Browser UI Behavior — CONFIRMED`
 
 **Scope.**
-- Permanent Funds>=5 reveal and escalating actual AutoClipper cost
-- Nominal one clip/s per AutoClipper through M1-G01 internal conversion; add the legal buy_auto_clipper typed intent, public cost/reveal/rate feedback, and all new producer/reveal/cost continuation fields to the same-PR snapshot migration
-- Manufacturing levels/cost/Wire/production feedback and the general five-line console message history
+- Observe the actual first Funds>=5 reveal before any successful Wire or initial Marketing purchase, retaining the permanent latch and initial stored current cost $5 rather than a level-zero successor formula
+- At execution, charge the existing current cost only on success: threshold $5 -> Funds $0/count 1/next $6.10, then a distinct successor purchase at $6.10 -> count 2/next $6.21; below-current-price intent has no Funds/count/cost/ledger mutation
+- Nominal one clip/s per AutoClipper through M1-G01 internal conversion; add the legal buy_auto_clipper typed intent, public count/cost/reveal/rate feedback, and all new producer/reveal/current-cost continuation fields to the same-PR snapshot migration
+- Manufacturing levels/current cost/Wire/production feedback and the general five-line console message history
 
 **Non-goals.**
 - No additive boost projects or MegaClippers until later milestones
@@ -519,28 +520,27 @@ The single final assembly is `M1-PLAYABLE-INTEGRATION`; there is no separate dup
 - `M1-PERSISTENCE-RECOVERY`: Complete snapshot and recovery behavior must include every continuation field already introduced by the runtime.
 
 **Acceptance criteria and scenarios.**
-- **AC1:** Funds-first threshold is permanent even if Funds later falls; unaffordable purchase changes nothing Scenarios: `E2E-M1-DECLARED-PLAYABLE-EXIT`.
-- **AC2:** At least one purchased AutoClipper generates capped production during no-browser, no-SSE and Agent-inactive periods Scenarios: `RT-NO-CLIENTS-CONTINUOUS`, `E2E-M1-DECLARED-PLAYABLE-EXIT`.
-- **AC3:** Refresh/two pages observe the same producers/resources and snapshot recovery preserves producer/cost state without offline catch-up Scenarios: `UI-TWO-ANONYMOUS-PAGES`, `PERSIST-CRASH-LOSS-NO-BACKFILL`, `SSE-RECOVERED-RUN-RESYNC`.
+- **AC1:** The actual first Funds>=5 reveal occurs before any successful Wire/Marketing purchase and is permanent after Funds later falls below $5. Threshold $5 charges exactly $5, producing count 1/next $6.10; a distinct later purchase charges $6.10, producing count 2/next $6.21. Below-current-price and stale-view-forgery attempts mutate no Funds/count/current cost/ledgers and never silently reprice. Scenarios: `E2E-M1-DECLARED-PLAYABLE-EXIT`.
+- **AC2:** The first and second purchased AutoClippers each generate capped baseline one-clip/s production during no-browser, no-SSE and Agent-inactive periods, without free production or caller-selected cost. Scenarios: `RT-NO-CLIENTS-CONTINUOUS`, `E2E-M1-DECLARED-PLAYABLE-EXIT`.
+- **AC3:** Refresh/two pages observe identical producers/count/current cost/reveal. Snapshots restore stored $5/$6.10/$6.21 states without level-zero recomputation or offline gain. Same-ID retry replays the first stored receipt with no second mutation; a distinct legal intent after replenishment can buy at the successor $6.10. Scenarios: `UI-TWO-ANONYMOUS-PAGES`, `PERSIST-CRASH-LOSS-NO-BACKFILL`, `SSE-RECOVERED-RUN-RESYNC`.
 
 **Required tests.**
-- Layers `rule_unit`, `state_sequence`; acceptance `AC1`; scenarios `E2E-M1-DECLARED-PLAYABLE-EXIT`. Reveal/cost/purchase sequence and automatic Wire-exhaustion tests
-- Layers `state_sequence`, `long_simulation`, `persistence`; acceptance `AC2`; scenarios `RT-NO-CLIENTS-CONTINUOUS`, `PERSIST-SNAPSHOT-30S-NONBLOCK`. Continuous production with zero clients and during atomic save; bounded integration timing rather than long sleep-based full simulation
-- Layers `browser_e2e`, `sse`, `persistence`; acceptance `AC3`; scenarios `UI-TWO-ANONYMOUS-PAGES`, `SSE-RECOVERED-RUN-RESYNC`, `PERSIST-CRASH-LOSS-NO-BACKFILL`. Refresh/reconnect/two-page E2E plus last-snapshot recovery test
+- Layers `rule_unit`, `api_contract`, `browser_e2e`, `state_sequence`; acceptance `AC1`; scenarios `E2E-M1-DECLARED-PLAYABLE-EXIT`. First-crossing and current-cost lifecycle: observe actual first $5 reveal before any Wire/Marketing buy; assert $5 -> 0/count 1/next $6.10, successor $6.10 -> count 2/next $6.21, below-price no-op, permanent latch and execute-time atomicity through rule/API/native-browser tests
+- Layers `state_sequence`, `long_simulation`, `persistence`; acceptance `AC2`; scenarios `RT-NO-CLIENTS-CONTINUOUS`, `PERSIST-SNAPSHOT-30S-NONBLOCK`. Continuous first/second producer output with zero clients and during atomic save; verify ordinary Wire-limited conversion and bounded fake-time behavior rather than long sleeps or free production
+- Layers `browser_e2e`, `sse`, `persistence`; acceptance `AC3`; scenarios `UI-TWO-ANONYMOUS-PAGES`, `SSE-RECOVERED-RUN-RESYNC`, `PERSIST-CRASH-LOSS-NO-BACKFILL`. Refresh/reconnect/two-page E2E plus exact stored producer-count/current-cost/reveal recovery, first-terminal same-ID receipt replay without mutation, distinct successor purchase, and no offline backfill or level-zero cost reconstruction
 
 **Evidence required by the future implementation PR.**
-- Current-HEAD results for: Reveal/cost/purchase sequence and automatic Wire-exhaustion tests
+- Current-HEAD first-crossing and exact receipt evidence for $5 -> $6.10 -> $6.21, below-cost rejection, permanent latch, and zero Wire/Marketing purchases before first reveal
 - Current-HEAD results for: Continuous production with zero clients and during atomic save; bounded integration timing rather than long sleep-based full simulation
-- Current-HEAD results for: Refresh/reconnect/two-page E2E plus last-snapshot recovery test
+- Current-HEAD snapshot/retry evidence preserving exact stored producer count/current cost/reveal, duplicate terminal result and successor state, with no offline catch-up or level-zero recomputation
 - A criteria-to-feature evidence ledger showing each task-owned M1 feature without claiming ownership of shared technical primitives.
 
 **Risk and review.** `core_simulation`, `concurrency_persistence_recovery`; `two_independent_reviewers_including_one_adversarial`. These are planned gates, not approvals recorded here.
 
 **Possible future implementation paths (not files in this planning PR).** `src/game/`, `src/api/`, `static/`, `tests/`
-
 ### M1-PLAYABLE-INTEGRATION — Assemble and prove the selected first playable vertical milestone
 
-**Objective.** Integrate every gameplay-map-owned M1 feature with the completed runtime/API/snapshot/SSE/native-client contracts and demonstrate the exact selected M1 entry-to-exit scenario as a genuine playable increment, with no server-shell or frontend-demo completion claim.
+**Objective.** Integrate every integrated M1 feature with the completed runtime/API/snapshot/SSE/native-client contracts and demonstrate the exact selected M1 entry-to-exit scenario as a genuine playable increment, with no server-shell or frontend-demo completion claim.
 
 **Specification references (actual document and unique heading).**
 - [requirements/milestones.md](./milestones.md) — `1. Complete Map Before Feature Implementation — CONFIRMED`
@@ -616,13 +616,13 @@ The single final assembly is `M1-PLAYABLE-INTEGRATION`; there is no separate dup
 
 ## 3. M2 coarse packages and M3-M15 supporting outlines
 
-No future GitHub Issue number is assigned. Only M2 may remain coarse as the next milestone. M3-M15 outlines are stable planning identities to refine only when their stage becomes current.
+No future GitHub Issue number is assigned. Only M2 may remain coarse as the next milestone. M3-M15 outlines are stable planning identities to refine only when their stage becomes current. M2-C01/C03 independently validate lawful allocation, Ops and the exact nonlinear Creativity curve through `ENG-TRUST-OPS-CREATIVITY`, without requiring an offered or purchased Xavier. M3-C01 alone owns the actual `E2E-XAVIER-ALLOCATION-RESET` Human purchase at 100000 Creativity, its allocation-only reset and valid repetition; `PRJ-096` ownership and all DAG edges are unchanged.
 
 | Task | Milestone | Objective | Direct predecessors | Scenario links |
 |---|---|---|---|---|
-| `M2-C01` | M2 | Next-milestone coarse package: Computing unlock and Trust/Processor/Memory/Ops. Refine into detailed one-PR Issues only after M1 is complete and this package becomes current. | `M1-PLAYABLE-INTEGRATION` | `ENG-PROJECT-OFFER-LATCH`, `E2E-XAVIER-ALLOCATION-RESET`, `E2E-FULL-PHASE-ENGINE-TRACE` |
-| `M2-C02` | M2 | Next-milestone coarse package: Project offers and foundational PRJ-001..018. Refine into detailed one-PR Issues only after M1 is complete and this package becomes current. | `M2-C01` | `ENG-PROJECT-OFFER-LATCH`, `E2E-XAVIER-ALLOCATION-RESET`, `E2E-FULL-PHASE-ENGINE-TRACE` |
-| `M2-C03` | M2 | Next-milestone coarse package: Creativity, RevTracker, and playable project UI acceptance. Refine into detailed one-PR Issues only after M1 is complete and this package becomes current. | `M2-C01`, `M2-C02` | `ENG-PROJECT-OFFER-LATCH`, `E2E-XAVIER-ALLOCATION-RESET`, `E2E-FULL-PHASE-ENGINE-TRACE` |
+| `M2-C01` | M2 | Next-milestone coarse package: Computing unlock and Trust/Processor/Memory/Ops. Refine into detailed one-PR Issues only after M1 is complete and this package becomes current. | `M1-PLAYABLE-INTEGRATION` | `ENG-PROJECT-OFFER-LATCH`, `ENG-TRUST-OPS-CREATIVITY`, `E2E-FULL-PHASE-ENGINE-TRACE` |
+| `M2-C02` | M2 | Next-milestone coarse package: Project offers and foundational PRJ-001..018. Refine into detailed one-PR Issues only after M1 is complete and this package becomes current. | `M2-C01` | `ENG-PROJECT-OFFER-LATCH`, `ENG-TRUST-OPS-CREATIVITY`, `E2E-FULL-PHASE-ENGINE-TRACE` |
+| `M2-C03` | M2 | Next-milestone coarse package: Creativity, RevTracker, and playable project UI acceptance. Refine into detailed one-PR Issues only after M1 is complete and this package becomes current. | `M2-C01`, `M2-C02` | `ENG-PROJECT-OFFER-LATCH`, `ENG-TRUST-OPS-CREATIVITY`, `E2E-FULL-PHASE-ENGINE-TRACE` |
 | `M3-C01` | M3 | Mapped future outline for Scaled Human automation, Quantum Computing, and alternate reset: preserve its complete source-owned playable increment and only later refine it into independent detailed Issues. | `M2-C03` | `PERSIST-SNAPSHOT-ATOMIC-COMPLETE`, `E2E-PRESTIGE-NEXT-DOOR`, `E2E-PRESTIGE-WITHIN`, `E2E-TEMPORAL-RESET`, `E2E-XAVIER-ALLOCATION-RESET`, `E2E-FULL-PHASE-ENGINE-TRACE`, `RESET-INPROCESS-RETRY-RETENTION` |
 | `M4-C01` | M4 | Mapped future outline for Investments, Yomi, and the complete strategy pool: preserve its complete source-owned playable increment and only later refine it into independent detailed Issues. | `M2-C03`, `M3-C01` | `E2E-FULL-PHASE-ENGINE-TRACE` |
 | `M5-C01` | M5 | Mapped future outline for Late-Human Trust routes, AutoTourney, and HypnoDrone release: preserve its complete source-owned playable increment and only later refine it into independent detailed Issues. | `M2-C03`, `M3-C01`, `M4-C01` | `E2E-FULL-PHASE-ENGINE-TRACE` |
@@ -661,11 +661,11 @@ Every milestone is a vertical increment of the same default game. Earlier legal 
 
 **Source rationale.** Primary sources: PROG-START, PROG-DEMAND-SALES, SYS-DEMAND-SALES, SYS-WIRE-MARKET, the initial RES/UI rows, and the direct Human Business controls in gameplay-actions.md and gameplay-progression.md. These systems give a real economic loop before any project exists.
 
-**Entry state.** Fresh authoritative run: clips/lifetime, Unsold Inventory, and Unused Clips all 0; Funds 0; Wire 1000 with 1000-inch spools at $20; Price $0.25; Marketing level 1; Trust 2, one Processor, one Memory, and computing/projects hidden. Matter and all future-phase state use the documented initial values even before becoming visible.
+**Entry state.** Fresh authoritative run: clips/lifetime, Unsold Inventory, and Unused Clips all 0; Funds 0; Wire 1000 with 1000-inch spools at $20; Price $0.25; Marketing level 1; Trust 2, one Processor, one Memory, and computing/projects hidden. Matter and all future-phase state use the documented initial values even before becoming visible. AutoClippers begin at count zero with reveal false and stored current cost $5, independent of the successor formula.
 
-**Playable behavior.** The player makes individual clips, buys Wire, changes price in $0.01 steps, buys Marketing, receives stock-limited stochastic sales, and after Funds first reach $5 buys AutoClippers. Production is server-generated with no clients connected. Sales reduce only Unsold Inventory; every conversion increases all three clip ledgers equally.
+**Playable behavior.** The player first makes individual clips and sells Unsold Inventory. Before any successful Wire or initial Marketing purchase, the player observes the actual first Funds>=5 reveal and stored cost $5. The first AutoClipper costs $5, gives count 1 and next cost $6.10; a later distinct purchase at $6.10 gives count 2 and next cost $6.21. Required current-quote Wire and Price/Marketing actions follow the first reveal, which remains latched after Funds falls below $5. Production is server-generated with no clients connected. Sales reduce only Unsold Inventory; every conversion increases all three clip ledgers equally.
 
-**Exit state.** From fresh state through the real UI, the player has sold clips, bought replacement Wire, adjusted Price and Marketing, and purchased at least one AutoClipper; the AutoClipper continues legal Wire-limited production through refresh/reconnect and while no browser or Agent observes. Computing, Projects, and MegaClippers are not required for exit.
+**Exit state.** From fresh state through the real UI, the player observes first $5 before any successful Wire/Marketing buy, purchases the first AutoClipper at exact stored cost 5/next 6.10 and a later one at 6.10/next 6.21, also sells clips, buys replacement Wire and adjusts Price/Marketing after reveal. At least one real producer continues legal Wire-limited production through refresh/reconnect and with no observer. Stored cost/count/reveal survive snapshot without backfill. Computing, Projects, and MegaClippers are not required for exit.
 
 **Milestone dependencies.** None
 
@@ -676,7 +676,8 @@ Every milestone is a vertical increment of the same default game. Earlier legal 
 - The shared internal conversion passes Wire 5/request 10 => produced 5 and Wire 0; Wire 0.5/request 0.2 => produced 0 and Wire 0.5; Wire 1/request 0.2 => produced 0.2 and Wire 0.8, adding the actual amount equally to all three ledgers.
 - A controlled sale consumes Unsold Inventory only and credits Funds at current Price; an empty-stock opportunity adds no Funds; simultaneous purchases cannot overspend one Funds balance.
 - Price bottoms at $0.01 through the legal control, Marketing doubles/floors its next dollar cost, and a purchased spool yields 1000 Wire while raising base quote $0.05 and resetting inactivity.
-- Funds reaching $5 permanently reveals AutoClippers; buying one charges its actual cost, and its nominal 1 clip/s request remains stock-capped. SSE disconnect, long Agent inactivity, snapshotting, refresh, and two pages never pause or fork the game.
+- The actual first Funds>=5 reveal and stored cost $5 are observed before every successful Wire or initial Marketing purchase, whose prices require later earnings. Replacement-Wire and Marketing purchases then occur legally and the latch survives subsequent Funds drops below $5.
+- Threshold purchase at Funds 5/current cost 5/count 0 charges exactly 5, leaves Funds 0/count 1/next cost 6.10; the next distinct legal purchase at current cost 6.10 charges 6.10, gives count 2/next cost 6.21. Below-price intent has no Funds/count/cost/ledger effect; duplicate ID replays the first receipt only and snapshots recover stored count/cost/reveal without offline gains or level-zero recomputation.
 
 **Catalog scenario links.** `ENG-WIRE-MANUAL-FLOOR`, `ENG-WIRE-AUTOMATIC-FLOOR-CAP`, `CONC-COMMANDS-BOTH-LEGAL`, `CONC-COMMANDS-ONE-STOCK`, `ENG-TICK-COMMAND-SERIALIZATION`, `API-COMMAND-ID-INFLIGHT-SAME`, `API-COMMAND-ID-TERMINAL-SUCCESS`, `API-COMMAND-ID-TERMINAL-REJECTION`, `API-COMMAND-ID-CONFLICT`, `API-COMMAND-SCHEMA-BOUNDARIES`, `RT-NO-CLIENTS-CONTINUOUS`, `PERSIST-SNAPSHOT-30S-NONBLOCK`, `PERSIST-SNAPSHOT-ATOMIC-COMPLETE`, `PERSIST-CRASH-LOSS-NO-BACKFILL`, `PERSIST-REPEATED-STARTUP`, `SSE-SAME-RUN-ORDERING`, `SSE-RECOVERED-RUN-RESYNC`, `SSE-DISCONNECT-RECONNECT`, `UI-EARLY-SERVER-AUTHORITY`, `UI-TWO-ANONYMOUS-PAGES`, `API-DEFAULT-NAMESPACE-BOUNDARY`, `E2E-M1-DECLARED-PLAYABLE-EXIT`, `E2E-REJECT-FINAL-WIRE`, `E2E-FULL-PHASE-ENGINE-TRACE`, `CI-BOOTSTRAP-REAL-MANIFEST`
 
@@ -685,6 +686,7 @@ Every milestone is a vertical increment of the same default game. Earlier legal 
 - Command execution tests for stale-view legality, malformed/unknown actions, legal concurrent commands versus one-resource contention, and same-process retry/dedup semantics selected by the API task.
 - Browser E2E proves clicks submit intent rather than locally award resources, server-derived views update, refresh does not roll back, and two pages share the sole default game.
 - Persistence tests prove atomic full-state snapshots, last-successful recovery, no offline catch-up, complete RNG/timer/accumulator state, and continued simulation during saves.
+- Rule/API/native-browser first-crossing and exact current-cost tests prove $5 initial charge, $6.10 successor charge and $6.21 next quote, below-cost no-ops, duplicate-ID receipt replay, permanent reveal and exact stored snapshot state without backfill.
 
 **Risks and boundaries.**
 - Do not confuse an outer Wire >=1 gate with a requirement to cover the whole automatic request. Do not expose arbitrary-number free-clip production as a player command.
@@ -717,7 +719,7 @@ Every milestone is a vertical increment of the same default game. Earlier legal 
 
 **Playable behavior.** The player allocates Human Trust between Processors and Memory, generates 10 Ops/s per Processor up to Memory*1000, buys project offers, unlocks Creativity at cap, and purchases the first 18 canonical projects plus RevTracker. Beg for More Wire supplies the genuine Trust-cost recovery path.
 
-**Exit state.** Both computing unlock routes are demonstrated; a player can buy and use Creativity, additive AutoClipper upgrades, cumulative Wire-extrusion upgrades including project10b, Trust/creativity projects, and RevTracker. Displayed offers follow their PROPOSED source-preserving latch while purchase affordability remains server-authoritative.
+**Exit state.** Both computing unlock routes are demonstrated; a player can buy and use Creativity, additive AutoClipper upgrades, cumulative Wire-extrusion upgrades including project10b, Trust/creativity projects, and RevTracker. Displayed offers follow their PROPOSED source-preserving latch while purchase affordability remains server-authoritative. M2 independently proves ordinary allocation/Ops/creativity/panel/snapshot continuity without requiring an offered or purchased Xavier.
 
 **Milestone dependencies.** `M1`
 
@@ -730,13 +732,15 @@ Every milestone is a vertical increment of the same default game. Earlier legal 
 - PRJ-001/004/005 add +0.25/+0.50/+0.75 to one multiplier and PRJ-018 adds +5, never compounding those additions. PRJ-007..010 follow supply thresholds; PRJ-011 project10b uses the stochastic Wire quote and multiplies current supply by 11.
 - A displayed offer remains eligible after its entry trigger ceases, until consumed or explicitly cancelled, but an unaffordable purchase is rejected at execution. Repeatable PRJ-002 requires its crisis trigger for each new offer; a purchase allowed at Trust -100 leaves -101 and no further affordable bailout.
 - PRJ-039 RevTracker uses analytic demand estimates when stock suffices and rolling realized revenue when stock-limited; it does not itself sell clips or alter demand.
+- ENG-TRUST-OPS-CREATIVITY independently validates M2 allocation and exact speed arithmetic without requiring offered or purchased Xavier: fresh speed 1 versus P=1 recomputation zero, P=2 positive and 20 Ops/s, legal capacity, full-cap Creativity and complete snapshots without offline gains.
 
-**Catalog scenario links.** `ENG-PROJECT-OFFER-LATCH`, `E2E-XAVIER-ALLOCATION-RESET`, `E2E-FULL-PHASE-ENGINE-TRACE`
+**Catalog scenario links.** `ENG-PROJECT-OFFER-LATCH`, `ENG-TRUST-OPS-CREATIVITY`, `E2E-FULL-PHASE-ENGINE-TRACE`
 
-**Test layers and required evidence.** Layers: `api_contract`, `browser_e2e`, `gameplay_scenario`, `long_simulation`, `property`, `rule_unit`, `state_sequence`
+**Test layers and required evidence.** Layers: `api_contract`, `browser_e2e`, `gameplay_scenario`, `long_simulation`, `persistence`, `property`, `rule_unit`, `state_sequence`
 - Per-project tests verify trigger, separate cost, exact effect, one-shot/repeat behavior, and downstream flag for every owned PRJ row; source-array position is not treated as an execution prerequisite.
 - Sequence tests cover offer creation/latching/re-offer/cancellation, concurrency between an offer purchase and resource ticks, additive boost stacking, Wire-supply thresholds, both computation gates, and Trust target Fibonacci-thousand progression.
 - UI/API tests expose Trust, next target, Processors, Memory, standard/temporary Operations, Creativity, project costs and meaningful rejection reasons without making client-disabled state authoritative.
+- M2-only rule/API/browser/snapshot cases test exact Trust capacity, processor/Memory additions, 10/20 Ops/s, fresh-versus-recomputed nonlinear speed, full-cap Creativity, complete compute continuation and no M3 project purchase.
 
 **Risks and boundaries.**
 - The offer latch is PROPOSED, not CONFIRMED. Do not replace it with a continuously re-evaluated trigger or reproduce DOM nodes as authority.
@@ -780,13 +784,13 @@ Every milestone is a vertical increment of the same default game. Earlier legal 
 - WireBuyer is offered after 15 purchases, starts internally ON, toggles without price, invokes the ordinary affordable purchase only at Wire <=1 in Human play, and never discounts or bypasses Funds.
 - Quantum Computing requires five Processors before PRJ-046. Compute without an active chip says Need Photonic Chips. PRJ-047 buys exactly ten chips at 10000 then +5000 Ops each, with deterministic signed sinusoidal values rather than loot RNG.
 - Overflow uses raw Q=ceil(360*sum), free capacity B and D=tempOps/100+5; if Q>B the actual immediate positive credit is based on ceil(Q/D), while feedback still reports raw Q. Negative qOps can expose PRJ-094 at Operations <=-10000.
-- Xavier PRJ-096 costs 100000 Creativity, sets Processors/Memory/speed to zero, and leaves Trust available for reallocation. The first re-added Processor still has zero speed; the second enables positive generation. It can repeat only while Human and is not a run reset.
+- Each Human-stage PRJ-096 purchase costs 100000 Creativity and sets Processors/Memory/speed to zero, leaving Trust available and other ordinary run/prestige state intact. The first re-added Processor still has zero speed; the exact P=2 curve is positive. A second sufficiently funded distinct purchase charges another 100000 Creativity without a full-run/prestige reset.
 - Confirming PRJ-094 adds 10000 standard Ops before full current-run reset, grants no prestige, clears project/strategy state, and retains separately stored U/S. Cancelling does not consume the offer.
 
 **Catalog scenario links.** `PERSIST-SNAPSHOT-ATOMIC-COMPLETE`, `E2E-PRESTIGE-NEXT-DOOR`, `E2E-PRESTIGE-WITHIN`, `E2E-TEMPORAL-RESET`, `E2E-XAVIER-ALLOCATION-RESET`, `E2E-FULL-PHASE-ENGINE-TRACE`, `RESET-INPROCESS-RETRY-RETENTION`
 
 **Test layers and required evidence.** Layers: `api_contract`, `browser_e2e`, `concurrency`, `gameplay_scenario`, `long_simulation`, `persistence`, `property`, `rule_unit`, `sse`, `state_sequence`
-- Rule/sequence tests cover baseline and boosted Mega rates, all boost combinations, WireBuyer at empty/low Funds and ON/OFF, ten-chip limit/cost, signed sums, overflow fade/merge, negative trigger, and Xavier first/second-Processor recovery.
+- Rule/sequence tests cover baseline and boosted Mega rates, all boost combinations, WireBuyer at empty/low Funds and ON/OFF, ten-chip limit/cost, signed sums, overflow fade/merge, negative trigger, the exact nonlinear curve, two real 100000-Creativity Xavier purchases and first/second-Processor recovery.
 - Reset/persistence tests distinguish full run reset from last-snapshot crash recovery and prove no ordinary project, strategy, timer, or resource carryover after Temporal Reversion, while existing U/S survive unchanged.
 - No arbitrary negative Compute input or debug reset is exposed. Controlled engine time/RNG is used for tests, never a public clock or resource-write API.
 
@@ -1813,7 +1817,7 @@ Accept and Reject are independent clean-run branches; Reject teardown is ordered
 Next Door increments U, Within increments S, Temporal Reversion grants no new U/S, and Xavier only resets Human allocation; process recovery is not any of these resets.
 
 - Owners: `PROG-PRESTIGE`, `PROG-TEMPORAL-RESET`, `PROG-TRUST`, `RES-PRESTIGE`, `UI-PRESTIGE`, `PRJ-094`, `PRJ-096`
-- Scenarios: `E2E-PRESTIGE-NEXT-DOOR`, `E2E-PRESTIGE-WITHIN`, `E2E-TEMPORAL-RESET`, `E2E-XAVIER-ALLOCATION-RESET`, `RESET-INPROCESS-RETRY-RETENTION`
+- Scenarios: `E2E-PRESTIGE-NEXT-DOOR`, `E2E-PRESTIGE-WITHIN`, `E2E-TEMPORAL-RESET`, `ENG-TRUST-OPS-CREATIVITY`, `E2E-XAVIER-ALLOCATION-RESET`, `RESET-INPROCESS-RETRY-RETENTION`
 - Sources:
   - [requirements/gameplay-progression.md](./gameplay-progression.md) — `PROG-PRESTIGE — The Universe Next Door, The Universe Within, and persistent bonuses`
   - [requirements/gameplay-progression.md](./gameplay-progression.md) — `PROG-TEMPORAL-RESET — Quantum Temporal Reversion`
@@ -1853,7 +1857,7 @@ The project infrastructure default is a complete atomic snapshot every 30 second
 
 ## 7. Acceptance scenario catalog — all design only
 
-All 43 scenarios from the current validation input are preserved, including `RESET-INPROCESS-RETRY-RETENTION`. One supporting `CI-BOOTSTRAP-REAL-MANIFEST` scenario was added during integration to bind the detailed bootstrap task to a real process-level acceptance proof. The 44 records are DESIGN_ONLY_NOT_EXECUTED. Their complete fixtures, steps, assertions, run policies, and coverage links are in the structured plan; the table gives the public acceptance focus rather than pretending execution.
+All 43 scenarios from the current validation input are preserved, including `RESET-INPROCESS-RETRY-RETENTION`. `CI-BOOTSTRAP-REAL-MANIFEST` remains the supporting bootstrap scenario added during integration, and `ENG-TRUST-OPS-CREATIVITY` now supplies independent M2 allocation/Ops/Creativity evidence without the M3 Xavier purchase. The 45 records are DESIGN_ONLY_NOT_EXECUTED. Their complete fixtures, steps, assertions, run policies, and coverage links are in the structured plan; the table gives the public acceptance focus rather than pretending execution.
 
 | Scenario | Milestones | Layers | Acceptance focus |
 |---|---|---|---|
@@ -1878,8 +1882,9 @@ All 43 scenarios from the current validation input are preserved, including `RES
 | `UI-EARLY-SERVER-AUTHORITY` — Early browser play sends intent and renders server results only | `M1` | `browser_e2e`, `api_contract` | The click sends a command; browser JavaScript does not directly increment authoritative resources or invent success. |
 | `UI-TWO-ANONYMOUS-PAGES` — Two anonymous pages share one default game without a new world or role handoff | `M1` | `browser_e2e`, `concurrency`, `sse` | Both pages show the same shared authoritative state after resynchronization; opening B neither starts nor resets a world. |
 | `API-DEFAULT-NAMESPACE-BOUNDARY` — Default namespace is internal and no multi-instance management surface appears | `M1` | `api_contract`, `sse`, `persistence` | All ordinary external operations transparently use default and no selector is required. |
-| `E2E-M1-DECLARED-PLAYABLE-EXIT` — M1 reaches its planned manual-sales-automation exit through real UI and API | `M1` | `gameplay_scenario`, `browser_e2e`, `api_contract`, `sse`, `state_sequence` | The player sells at least one clip, buys replacement Wire, adjusts Price and Marketing, and purchases at least one AutoClipper using only legal public controls. |
+| `E2E-M1-DECLARED-PLAYABLE-EXIT` — M1 reaches its planned manual-sales-automation exit through real UI and API | `M1` | `gameplay_scenario`, `browser_e2e`, `api_contract`, `sse`, `state_sequence` | The actual first Funds>=5 observation and permanent reveal occur before every successful Wire or Marketing purchase; both pre-observation purchase counters are zero. Later spending below $5 never clears the latch. |
 | `ENG-PROJECT-OFFER-LATCH` — Displayed project offers preserve eligibility while affordability remains execution-authoritative | `M2` | `rule_unit`, `state_sequence`, `api_contract` | The already displayed offer remains under the PROPOSED preserved lifecycle until consumed or explicitly cancelled. |
+| `ENG-TRUST-OPS-CREATIVITY` — M2 independently validates Trust allocation, Ops, and nonlinear Creativity continuity | `M2` | `rule_unit`, `state_sequence`, `api_contract`, `browser_e2e`, `persistence` | Processor and Memory additions require processors+memory<trust, use no Gift, and do not decrement total Trust configuration; when no capacity remains, even positive Trust cannot authorize another addition. |
 | `ENG-POWER-FULL-COVER` — Stored energy exactly covering a deficit keeps base performance one | `M6` | `rule_unit`, `state_sequence` | Because B >= D-S, remaining stored energy is 0 and the base factor before Momentum is exactly 1. |
 | `ENG-POWER-LAST-PARTIAL` — The confirmed last-partial-cover update is continuous and nonnegative | `M6` | `rule_unit`, `state_sequence` | First update consumes remaining B and uses exactly (S+B)/D = 0.5 before Momentum. |
 | `ENG-POWER-SURPLUS-CAP-SPACE` — Power storage remains capped and Space excludes terrestrial throttling | `M6`, `M9`, `M10` | `rule_unit`, `state_sequence` | Surplus charging stops at actual battery capacity; battery disassembly clears storage as specified. |
@@ -1894,7 +1899,7 @@ All 43 scenarios from the current validation input are preserved, including `RES
 | `E2E-PRESTIGE-NEXT-DOOR` — Universe Next Door resets ordinary run state and retains linear U prestige | `M3`, `M13` | `gameplay_scenario`, `persistence`, `browser_e2e` | U increments by exactly one, S is unchanged, and ordinary run/project/strategy state restarts. |
 | `E2E-PRESTIGE-WITHIN` — Universe Within resets ordinary run state and retains linear S prestige | `M3`, `M13` | `gameplay_scenario`, `persistence`, `browser_e2e` | S increments by exactly one, U is unchanged, and ordinary state restarts. |
 | `E2E-TEMPORAL-RESET` — Quantum Temporal Reversion is a non-prestige current-run reset | `M3`, `M13` | `gameplay_scenario`, `persistence`, `browser_e2e` | Confirmation adds the specified signed-op adjustment as the reset path begins and grants neither U nor S. |
-| `E2E-XAVIER-ALLOCATION-RESET` — Xavier resets allocation rather than the universe or prestige | `M2`, `M3` | `rule_unit`, `state_sequence`, `browser_e2e` | Processors, memory, and current creativity speed reset to zero while Trust capacity and ordinary run/prestige state are not reset. |
+| `E2E-XAVIER-ALLOCATION-RESET` — Xavier resets allocation rather than the universe or prestige | `M3` | `rule_unit`, `state_sequence`, `browser_e2e`, `persistence` | Each legal Human-stage PRJ-096 purchase costs exactly 100000 Creativity and zeroes processors, memory, and current creativity speed while leaving Trust configuration and other ordinary run/prestige state intact. |
 | `E2E-REJECT-FINAL-WIRE` — Confirmed Reject remainder converts positive fractions only in final manual play | `M1`, `M15` | `rule_unit`, `state_sequence`, `api_contract`, `gameplay_scenario` | Each accepted final command produces min(1,Wire), consumes exactly that amount, adds it equally to all three clip ledgers, and increments the accepted counter once. |
 | `CONC-REJECT-FINAL-WIRE` — Concurrent final conversion commands cannot recreate Wire or double-credit the terminal count | `M15` | `concurrency`, `property`, `state_sequence` | Only one positive-Wire conversion succeeds; each ledger gains exactly 0.25 once, Wire reaches exact zero, and count becomes 100. |
 | `E2E-REJECT-CREDITS` — Reject teardown stops automatic production and credits complete only at exact zero after Memory | `M14`, `M15` | `state_sequence`, `gameplay_scenario`, `persistence`, `browser_e2e`, `long_simulation` | All seven stages, prerequisites, returns, and interface handoffs occur in order; Memory spends current standard Ops. |
@@ -1902,11 +1907,27 @@ All 43 scenarios from the current validation input are preserved, including `RES
 | `RESET-INPROCESS-RETRY-RETENTION` — In-process reset retains terminal retry bindings and process run identity | `M3`, `M13` | `api_contract`, `concurrency`, `state_sequence`, `sse`, `persistence`, `gameplay_scenario` | The legal in-process reset keeps process run_id=R1 and increments revision exactly once for the reset mutation; process identity is not confused with the fresh current-run game state. |
 | `CI-BOOTSTRAP-REAL-MANIFEST` — The future M1 host builds and tests a real Rust manifest without becoming a playable claim | `M1` | `rule_unit`, `state_sequence` | Real Rust format, lint, test, locked-build, inventory, and hygiene commands execute and report their actual results; no missing-manifest conditional skip exists. |
 
-### 7.1 M1 exact entry and exit scenario
+### 7.1 M1 exact entry and ordered first-reveal/current-cost exit scenario
 
-`E2E-M1-DECLARED-PLAYABLE-EXIT` starts with lifetime/Unsold/Unused clips, Funds and AutoClippers at zero; Wire 1000; a 1000-inch spool at $20; Price $0.25; Marketing level 1/cost $100; Trust 2 with one Processor and one Memory; Computing/Projects hidden. Through only legal controls, the player sells clips, buys Wire, adjusts Price/Marketing, reaches the permanent $5 reveal, and buys an AutoClipper. Closing pages/streams does not pause it. Snapshot recovery restores only the last committed state without offline gains.
+`E2E-M1-DECLARED-PLAYABLE-EXIT` starts with lifetime/Unsold/Unused clips, Funds and AutoClippers at zero; Wire 1000; a 1000-inch spool at $20; Price $0.25; Marketing level 1/cost $100; Trust 2 with one Processor and one Memory; Computing/Projects hidden; **zero AutoClippers, reveal false, and stored current cost $5**. That stored initial cost is not the successor formula evaluated at level zero.
 
-The final-assembly acceptance checks every exit action and all 19 owners through engine/API/UI/snapshot evidence. It rejects a pure Rust shell, local browser counter, debug fixture, fabricated success, offline backfill, or unimplemented later-game claims.
+The required ordered flow is:
+
+1. Use only manual production and normal online sales until the **actual first** Funds observation reaches $5. Both successful-Wire and successful-Marketing purchase counters are still zero at that observation. A $20 spool or $100 initial Marketing cannot silently precede this first crossing.
+2. Observe the permanent reveal and stored cost $5. Buy the first AutoClipper through the real current-cost intent: Funds 5 -> charge 5 -> Funds 0, producer count 0 -> 1, next stored cost **$6.10**. The latch and reveal stay set after Funds falls below $5.
+3. Attempt to buy below current price: no Funds, producer count, current cost, or clip-ledger mutation and no hidden fallback repricing. A stale View does not overrule an otherwise legal current-state action.
+4. Continue legal production/sales to fund the current-quote replacement Wire and initial Marketing purchase only after the first reveal. Verify current-cost-at-execution, Wire supply/quote/base+$0.05/inactivity, Marketing cost behavior and that the reveal persists after these later spends drop Funds below $5.
+5. After replenishment, a distinct legal intent buys a second producer at current cost **$6.10**: count 2 and next stored cost **$6.21**. Each producer uses ordinary baseline Wire-limited conversion, not free production.
+6. Retry the first threshold `command_id`: return its original terminal receipt and change no Funds, count, price, ledger, or revision. The first receipt and later distinct successor intent are independent legal operations.
+7. Close pages and streams, reconnect, and exercise snapshot/restart recovery. Verify continuous no-client production and exact stored producer count/current cost/reveal with no offline backfill and no level-zero reconstruction.
+
+| Future legal-operation case | Funds before | Current cost before | Producers before | Result | Funds after | Producers after | Stored next/current cost | Reveal after |
+|---|---:|---:|---:|---|---:|---:|---:|---|
+| Exact first threshold | 5.00 | 5.00 | 0 | Charge 5.00 once | 0.00 | 1 | 6.10 | Latched |
+| Second distinct successor intent | 20.00 | 6.10 | 1 | Charge 6.10 once | 13.90 | 2 | 6.21 | Latched |
+| Rejected below current cost | 4.99 | 5.00 | 0 | Charge 0; no producer/cost/ledger mutation | 4.99 | 0 | 5.00 | Latched |
+
+Duplicate-ID replay of the first threshold has receipt charge 5/count 1/next cost 6.10 but zero additional charge or producer; after the second intent the current world remains count 2/current cost 6.21. Snapshot cases preserve count 1/cost 6.10 and count 2/cost 6.21 with reveal true and zero offline progress. The final assembly checks all 19 M1 feature owners through engine/API/UI/snapshot evidence, never a debug/state-write endpoint, local fake counter, or post-reveal cost amnesia.
 
 ## 8. Representative source-grounded execution traces
 
@@ -2823,10 +2844,10 @@ Aliases are trace/detail views, never extra feature owners. The canonical target
 
 - Canonical targets: `PROG-TRUST`
 - Owner milestones: `M2`
-- Scenario traces: `E2E-XAVIER-ALLOCATION-RESET`, `E2E-FULL-PHASE-ENGINE-TRACE`
+- Scenario traces: `ENG-TRUST-OPS-CREATIVITY`, `E2E-XAVIER-ALLOCATION-RESET`, `E2E-FULL-PHASE-ENGINE-TRACE`
 - Canonical documents: [requirements/gameplay-progression.md](./gameplay-progression.md), [requirements/gameplay-combat-endgame.md](./gameplay-combat-endgame.md)
 - Canonical note: PROG-TRUST
-- Integration resolution: PROG-TRUST Preserve this alias/detail view in the target milestone acceptance; it adds no canonical feature owner row.
+- Integration resolution: PROG-TRUST remains M2-owned and PRJ-096 remains M3-related, with no canonical ownership change. M2 independently accepts ordinary allocation/Ops/creativity/UI/snapshots through ENG-TRUST-OPS-CREATIVITY; M3 separately accepts actual Human PRJ-096 purchase at 100000 Creativity, its allocation-only reset and valid repetition through E2E-XAVIER-ALLOCATION-RESET.
 - Related canonical acceptance links: `PRJ-096`, `SYS-OPS-CREATIVITY-CURVES`, `ACT-PROCESSOR-ADD`, `ACT-MEMORY-ADD`
 
 ### Narrow `PROBE-DESIGN-001` family rule

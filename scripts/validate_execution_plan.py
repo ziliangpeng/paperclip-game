@@ -45,7 +45,7 @@ EXPECTED_SCENARIOS = {
     "SSE-RECOVERED-RUN-RESYNC", "SSE-DISCONNECT-RECONNECT",
     "UI-EARLY-SERVER-AUTHORITY", "UI-TWO-ANONYMOUS-PAGES",
     "API-DEFAULT-NAMESPACE-BOUNDARY", "E2E-M1-DECLARED-PLAYABLE-EXIT",
-    "ENG-PROJECT-OFFER-LATCH", "ENG-POWER-FULL-COVER", "ENG-POWER-LAST-PARTIAL",
+    "ENG-PROJECT-OFFER-LATCH", "ENG-TRUST-OPS-CREATIVITY", "ENG-POWER-FULL-COVER", "ENG-POWER-LAST-PARTIAL",
     "ENG-POWER-SURPLUS-CAP-SPACE", "ENG-GIFT-ACTIVE-RESET",
     "ENG-GIFT-INACTIVE-HEALTH-GATES", "ENG-COMBAT-NAMING-HONOR-GATES",
     "ENG-COMBAT-TIMEOUT-HONOR", "ENG-HONOR-NEGATIVE-AND-GLORY",
@@ -554,6 +554,7 @@ class Checker:
         task_edges = {}
         for row in tasks:
             tid = obj(row).get("id")
+            self.require(isinstance(obj(row).get("depends_on"), list), "E_TASK_FIELD", f"{tid}.depends_on", "expected dependency array of objects")
             deps = arr(obj(row).get("depends_on"))
             values = []
             for pos, dep in enumerate(deps):
@@ -670,7 +671,8 @@ class Checker:
                     expected_family.extend(fid for fid in self.feature_map if fid.startswith(family[:-1]))
                 else:
                     self.e("E_ALIAS_FAMILY", str(aid), f"empty/bad family {family}")
-            self.require(arr(row.get("resolved_family_feature_ids")) == expected_family, "E_ALIAS_FAMILY", str(aid), "family expansion differs; direct-arrow family is exactly 16, not all 19 prefix matches")
+            resolved_family = self.strings(row.get("resolved_family_feature_ids"), "E_ALIAS_FAMILY", f"{aid}.resolved_family_feature_ids", nonempty=False, unique=True)
+            self.require(resolved_family == expected_family, "E_ALIAS_FAMILY", str(aid), "family expansion differs; direct-arrow family is exactly 16, not all 19 prefix matches")
             related = self.strings(row.get("related_feature_ids"), "E_ALIAS_TARGET", f"{aid}.related_feature_ids", nonempty=False, unique=True)
             self.require(set(related) <= set(self.feature_map), "E_ALIAS_TARGET", str(aid), "related feature must be canonical")
             target_features = list(arr(canonical.get("targets"))) + expected_family
@@ -712,6 +714,80 @@ class Checker:
             else:
                 self.require(row.get("milestone_id") == self.owner_map.get(cid) and row.get("exclusion_id") is None, "E_HANDLER_BINDING", f"handler row {index}", "feature owner differs")
 
+    def validate_source_lifecycles(self):
+        # Source-specific lifecycle checks use explicit future legal-operation oracles, not a game-rule engine.
+        scenario = obj(self.scenario_map.get("E2E-M1-DECLARED-PLAYABLE-EXIT"))
+        fixture = obj(scenario.get("fixture"))
+        initial = obj(fixture.get("initial_state"))
+        for field, expected in (("funds", 0), ("auto_clippers", 0), ("auto_clipper_current_cost", 5.0), ("auto_clipper_reveal_latch", False)):
+            self.require(initial.get(field) == expected, "E_AUTOCLIPPER_COST", "E2E-M1.initial_state", f"{field} must be {expected}")
+        expected_cases = [
+            {"case": "exact_threshold_first_purchase", "funds_before": 5.0, "current_cost_before": 5.0, "producer_count_before": 0, "accepted": True, "charge": 5.0, "funds_after": 0.0, "producer_count_after": 1, "current_cost_after": 6.1, "reveal_after": True},
+            {"case": "successor_second_distinct_purchase", "funds_before": 20.0, "current_cost_before": 6.1, "producer_count_before": 1, "accepted": True, "charge": 6.1, "funds_after": 13.9, "producer_count_after": 2, "current_cost_after": 6.21, "reveal_after": True},
+            {"case": "rejected_below_current_price", "funds_before": 4.99, "current_cost_before": 5.0, "producer_count_before": 0, "accepted": False, "charge": 0.0, "funds_after": 4.99, "producer_count_after": 0, "current_cost_after": 5.0, "reveal_after": True},
+        ]
+        case_fields = set(expected_cases[0])
+        cases = arr(fixture.get("auto_clipper_cost_cases"))
+        self.require(len(cases) == 3, "E_AUTOCLIPPER_COST", "E2E-M1.auto_clipper_cost_cases", "threshold, successor, and rejected rows are required")
+        for index, expected in enumerate(expected_cases):
+            row = cases[index] if index < len(cases) else None
+            where = f"E2E-M1.auto_clipper_cost_cases[{index}]"
+            if not self.exact(row, case_fields, "E_AUTOCLIPPER_COST", where):
+                continue
+            for field, expected_value in expected.items():
+                actual = row.get(field)
+                if field in {"accepted", "reveal_after"}:
+                    good = actual is expected_value
+                elif field == "case":
+                    good = actual == expected_value and isinstance(actual, str)
+                else:
+                    good = actual == expected_value and isinstance(actual, (int, float)) and not isinstance(actual, bool)
+                self.require(good, "E_AUTOCLIPPER_COST", where + "." + field, f"expected {expected_value!r}, got {actual!r}")
+        retry = obj(fixture.get("retry_expectation"))
+        retry_expected = {"command_id": "first-auto-threshold", "receipt_charge": 5.0, "receipt_producer_count": 1, "receipt_next_cost": 6.1, "additional_charge": 0.0, "additional_producer_count": 0, "producer_count_after": 2, "current_cost_after": 6.21}
+        self.exact(retry, set(retry_expected), "E_AUTOCLIPPER_COST", "E2E-M1.retry_expectation")
+        for field, expected in retry_expected.items():
+            self.require(retry.get(field) == expected, "E_AUTOCLIPPER_COST", "E2E-M1.retry_expectation." + field, f"expected {expected!r}")
+        snapshots = arr(fixture.get("snapshot_expectations"))
+        expected_snapshots = [(1, 6.1), (2, 6.21)]
+        self.require(len(snapshots) == 2, "E_AUTOCLIPPER_COST", "E2E-M1.snapshot_expectations", "stored count/cost/reveal rows for both purchases are required")
+        for index, (count, cost) in enumerate(expected_snapshots):
+            row = obj(snapshots[index] if index < len(snapshots) else None)
+            self.require(row.get("producer_count") == count and row.get("current_cost") == cost and row.get("reveal") is True and row.get("offline_progress") == 0, "E_AUTOCLIPPER_COST", f"E2E-M1.snapshot_expectations[{index}]", "stored count/cost/reveal and no backfill must be exact")
+        expected_ops = [
+            "start_fresh_default_server_and_open_two_anonymous_pages_plus_one_agent",
+            "produce_and_sell_manually_until_first_funds_5_with_zero_successful_wire_or_marketing_purchases_before_observation",
+            "observe_first_funds_5_reveal_and_stored_cost_5_before_any_wire_or_marketing_purchase",
+            "purchase_first_auto_clipper_at_stored_cost_5_charge_5_count_1_next_cost_6_10",
+            "attempt_below_current_cost_and_verify_no_funds_count_cost_or_ledger_mutation",
+            "fund_current_quote_wire_and_initial_marketing_after_first_reveal_and_verify_permanent_latch_after_funds_fall_below_5",
+            "purchase_second_auto_clipper_with_distinct_intent_at_current_cost_6_10_count_2_next_cost_6_21",
+            "retry_first_threshold_command_id_and_receive_first_terminal_receipt_without_mutation",
+            "close_pages_and_streams_then_reconnect_and_snapshot_restart_to_verify_no_pause_backfill_or_fork",
+        ]
+        actual_ops = [obj(step).get("op") for step in arr(scenario.get("steps"))]
+        self.require(actual_ops == expected_ops, "E_AUTOCLIPPER_COST", "E2E-M1.steps", "first reveal/first purchase must precede Wire/Marketing; successor, rejected, retry, and no-backfill steps remain ordered")
+        # M2 owns ordinary compute; only M3 owns the actual Xavier purchase, and the alias retains both contexts.
+        xavier = obj(self.scenario_map.get("E2E-XAVIER-ALLOCATION-RESET"))
+        cpu = obj(self.scenario_map.get("ENG-TRUST-OPS-CREATIVITY"))
+        self.require(xavier.get("milestone_ids") == ["M3"], "E_STAGE_SCENARIO", "E2E-XAVIER-ALLOCATION-RESET.milestone_ids", "actual Xavier purchase is M3 only")
+        self.require(cpu.get("milestone_ids") == ["M2"], "E_STAGE_SCENARIO", "ENG-TRUST-OPS-CREATIVITY.milestone_ids", "independent compute acceptance is M2 only")
+        m2 = obj(self.milestone_map.get("M2"))
+        m3 = obj(self.milestone_map.get("M3"))
+        self.require("E2E-XAVIER-ALLOCATION-RESET" not in arr(m2.get("scenario_ids")), "E_STAGE_SCENARIO", "M2.scenario_ids", "M2 cannot require the M3 project purchase")
+        self.require("ENG-TRUST-OPS-CREATIVITY" in arr(m2.get("scenario_ids")), "E_STAGE_SCENARIO", "M2.scenario_ids", "M2 independent compute scenario is required")
+        self.require("E2E-XAVIER-ALLOCATION-RESET" in arr(m3.get("scenario_ids")), "E_STAGE_SCENARIO", "M3.scenario_ids", "M3 must retain actual Xavier acceptance")
+        for tid in ("M2-C01", "M2-C02", "M2-C03"):
+            task = obj(self.task_map.get(tid))
+            self.require("ENG-TRUST-OPS-CREATIVITY" in arr(task.get("scenario_ids")) and "E2E-XAVIER-ALLOCATION-RESET" not in arr(task.get("scenario_ids")), "E_STAGE_SCENARIO", tid + ".scenario_ids", "all M2 mirrors use independent compute, never the M3 purchase")
+        reset = next((row for row in arr(self.plan.get("alias_traces")) if obj(row).get("id") == "RESET-HUMAN-001"), {})
+        self.require(reset.get("scenario_ids") == ["ENG-TRUST-OPS-CREATIVITY", "E2E-XAVIER-ALLOCATION-RESET", "E2E-FULL-PHASE-ENGINE-TRACE"], "E_STAGE_SCENARIO", "RESET-HUMAN-001.scenario_ids", "alias retains independent M2 compute and actual M3 project contexts")
+        self.require("PRJ-096" in arr(reset.get("related_feature_ids")) and self.owner_map.get("PRJ-096") == "M3" and self.owner_task.get("PRJ-096") == "M3-C01", "E_STAGE_SCENARIO", "RESET-HUMAN-001/PRJ-096", "primary Xavier ownership cannot drift")
+        steps_text = json.dumps(cpu.get("steps"), ensure_ascii=False)
+        self.require("purchase_Xavier" not in steps_text, "E_STAGE_SCENARIO", "ENG-TRUST-OPS-CREATIVITY.steps", "M2 arithmetic must not call purchase_Xavier")
+        xavier_charges = [obj(step).get("creativity_spent") for step in arr(xavier.get("steps")) if "creativity_spent" in obj(step)]
+        self.require(xavier_charges == [100000, 100000], "E_STAGE_SCENARIO", "E2E-XAVIER-ALLOCATION-RESET.steps", "two real Human-stage purchases each cost 100000 Creativity")
+
     def validate_scenarios_invariants_technical(self):
         # Invariant records always connect canonical owners to relevant scenario and source evidence.
         records = arr(self.plan.get("invariants"))
@@ -745,7 +821,15 @@ class Checker:
                 self.string(obj(row).get(field), "E_TECHNICAL_CONTRACT", f"technical_contract.proposed[{index}].{field}")
         self.require(len(arr(technical.get("proposed"))) == 7, "E_TECHNICAL_CONTRACT", "technical_contract.proposed", "seven explicit engineering-choice rows required")
         self.require(len(arr(technical.get("later_platform_sequencing"))) == 7, "E_TECHNICAL_CONTRACT", "technical_contract.later_platform_sequencing", "seven platform capability rows required")
+        for index, row in enumerate(arr(technical.get("later_platform_sequencing"))):
+            where = f"technical_contract.later_platform_sequencing[{index}]"
+            self.exact(row, {"capability", "depends_on", "supporting_boundaries", "proof"}, "E_TECHNICAL_CONTRACT", where)
+            self.string(obj(row).get("capability"), "E_TECHNICAL_CONTRACT", where + ".capability")
+            self.string(obj(row).get("depends_on"), "E_TECHNICAL_CONTRACT", where + ".depends_on")
+            self.string(obj(row).get("proof"), "E_TECHNICAL_CONTRACT", where + ".proof")
+            self.strings(row.get("supporting_boundaries") if isinstance(row, dict) else None, "E_TECHNICAL_CONTRACT", where + ".supporting_boundaries", unique=True)
         status = obj(technical.get("verification_status"))
+        self.exact(status, {"game_implementation_exists", "cargo_browser_sqlite_game_tests_executed", "planning_cli", "github_actions", "required_followup"}, "E_TECHNICAL_CONTRACT", "technical_contract.verification_status")
         for field in ("game_implementation_exists", "cargo_browser_sqlite_game_tests_executed"):
             self.require(status.get(field) is False, "E_EXECUTION_STATUS", f"technical_contract.verification_status.{field}", "candidate must not claim an existing game or executed game tests")
         for field in ("planning_cli", "github_actions", "required_followup"):
@@ -879,6 +963,7 @@ class Checker:
         self.validate_scenarios()
         self.validate_milestones_and_tasks()
         self.validate_owners_exclusions_aliases_bindings()
+        self.validate_source_lifecycles()
         self.validate_scenarios_invariants_technical()
         self.validate_public()
         self.stats["milestones"] = len(arr(plan.get("milestones"))) if isinstance(plan, dict) else 0
@@ -949,6 +1034,56 @@ def append_text(path: Path, value: str):
     path.write_text(path.read_text(encoding="utf-8") + value, encoding="utf-8")
 
 
+def duplicate_members_in_text(text):
+    """Accept duplicate-key JSON while proving which object-local keys repeat."""
+    found = []
+    def inspect_pairs(pairs):
+        seen = set()
+        result = {}
+        for key, value in pairs:
+            if key in seen:
+                found.append(key)
+            seen.add(key)
+            result[key] = value
+        return result
+    json.loads(text, object_pairs_hook=inspect_pairs)
+    return found
+
+
+def inject_duplicate_member(case_dir, kind):
+    """Create valid JSON with a same-object duplicate and independently prove it."""
+    if kind == "plan_root":
+        path = case_dir / "requirements/data/execution-plan.json"
+        text = path.read_text(encoding="utf-8")
+        text = text.replace("{\n", '{\n  "schema_version": 1,\n', 1)
+        expected_key = "schema_version"
+    elif kind == "task_id":
+        path = case_dir / "requirements/data/execution-plan.json"
+        text = path.read_text(encoding="utf-8")
+        anchor = '      "id": "M1-BOOTSTRAP-CI",'
+        replacement = anchor + '\n      "id": "M1-BOOTSTRAP-CI",'
+        if text.count(anchor) != 1:
+            raise ValueError("task duplicate anchor is not unique")
+        text = text.replace(anchor, replacement, 1)
+        expected_key = "id"
+    elif kind == "inventory_source_binding":
+        path = case_dir / "requirements/data/gameplay-inventory.json"
+        text = path.read_text(encoding="utf-8")
+        anchor = '"official_id": "project1",'
+        replacement = anchor + '\n        "official_id": "project1",'
+        if text.count(anchor) != 1:
+            raise ValueError("inventory source-binding anchor is not unique")
+        text = text.replace(anchor, replacement, 1)
+        expected_key = "official_id"
+    else:
+        raise ValueError("unknown duplicate-pair kind")
+    found = duplicate_members_in_text(text)
+    if expected_key not in found:
+        raise ValueError("fixture did not create the required same-object duplicate member")
+    path.write_text(text, encoding="utf-8")
+    return [expected_key]
+
+
 def self_test_cases():
     """Return declarative real subprocess mutations; none touches the original checkout."""
     cases = []
@@ -961,7 +1096,13 @@ def self_test_cases():
     def text(name, classes, rel, extra):
         case(name, 1, classes, ("text", (rel, extra)))
     case("valid-control", 0, [])
-    case("duplicate-json-key", 2, ["E_INPUT"], ("duplicate_key", None))
+    case("duplicate-json-root-member", 2, ["E_INPUT"], ("duplicate_pair", "plan_root"))
+    case("duplicate-json-task-id-member", 2, ["E_INPUT"], ("duplicate_pair", "task_id"))
+    case("duplicate-json-inventory-source-binding-member", 2, ["E_INPUT"], ("duplicate_pair", "inventory_source_binding"))
+    p("depends-on-not-array", ["E_TASK_FIELD"], lambda x: x["tasks"][0].update(depends_on="not-an-array"))
+    p("alias-family-not-array", ["E_ALIAS_FAMILY"], lambda x: next(a for a in x["alias_traces"] if a["id"] == "SPACE-ENTRY-001").update(resolved_family_feature_ids="not-an-array"))
+    p("platform-sequencing-null-row", ["E_TECHNICAL_CONTRACT"], lambda x: x["technical_contract"]["later_platform_sequencing"].__setitem__(0, None))
+    p("verification-status-unexpected-key", ["E_TECHNICAL_CONTRACT"], lambda x: x["technical_contract"]["verification_status"].update(unexpectedCamelCase=True))
     case("malformed-inventory-json", 2, ["E_INPUT"], ("bad_inventory", None))
     p("schema-version-bool", ["E_SCHEMA_VERSION"], lambda x: x.update(schema_version=True))
     p("unknown-root-key", ["E_ROOT_SCHEMA"], lambda x: x.update(aliases=[]))
@@ -1050,6 +1191,8 @@ def self_test_cases():
     p("placeholder-task", ["E_PLACEHOLDER"], lambda x: x["tasks"][0].update(objective=x["tasks"][0]["objective"] + " gameplay" + "-map.m1.unresolved"))
     p("coarse-over-detailed", ["E_COARSE_CONTRACT"], lambda x: next(t for t in x["tasks"] if t["id"] == "M3-C01").update(non_goals=["fake current detail"]))
     p("wrong-container-types", ["E_TASK_SCHEMA"], lambda x: x.update(tasks={}))
+    p("autoclipper-cost-lifecycle", ["E_AUTOCLIPPER_COST"], lambda x: next(s for s in x["scenario_catalog"] if s["id"] == "E2E-M1-DECLARED-PLAYABLE-EXIT")["fixture"]["auto_clipper_cost_cases"][0].update(current_cost_after=6.0))
+    p("xavier-m2-dependency-cycle", ["E_STAGE_SCENARIO"], lambda x: next(s for s in x["scenario_catalog"] if s["id"] == "E2E-XAVIER-ALLOCATION-RESET")["milestone_ids"].insert(0, "M2"))
     # Valid JSON with hostile nested shapes must fail safely through the explicit guarded fallback.
     p("nested-task-milestone-list", ["E_VALIDATION_INTERNAL"], lambda x: x["tasks"][0].update(milestone_id=["M1"]))
     p("nested-owner-feature-dict", ["E_VALIDATION_INTERNAL"], lambda x: x["feature_owners"][0].update(feature_id={"invalid": 1}))
@@ -1095,6 +1238,7 @@ def run_self_test(args) -> int:
                 plan_path = case_dir / "requirements/data/execution-plan.json"
                 mutation = spec["mutation"]
                 private_arg = []
+                duplicate_proof = None
                 if mutation:
                     kind, payload = mutation
                     if kind == "plan":
@@ -1111,8 +1255,8 @@ def run_self_test(args) -> int:
                         rel, needle = payload
                         path = case_dir / rel
                         path.write_text(path.read_text(encoding="utf-8").replace(needle, ""), encoding="utf-8")
-                    elif kind == "duplicate_key":
-                        append_text(plan_path, '\n,"schema_version": 1\n')
+                    elif kind == "duplicate_pair":
+                        duplicate_proof = inject_duplicate_member(case_dir, payload)
                     elif kind == "bad_inventory":
                         (case_dir / "requirements/data/gameplay-inventory.json").write_text("{not json", encoding="utf-8")
                     elif kind == "missing_sources":
@@ -1145,8 +1289,12 @@ def run_self_test(args) -> int:
                     "traceback": "Traceback (most recent call last)" in output,
                     "passed": passed,
                 }
+                if duplicate_proof:
+                    result["verified_duplicate_members"] = duplicate_proof
                 results.append(result)
                 print(f"{spec['name']}: exit={completed.returncode} expected={spec['expected_exit']} classes={classes} missing={missing} traceback={result['traceback']} {'PASS' if passed else 'FAIL'}")
+                if duplicate_proof:
+                    print(f"{spec['name']}: verified_duplicate_members={duplicate_proof}")
                 if not passed:
                     print(redact(output))
             except (OSError, subprocess.SubprocessError, ValueError, TypeError) as exc:
