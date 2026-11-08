@@ -1,3 +1,5 @@
-//! Library host for the bootstrap configuration and later server composition.
+//! Authoritative game rules and the bootstrap process configuration.
 
 pub mod config;
+pub mod game;
+pub mod runtime;
