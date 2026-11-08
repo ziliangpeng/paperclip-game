@@ -827,7 +827,11 @@ def run_main_ui(browser: Browser, state: ProxyState, backend_port: int, page1: C
     rejection_record = wait_commands(state, rejection_index + 1)[-1]
     assert rejection_record["response_status"] == 422 and rejection_record["response_body"]["reason"] == "insufficient_wire"
     wait_for(lambda: dom_state(page1), lambda value: "not enough Wire" in value["status"] and "no resource change" in value["status"], "real rejection feedback")
-    assert dom_state(page1)["lifetime"] == "1000" and dom_state(page1)["wire"] == "0"
+    # The rejection response can arrive before the last successful command's
+    # SSE View. A response is not the global render order; wait for both the
+    # actual rejection feedback and the corresponding authoritative DOM state.
+    wait_for(lambda: dom_state(page1), lambda value: value["lifetime"] == "1000" and value["wire"] == "0" and "not enough Wire" in value["status"],
+             "rejection feedback after last successful full View")
     rejected_id = exact_command(rejection_record)["command_id"]
     assert agent_client.make(rejected_id) == (422, json_bytes(rejection_record["response_body"]))
     after_rejection = api.checked_json(agent_client.get()[1])
