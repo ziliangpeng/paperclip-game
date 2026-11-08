@@ -247,6 +247,32 @@ def _check_actions(steps: list[Step]) -> list[Finding]:
     return findings
 
 
+PROCESS_CANARY = "do-not-echo-this-ci-value"
+
+
+def _canary_line_allowed(line: str) -> bool:
+    """Allow only captured input, comments, and non-output test data.
+
+    This is a line-oriented literal-token check, not shell evaluation or a general
+    shell parser. Every other executable occurrence is rejected conservatively.
+    """
+    try:
+        tokens = shlex.split(line, comments=True, posix=True)
+    except ValueError:
+        return False
+    if not tokens:
+        return True
+    if tokens == ["capture_process", "--listen-addr", PROCESS_CANARY]:
+        return True
+    if len(tokens) == 4 and tokens[0] == "test" and tokens[2] in {"=", "==", "!="}:
+        operands = (tokens[1], tokens[3])
+        return (
+            any(PROCESS_CANARY in value for value in operands)
+            and all("$(" not in value and "`" not in value for value in operands)
+        )
+    return False
+
+
 def _check_process(steps: list[Step]) -> list[Finding]:
     candidates = [step for step in steps if step.run and "target/debug/paperclip-game" in step.run]
     if len(candidates) != 1:
@@ -311,8 +337,10 @@ def _check_process(steps: list[Step]) -> list[Finding]:
     ):
         if required not in lines:
             errors.append(f"missing sentinel invariant: {required}")
-    if re.search(r"^\s*(?:command\s+)?(?:echo|printf)\b.*do-not-echo-this-ci-value", body, re.MULTILINE):
-        errors.append("invalid-listener canary must not be printed")
+    for line in body.splitlines():
+        if PROCESS_CANARY in line and not _canary_line_allowed(line):
+            errors.append("invalid-listener canary must not be printed")
+            break
     return [Finding("workflow-process-contract", message) for message in errors]
 
 
@@ -411,6 +439,30 @@ def _mutations(healthy: str) -> list[tuple[str, str, str]]:
         "workflow-process-contract",
     )
     add(
+        "canary-command-double-dash-echo",
+        "          capture_process --listen-addr do-not-echo-this-ci-value",
+        "          command -- echo 'do-not-echo-this-ci-value'\n          capture_process --listen-addr do-not-echo-this-ci-value",
+        "workflow-process-contract",
+    )
+    add(
+        "canary-command-dash-p-printf",
+        "          capture_process --listen-addr do-not-echo-this-ci-value",
+        "          command -p printf '%s\\n' 'do-not-echo-this-ci-value'\n          capture_process --listen-addr do-not-echo-this-ci-value",
+        "workflow-process-contract",
+    )
+    add(
+        "canary-command-dash-p-double-dash-echo",
+        "          capture_process --listen-addr do-not-echo-this-ci-value",
+        "          command -p -- echo 'do-not-echo-this-ci-value'\n          capture_process --listen-addr do-not-echo-this-ci-value",
+        "workflow-process-contract",
+    )
+    add(
+        "canary-command-quoted-echo",
+        "          capture_process --listen-addr do-not-echo-this-ci-value",
+        "          command 'echo' 'do-not-echo-this-ci-value'\n          capture_process --listen-addr do-not-echo-this-ci-value",
+        "workflow-process-contract",
+    )
+    add(
         "manifest-skip",
         "      - name: Test all Rust targets against the committed lockfile\n        run:",
         "      - name: Test all Rust targets against the committed lockfile\n        if: hashFiles('Cargo.toml') != ''\n        run:",
@@ -479,6 +531,10 @@ def self_test(script: Path, workflow: Path) -> int:
                 "canary-echo": "invalid-listener canary must not be printed",
                 "canary-command-echo": "invalid-listener canary must not be printed",
                 "canary-command-printf": "invalid-listener canary must not be printed",
+                "canary-command-double-dash-echo": "invalid-listener canary must not be printed",
+                "canary-command-dash-p-printf": "invalid-listener canary must not be printed",
+                "canary-command-dash-p-double-dash-echo": "invalid-listener canary must not be printed",
+                "canary-command-quoted-echo": "invalid-listener canary must not be printed",
                 "malformed-extra-cargo": "unparseable Cargo shell",
                 "cargo-output-suppression": "Cargo output/status suppression",
             }
