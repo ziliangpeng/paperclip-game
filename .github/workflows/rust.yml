@@ -56,56 +56,8 @@ jobs:
       - name: Build locked library and binary
         run: cargo build --locked
 
-      - name: Check real bootstrap process contracts
-        run: |
-          set -e
-          expected_not_initialized='paperclip-game: not-yet-initialized: gameplay runtime and HTTP service are not implemented'
-          expected_forbidden='paperclip-game: configuration error: unknown or forbidden argument; only --listen-addr and --database-path are supported'
-          expected_invalid_listener='paperclip-game: configuration error: invalid value for --listen-addr; expected a numeric IP address and port'
-          stdout_file="$(mktemp)"
-          stderr_file="$(mktemp)"
-          sentinel_dir="$(mktemp -d)"
-          sentinel_db="$sentinel_dir/bootstrap-sentinel.sqlite3"
-          trap 'rm -f "$stdout_file" "$stderr_file" "$sentinel_db"; rmdir "$sentinel_dir"' EXIT
-          printf '%s' 'original-database-bytes' > "$sentinel_db"
-          sentinel_before="$(cksum "$sentinel_db")"
-
-          capture_process() {
-            set +e
-            timeout 10s target/debug/paperclip-game "$@" > "$stdout_file" 2> "$stderr_file"
-            captured_status=$?
-            set -e
-          }
-
-          test ! -e data/paperclip.sqlite3
-          test ! -e data/bootstrap-smoke.sqlite3
-          capture_process
-          test "$captured_status" -eq 1
-          test ! -s "$stdout_file"
-          test "$(cat "$stderr_file")" = "$expected_not_initialized"
-          test ! -e data/paperclip.sqlite3
-
-          capture_process --listen-addr 127.0.0.1:3100 --database-path data/bootstrap-smoke.sqlite3
-          test "$captured_status" -eq 1
-          test ! -s "$stdout_file"
-          test "$(cat "$stderr_file")" = "$expected_not_initialized"
-          test ! -e data/bootstrap-smoke.sqlite3
-
-          capture_process --database-path "$sentinel_db" --pause 1
-          test "$captured_status" -eq 2
-          test ! -s "$stdout_file"
-          test "$(cat "$stderr_file")" = "$expected_forbidden"
-          test "$(cksum "$sentinel_db")" = "$sentinel_before"
-          test ! -e "${sentinel_db}-journal"
-          test ! -e "${sentinel_db}-shm"
-          test ! -e "${sentinel_db}-wal"
-
-          capture_process --listen-addr do-not-echo-this-ci-value
-          test "$captured_status" -eq 2
-          test ! -s "$stdout_file"
-          test "$(cat "$stderr_file")" = "$expected_invalid_listener"
-          test ! -e data/paperclip.sqlite3
-          test ! -e data/bootstrap-smoke.sqlite3
+      - name: Check real API process contracts
+        run: python3 -B scripts/check_api_process.py target/debug/paperclip-game --repo .
 
       - name: Validate public repository hygiene
         run: python3 -B scripts/check_public_hygiene.py

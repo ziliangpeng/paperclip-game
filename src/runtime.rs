@@ -19,6 +19,50 @@ pub const MAX_UPDATES_PER_TURN: u8 = 10;
 pub const MAX_COMMANDS_PER_TURN: usize = 16;
 pub const HOST_DISCONTINUITY: Duration = Duration::from_secs(60);
 
+#[cfg(test)]
+type TestGate = Option<std::sync::Arc<CommandTestGate>>;
+#[cfg(not(test))]
+type TestGate = ();
+
+/// Test-only admission gate at the real writer execution boundary. It is not
+/// compiled into production and is never reachable from configuration or HTTP.
+#[cfg(test)]
+pub(crate) struct CommandTestGate {
+    entered: watch::Sender<usize>,
+    released: watch::Sender<bool>,
+}
+
+#[cfg(test)]
+impl Default for CommandTestGate {
+    fn default() -> Self {
+        let (entered, _) = watch::channel(0);
+        let (released, _) = watch::channel(false);
+        Self { entered, released }
+    }
+}
+
+#[cfg(test)]
+impl CommandTestGate {
+    async fn wait(&self) {
+        self.entered.send_modify(|entered| *entered += 1);
+        let mut released = self.released.subscribe();
+        while !*released.borrow_and_update() {
+            released.changed().await.expect("test release sender lives");
+        }
+    }
+
+    pub(crate) async fn wait_entered(&self, expected: usize) {
+        let mut entered = self.entered.subscribe();
+        while *entered.borrow_and_update() < expected {
+            entered.changed().await.expect("test entry sender lives");
+        }
+    }
+
+    pub(crate) fn release(&self) {
+        self.released.send_replace(true);
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct CommandId(u64);
 
@@ -189,10 +233,40 @@ impl GameRuntime {
     where
         C: MonotonicClock,
     {
+        #[cfg(not(test))]
+        {
+            Self::start_with_gate(clock, state, ())
+        }
+        #[cfg(test)]
+        {
+            Self::start_with_gate(clock, state, None)
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn start_with_test_gate<C>(
+        clock: C,
+        state: GameState,
+        gate: std::sync::Arc<CommandTestGate>,
+    ) -> Result<Self, RuntimeStartError>
+    where
+        C: MonotonicClock,
+    {
+        Self::start_with_gate(clock, state, Some(gate))
+    }
+
+    fn start_with_gate<C>(
+        clock: C,
+        state: GameState,
+        test_gate: TestGate,
+    ) -> Result<Self, RuntimeStartError>
+    where
+        C: MonotonicClock,
+    {
         let runtime =
             tokio::runtime::Handle::try_current().map_err(|_| RuntimeStartError::NoRuntime)?;
         let run_id = fresh_run_id().map_err(RuntimeStartError::Entropy)?;
-        let writer = Writer::new(clock, state, run_id);
+        let writer = Writer::new(clock, state, run_id, test_gate);
         let (sender, receiver) = mpsc::channel(COMMAND_QUEUE_CAPACITY);
         let initial = writer.view();
         let (view_sender, views) = watch::channel(initial);
@@ -293,7 +367,7 @@ fn fresh_run_id() -> Result<String, getrandom::Error> {
     Ok(output)
 }
 
-trait MonotonicClock: Send + Sync + 'static {
+pub(crate) trait MonotonicClock: Send + Sync + 'static {
     fn now(&self) -> Instant;
     fn wait_until(&self, deadline: Instant) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
 }
@@ -325,6 +399,8 @@ struct RetryRecord {
 
 struct Writer<C> {
     clock: C,
+    #[cfg(test)]
+    test_gate: TestGate,
     state: GameState,
     revision: u64,
     run_id: String,
@@ -335,10 +411,12 @@ struct Writer<C> {
 }
 
 impl<C: MonotonicClock> Writer<C> {
-    fn new(clock: C, state: GameState, run_id: String) -> Self {
+    fn new(clock: C, state: GameState, run_id: String, _test_gate: TestGate) -> Self {
         let last_observation = clock.now();
         Self {
             clock,
+            #[cfg(test)]
+            test_gate: _test_gate,
             state,
             revision: 0,
             run_id,
@@ -440,7 +518,7 @@ impl<C: MonotonicClock> Writer<C> {
         self.execute_new(command)
     }
 
-    fn turn(
+    async fn turn(
         &mut self,
         receiver: &mut mpsc::Receiver<QueuedCommand>,
         pending: &mut Option<QueuedCommand>,
@@ -467,6 +545,10 @@ impl<C: MonotonicClock> Writer<C> {
                 None => receiver.try_recv().ok(),
             };
             let Some(queued) = queued else { break };
+            #[cfg(test)]
+            if let Some(gate) = &self.test_gate {
+                gate.wait().await;
+            }
             let receipt = self.execute(queued.command)?;
             let _ = queued.response.send(receipt);
             commands += 1;
@@ -508,7 +590,7 @@ async fn run_writer<C: MonotonicClock>(
             Ok(()) | Err(oneshot::error::TryRecvError::Closed) => break,
             Err(oneshot::error::TryRecvError::Empty) => {}
         }
-        writer.turn(&mut receiver, &mut pending)?;
+        writer.turn(&mut receiver, &mut pending).await?;
         let _ = views.send(writer.view());
 
         if writer.lag_debt_nanos >= UPDATE_QUANTUM_NANOS || pending.is_some() {
