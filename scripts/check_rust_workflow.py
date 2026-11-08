@@ -273,6 +273,34 @@ def _canary_line_allowed(line: str) -> bool:
     return False
 
 
+def _continued_canary_context(lines: list[str]) -> bool:
+    """Detect canary text formed across physical continuation lines.
+
+    Canary-bearing continuation groups are not accepted by this bounded check.
+    Non-canary continuations remain outside this literal-specific guard.
+    """
+    group: list[str] = []
+    for line in lines:
+        group.append(line)
+        if line.endswith("\\"):
+            continue
+        if len(group) > 1:
+            joined = "".join(
+                part[:-1] if index + 1 < len(group) else part
+                for index, part in enumerate(group)
+            )
+            if PROCESS_CANARY in joined:
+                return True
+        group = []
+    if len(group) > 1:
+        joined = "".join(
+            part[:-1] if index + 1 < len(group) else part
+            for index, part in enumerate(group)
+        )
+        return PROCESS_CANARY in joined
+    return False
+
+
 def _check_process(steps: list[Step]) -> list[Finding]:
     candidates = [step for step in steps if step.run and "target/debug/paperclip-game" in step.run]
     if len(candidates) != 1:
@@ -337,10 +365,13 @@ def _check_process(steps: list[Step]) -> list[Finding]:
     ):
         if required not in lines:
             errors.append(f"missing sentinel invariant: {required}")
-    for line in body.splitlines():
-        if PROCESS_CANARY in line and not _canary_line_allowed(line):
-            errors.append("invalid-listener canary must not be printed")
-            break
+    if _continued_canary_context(body.splitlines()):
+        errors.append("invalid-listener canary must not be printed")
+    else:
+        for line in body.splitlines():
+            if PROCESS_CANARY in line and not _canary_line_allowed(line):
+                errors.append("invalid-listener canary must not be printed")
+                break
     return [Finding("workflow-process-contract", message) for message in errors]
 
 
@@ -463,6 +494,22 @@ def _mutations(healthy: str) -> list[tuple[str, str, str]]:
         "workflow-process-contract",
     )
     add(
+        "canary-continuation-echo",
+        "          capture_process --listen-addr do-not-echo-this-ci-value",
+        "          echo " "\\" "\n"
+        "            test 'do-not-echo-this-ci-value' = 'do-not-echo-this-ci-value'\n"
+        "          capture_process --listen-addr do-not-echo-this-ci-value",
+        "workflow-process-contract",
+    )
+    add(
+        "canary-continuation-split-literal",
+        "          capture_process --listen-addr do-not-echo-this-ci-value",
+        "          echo do-not-echo-" "\\" "\n"
+        "          this-ci-value\n"
+        "          capture_process --listen-addr do-not-echo-this-ci-value",
+        "workflow-process-contract",
+    )
+    add(
         "manifest-skip",
         "      - name: Test all Rust targets against the committed lockfile\n        run:",
         "      - name: Test all Rust targets against the committed lockfile\n        if: hashFiles('Cargo.toml') != ''\n        run:",
@@ -535,6 +582,8 @@ def self_test(script: Path, workflow: Path) -> int:
                 "canary-command-dash-p-printf": "invalid-listener canary must not be printed",
                 "canary-command-dash-p-double-dash-echo": "invalid-listener canary must not be printed",
                 "canary-command-quoted-echo": "invalid-listener canary must not be printed",
+                "canary-continuation-echo": "invalid-listener canary must not be printed",
+                "canary-continuation-split-literal": "invalid-listener canary must not be printed",
                 "malformed-extra-cargo": "unparseable Cargo shell",
                 "cargo-output-suppression": "Cargo output/status suppression",
             }
