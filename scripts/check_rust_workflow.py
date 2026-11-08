@@ -366,6 +366,34 @@ def _check_native_processes(steps: list[Step]) -> list[Finding]:
     return findings
 
 
+BROWSER_COMMAND = "python3 -B scripts/check_browser_stream.py target/debug/paperclip-game --require-browser"
+
+
+def _check_browser_contract(steps: list[Step]) -> list[Finding]:
+    matches = [step for step in steps if step.run and "scripts/check_browser_stream.py" in step.run]
+    if len(matches) != 1:
+        return [Finding(
+            "workflow-browser-contract",
+            f"expected one real browser stream step with --require-browser, found {len(matches)}",
+        )]
+    findings: list[Finding] = []
+    step = matches[0]
+    if step.run.strip() != BROWSER_COMMAND:
+        findings.append(Finding(
+            "workflow-browser-contract",
+            "browser stream must execute the real native binary with the non-optional --require-browser flag",
+        ))
+    if step.condition is not None or step.continue_on_error not in {None, "false"}:
+        findings.append(Finding("workflow-browser-contract", "browser stream phase must be unconditional and propagate failure"))
+    persistence_positions = [index for index, item in enumerate(steps) if item.run and "scripts/check_persistence_process.py" in item.run]
+    public_positions = [index for index, item in enumerate(steps) if item.run and item.run.strip() in PUBLIC_SUFFIX]
+    browser_position = steps.index(step)
+    if persistence_positions and public_positions:
+        if browser_position != persistence_positions[0] + 1 or browser_position >= min(public_positions):
+            findings.append(Finding("workflow-browser-contract", "browser stream must run immediately after persistence and before public validation"))
+    return findings
+
+
 def _check_public_validators(steps: list[Step]) -> list[Finding]:
     findings: list[Finding] = []
     positions: list[int] = []
@@ -414,6 +442,7 @@ def validate_document(text: str) -> list[Finding]:
         findings.extend(_check_actions(steps))
         findings.extend(_check_cargo(steps))
         findings.extend(_check_native_processes(steps))
+        findings.extend(_check_browser_contract(steps))
         findings.extend(_check_public_validators(steps))
     return findings
 
@@ -616,6 +645,24 @@ def _mutations(healthy: str) -> list[tuple[str, str, str]]:
     reversed_document = healthy.replace(blocks["api"] + blocks["persistence"], blocks["persistence"] + blocks["api"], 1)
     cases.append(("native-phase-order-reversed", reversed_document, "workflow-process-contract"))
     change("wrong-process-target", "api", "target/debug/paperclip-game", "target/debug/other-tool")
+    browser_title = "Check real browser stream and recovery contracts"
+    browser_block = _step_block(healthy, browser_title)
+    cases.append(("missing-browser-phase", healthy.replace(browser_block, "", 1), "workflow-browser-contract"))
+    cases.append(("browser-missing-required-flag", _replace_once(healthy, " --require-browser", ""), "workflow-browser-contract"))
+    cases.append((
+        "browser-continue-on-error",
+        _replace_once(
+            healthy,
+            f"      - name: {browser_title}\n        run:",
+            f"      - name: {browser_title}\n        continue-on-error: true\n        run:",
+        ),
+        "workflow-browser-contract",
+    ))
+    cases.append((
+        "browser-order-reversed",
+        healthy.replace(blocks["persistence"] + browser_block, browser_block + blocks["persistence"], 1),
+        "workflow-browser-contract",
+    ))
     cases.append((
         "missing-plan-guard",
         healthy.replace(_step_block(healthy, "Validate the complete execution plan"), "", 1),
@@ -670,6 +717,10 @@ def _static_self_test(script: Path, workflow: Path, root: Path) -> tuple[int, li
         "api-raw-output-display": "unexpected additional commands",
         "persistence-raw-output-display": "unexpected additional commands",
         "native-phase-order-reversed": "must follow locked build and precede public validation",
+        "missing-browser-phase": "--require-browser",
+        "browser-missing-required-flag": "--require-browser",
+        "browser-continue-on-error": "unconditional",
+        "browser-order-reversed": "immediately after persistence",
         "missing-plan-guard": "public",
     }
     for name, text, code in _mutations(healthy):
