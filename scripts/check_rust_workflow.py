@@ -184,7 +184,7 @@ def _check_cargo(steps: list[Step]) -> list[Finding]:
             try:
                 tokens = _shell_tokens(line)
             except ValueError:
-                if re.search(r"cargo", line):
+                if re.search(r"\bcargo\b", line):
                     findings.append(Finding("workflow-cargo-syntax", f"unparseable Cargo shell at line {step.line}"))
                 continue
             if not tokens or "cargo" not in tokens:
@@ -206,7 +206,7 @@ def _check_cargo(steps: list[Step]) -> list[Finding]:
                 findings.append(Finding("workflow-step-failure", f"Cargo step at line {step.line} suppresses step failure"))
             if len(nonempty) != 1 and commands and commands[-1] in EXPECTED_CARGO:
                 findings.append(Finding("workflow-cargo-syntax", f"required Cargo step at line {step.line} must be one simple command"))
-        if re.search(r"cargo", step.run) and re.search(r"(?:2>\s*/dev/null|2>&1)", step.run):
+        if re.search(r"\bcargo\b", step.run) and re.search(r"(?:2>\s*/dev/null|2>&1)", step.run):
             findings.append(Finding("workflow-cargo-syntax", f"Cargo output/status suppression at line {step.line}"))
     if commands != EXPECTED_CARGO:
         mismatch = next(
@@ -311,7 +311,7 @@ def _check_process(steps: list[Step]) -> list[Finding]:
     ):
         if required not in lines:
             errors.append(f"missing sentinel invariant: {required}")
-    if re.search(r"^\s*(?:echo|printf).*do-not-echo-this-ci-value", body, re.MULTILINE):
+    if re.search(r"^\s*(?:echo|printf)\b.*do-not-echo-this-ci-value", body, re.MULTILINE):
         errors.append("invalid-listener canary must not be printed")
     return [Finding("workflow-process-contract", message) for message in errors]
 
@@ -379,6 +379,25 @@ def _mutations(healthy: str) -> list[tuple[str, str, str]]:
     add("unlocked-build", "run: cargo build --locked", "run: cargo build", "workflow-cargo-contract")
     add("ignored-test-status", "run: cargo test --locked --all-targets", "run: cargo test --locked --all-targets || true", "workflow-cargo-syntax")
     add("fake-cargo", "run: cargo test --locked --all-targets", "run: echo cargo test --locked --all-targets", "workflow-cargo-syntax")
+    add("cargo-output-suppression", "run: cargo test --locked --all-targets", "run: cargo test --locked --all-targets 2>/dev/null", "workflow-cargo-syntax")
+    add(
+        "malformed-extra-cargo",
+        "      - name: Check real bootstrap process contracts",
+        "      - name: Additional malformed Cargo shell\n        run: cargo test --locked --all-targets \"\n\n      - name: Check real bootstrap process contracts",
+        "workflow-cargo-syntax",
+    )
+    add(
+        "canary-printf",
+        "          capture_process --listen-addr do-not-echo-this-ci-value",
+        "          printf '%s\\n' 'do-not-echo-this-ci-value'\n          capture_process --listen-addr do-not-echo-this-ci-value",
+        "workflow-process-contract",
+    )
+    add(
+        "canary-echo",
+        "          capture_process --listen-addr do-not-echo-this-ci-value",
+        "          echo 'do-not-echo-this-ci-value'\n          capture_process --listen-addr do-not-echo-this-ci-value",
+        "workflow-process-contract",
+    )
     add(
         "manifest-skip",
         "      - name: Test all Rust targets against the committed lockfile\n        run:",
@@ -443,11 +462,17 @@ def self_test(script: Path, workflow: Path) -> int:
             root = Path(temporary)
             healthy_path = root / "healthy.yml"
             healthy_path.write_text(healthy, encoding="utf-8")
-            fixtures = [("healthy", healthy_path, 0, None, "healthy")]
+            expected_details = {
+                "canary-printf": "invalid-listener canary must not be printed",
+                "canary-echo": "invalid-listener canary must not be printed",
+                "malformed-extra-cargo": "unparseable Cargo shell",
+                "cargo-output-suppression": "Cargo output/status suppression",
+            }
+            fixtures = [("healthy", healthy_path, 0, None, "healthy", None)]
             for name, text, code in cases:
                 path = root / f"{name}.yml"
                 path.write_text(text, encoding="utf-8")
-                fixtures.append((name, path, 1, code, "mutation"))
+                fixtures.append((name, path, 1, code, "mutation", expected_details.get(name)))
             invalid_utf8 = root / "invalid-utf8.yml"
             invalid_utf8.write_bytes(b"\xff")
             oversized = root / "oversized.yml"
@@ -457,11 +482,11 @@ def self_test(script: Path, workflow: Path) -> int:
                 ("invalid-utf8-input", invalid_utf8),
                 ("oversized-input", oversized),
             ):
-                fixtures.append((name, path, 1, "workflow-read", "bad-input"))
+                fixtures.append((name, path, 1, "workflow-read", "bad-input", None))
             failures: list[str] = []
             rejected = 0
             bad_inputs = 0
-            for name, path, expected_status, code, kind in fixtures:
+            for name, path, expected_status, code, kind, detail in fixtures:
                 completed = subprocess.run(
                     [sys.executable, "-B", str(script), "--workflow", str(path)],
                     capture_output=True,
@@ -474,6 +499,8 @@ def self_test(script: Path, workflow: Path) -> int:
                     failures.append(f"{name}: expected exit {expected_status}, observed {completed.returncode}")
                 elif code is not None and f"[{code}]" not in combined:
                     failures.append(f"{name}: expected diagnostic {code}")
+                elif detail is not None and detail not in combined:
+                    failures.append(f"{name}: expected diagnostic detail was missing")
                 elif code is None:
                     if completed.returncode != 0:
                         failures.append(f"{name}: healthy fixture was rejected")
