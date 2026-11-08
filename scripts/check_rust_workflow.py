@@ -250,6 +250,15 @@ def _check_actions(steps: list[Step]) -> list[Finding]:
 PROCESS_CANARY = "do-not-echo-this-ci-value"
 
 
+def _logical_line_has_canary(line: str) -> bool:
+    """Check raw text and tokens reconstructed by the bounded shlex model."""
+    try:
+        tokens = shlex.split(line, comments=True, posix=True)
+    except ValueError:
+        return PROCESS_CANARY in line
+    return PROCESS_CANARY in line or any(PROCESS_CANARY in token for token in tokens)
+
+
 def _canary_line_allowed(line: str) -> bool:
     """Allow only captured input, comments, and non-output test data.
 
@@ -259,7 +268,10 @@ def _canary_line_allowed(line: str) -> bool:
     try:
         tokens = shlex.split(line, comments=True, posix=True)
     except ValueError:
-        return False
+        return PROCESS_CANARY not in line
+    has_canary = PROCESS_CANARY in line or any(PROCESS_CANARY in token for token in tokens)
+    if not has_canary:
+        return True
     if not tokens:
         return True
     if tokens == ["capture_process", "--listen-addr", PROCESS_CANARY]:
@@ -289,7 +301,7 @@ def _continued_canary_context(lines: list[str]) -> bool:
                 part[:-1] if index + 1 < len(group) else part
                 for index, part in enumerate(group)
             )
-            if PROCESS_CANARY in joined:
+            if _logical_line_has_canary(joined):
                 return True
         group = []
     if len(group) > 1:
@@ -297,7 +309,7 @@ def _continued_canary_context(lines: list[str]) -> bool:
             part[:-1] if index + 1 < len(group) else part
             for index, part in enumerate(group)
         )
-        return PROCESS_CANARY in joined
+        return _logical_line_has_canary(joined)
     return False
 
 
@@ -369,7 +381,7 @@ def _check_process(steps: list[Step]) -> list[Finding]:
         errors.append("invalid-listener canary must not be printed")
     else:
         for line in body.splitlines():
-            if PROCESS_CANARY in line and not _canary_line_allowed(line):
+            if not _canary_line_allowed(line):
                 errors.append("invalid-listener canary must not be printed")
                 break
     return [Finding("workflow-process-contract", message) for message in errors]
@@ -510,6 +522,18 @@ def _mutations(healthy: str) -> list[tuple[str, str, str]]:
         "workflow-process-contract",
     )
     add(
+        "canary-adjacent-quoted-printf",
+        "          capture_process --listen-addr do-not-echo-this-ci-value",
+        "          printf '%s\\n' 'do-not-echo-''this-ci-value'\n          capture_process --listen-addr do-not-echo-this-ci-value",
+        "workflow-process-contract",
+    )
+    add(
+        "canary-adjacent-quoted-command-echo",
+        "          capture_process --listen-addr do-not-echo-this-ci-value",
+        "          command echo do-not-echo-'this-ci-value'\n          capture_process --listen-addr do-not-echo-this-ci-value",
+        "workflow-process-contract",
+    )
+    add(
         "manifest-skip",
         "      - name: Test all Rust targets against the committed lockfile\n        run:",
         "      - name: Test all Rust targets against the committed lockfile\n        if: hashFiles('Cargo.toml') != ''\n        run:",
@@ -584,6 +608,8 @@ def self_test(script: Path, workflow: Path) -> int:
                 "canary-command-quoted-echo": "invalid-listener canary must not be printed",
                 "canary-continuation-echo": "invalid-listener canary must not be printed",
                 "canary-continuation-split-literal": "invalid-listener canary must not be printed",
+                "canary-adjacent-quoted-printf": "invalid-listener canary must not be printed",
+                "canary-adjacent-quoted-command-echo": "invalid-listener canary must not be printed",
                 "malformed-extra-cargo": "unparseable Cargo shell",
                 "cargo-output-suppression": "Cargo output/status suppression",
             }
