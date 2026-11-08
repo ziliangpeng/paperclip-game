@@ -22,7 +22,7 @@ target/debug/paperclip-game \
   --database-path data/paperclip.sqlite3
 ```
 
-Invalid options, nonnumeric listener addresses, and missing option values exit with a configuration error. Listener addresses are numeric IP addresses and ports; hostnames are not resolved. On Unix, `SIGINT` and `SIGTERM` trigger graceful HTTP/runtime shutdown.
+Invalid options, nonnumeric listener addresses, and missing option values exit with a configuration error. Listener addresses are numeric IP addresses and ports; hostnames are not resolved. On Unix, `SIGINT` and `SIGTERM` trigger graceful HTTP/runtime shutdown. Graceful stop closes runtime admission, drains every already accepted command through the ordinary bounded writer turns, and joins tracked terminal-result publication before returning. This is an in-memory normal-stop guarantee, not crash persistence or cross-process exactly-once behavior.
 
 `--database-path` is only the validated configuration seam for Issue #10. The current service does not initialize SQLite, create that file, restore a snapshot, or claim cross-process durability. Each process starts an in-memory game, a new `run_id`, and a real-time writer that advances without clients.
 

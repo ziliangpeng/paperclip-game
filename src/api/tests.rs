@@ -49,7 +49,9 @@ impl MonotonicClock for Arc<TestClock> {
 struct TestServer {
     address: SocketAddr,
     handle: RuntimeHandle,
+    state: ApiState,
     shutdown: Option<oneshot::Sender<()>>,
+    shutdown_requested: Option<oneshot::Receiver<()>>,
     task: JoinHandle<Result<(), ServerError>>,
 }
 
@@ -57,29 +59,54 @@ impl TestServer {
     fn start(state: GameState, gate: Arc<CommandTestGate>, clock: Arc<TestClock>) -> Self {
         let runtime = GameRuntime::start_with_test_gate(clock, state, gate).unwrap();
         let handle = runtime.handle();
+        let state = ApiState::new(handle.clone());
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let address = listener.local_addr().unwrap();
         let listener = TcpListener::from_std(listener).unwrap();
         let (shutdown, stopped) = oneshot::channel();
-        let task = tokio::spawn(serve(listener, runtime, async {
-            let _ = stopped.await;
-        }));
+        let (shutdown_requested, observing_shutdown) = oneshot::channel();
+        let task = tokio::spawn(serve_with_state(
+            listener,
+            runtime,
+            state.clone(),
+            async {
+                let _ = stopped.await;
+            },
+            Some(shutdown_requested),
+        ));
         Self {
             address,
             handle,
+            state,
             shutdown: Some(shutdown),
+            shutdown_requested: Some(observing_shutdown),
             task,
         }
     }
 
-    async fn stop(mut self) {
+    fn initiate_shutdown(&mut self) {
         let _ = self.shutdown.take().unwrap().send(());
+    }
+
+    async fn wait_shutdown_requested(&mut self) {
+        timeout(TEST_TIMEOUT, self.shutdown_requested.take().unwrap())
+            .await
+            .expect("production serve requests runtime shutdown")
+            .expect("shutdown observation channel remains available");
+    }
+
+    async fn wait_stopped(self) {
         timeout(TEST_TIMEOUT, self.task)
             .await
             .expect("server stops within bound")
             .expect("server task does not panic")
-            .expect("runtime and listener stop cleanly");
+            .expect("runtime, drain, publication and listener stop cleanly");
+    }
+
+    async fn stop(mut self) {
+        self.initiate_shutdown();
+        self.wait_stopped().await;
     }
 }
 
@@ -173,6 +200,53 @@ fn fixture() -> (TestServer, Arc<CommandTestGate>, Arc<TestClock>) {
     let clock = Arc::new(TestClock::new());
     let server = TestServer::start(state_with_wire("2"), Arc::clone(&gate), Arc::clone(&clock));
     (server, gate, clock)
+}
+
+async fn wait_for_registration(state: &ApiState, expected: usize) {
+    timeout(TEST_TIMEOUT, async {
+        while state.retry.registered_count() < expected || state.retry.tracked_count() < expected {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("{expected} accepted commands are registered and tracked"));
+}
+
+async fn disconnect_after_registration(server: &TestServer, id: &str, expected: usize) {
+    let address = server.address;
+    let body = command(id);
+    let disconnected = tokio::task::spawn_blocking(move || {
+        let mut stream = TcpStream::connect_timeout(&address, TEST_TIMEOUT).unwrap();
+        stream.set_write_timeout(Some(TEST_TIMEOUT)).unwrap();
+        write!(
+            stream,
+            "POST /api/game/commands HTTP/1.1\r\nHost: {address}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )
+        .unwrap();
+        stream.write_all(&body).unwrap();
+        // Hold the socket while the test observes the shared production state.
+        stream
+    })
+    .await
+    .unwrap();
+    wait_for_registration(&server.state, expected).await;
+    // Retry registration and completion-tracker ownership are both established.
+    drop(disconnected);
+}
+
+async fn wait_for_revision(handle: &RuntimeHandle, revision: u64) {
+    timeout(TEST_TIMEOUT, async {
+        loop {
+            let view = handle.view();
+            if view.revision >= revision {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("writer view reaches the required applied revision");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -326,6 +400,122 @@ async fn accepted_socket_disconnect_still_completes_once_and_retry_gets_terminal
     assert_eq!(view.game.pro.unsold_clips.to_string(), "1");
     assert_eq!(view.game.pro.unused_clips.to_string(), "1");
     assert_eq!(view.revision, 1);
+    server.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn production_serve_drains_21_accepted_disconnected_commands_before_return() {
+    let gate = Arc::new(CommandTestGate::default());
+    let clock = Arc::new(TestClock::new());
+    let mut server = TestServer::start(state_with_wire("1000"), Arc::clone(&gate), clock);
+    for index in 0..21 {
+        disconnect_after_registration(&server, &format!("accepted-{index}"), index + 1).await;
+    }
+    timeout(TEST_TIMEOUT, gate.wait_entered(1))
+        .await
+        .expect("one accepted command is local pending at the real writer");
+    assert_eq!(server.state.retry.registered_count(), 21);
+    assert_eq!(server.state.retry.tracked_count(), 21);
+    let state = server.state.clone();
+    let handle = server.handle.clone();
+
+    // Exercise the exact serve_with_state path used by public serve, including
+    // runtime admission close and the final accepted-publication join.
+    server.initiate_shutdown();
+    server.wait_shutdown_requested().await;
+    gate.release();
+    server.wait_stopped().await;
+
+    let outcomes: Vec<_> = (0..21)
+        .map(|index| {
+            let id = format!("accepted-{index}");
+            let (status, body) = state
+                .retry
+                .terminal_status_body(&id)
+                .unwrap_or_else(|| panic!("{id} published before serve returned"));
+            (index, status, body)
+        })
+        .collect();
+    for (index, status, body) in outcomes {
+        assert_eq!(status, 200, "accepted command {index} must not be lost");
+        assert_eq!(
+            String::from_utf8(body).unwrap(),
+            format!("{{\"status\":\"applied\",\"revision\":{}}}", index + 1)
+        );
+    }
+    assert_eq!(state.retry.registered_count(), 21);
+    assert_eq!(
+        state.retry.tracked_count(),
+        0,
+        "publication tasks are joined"
+    );
+    let first = state.retry.terminal_status_body("accepted-0").unwrap();
+    assert_eq!(state.retry.terminal_status_body("accepted-0"), Some(first));
+    let view = handle.view();
+    assert_eq!(view.revision, 21);
+    assert_eq!(view.game.pro.wire.to_string(), "979");
+    assert_eq!(view.game.pro.lifetime_clips.to_string(), "21");
+    assert_eq!(view.game.pro.unsold_clips.to_string(), "21");
+    assert_eq!(view.game.pro.unused_clips.to_string(), "21");
+    assert!(view.process.command_batches >= 2);
+    assert_eq!(view.process.max_commands_in_turn, 16);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn queue_full_503_does_not_bind_key_and_tracked_drain_allows_later_success() {
+    let gate = Arc::new(CommandTestGate::default());
+    let clock = Arc::new(TestClock::new());
+    let server = TestServer::start(state_with_wire("1000"), Arc::clone(&gate), clock);
+    let running = tokio::spawn(post(server.address, command("running")));
+    timeout(TEST_TIMEOUT, gate.wait_entered(1)).await.unwrap();
+    wait_for_registration(&server.state, 1).await;
+
+    let queued: Vec<_> = (0..crate::runtime::COMMAND_QUEUE_CAPACITY)
+        .map(|index| tokio::spawn(post(server.address, command(&format!("queued-{index}")))))
+        .collect();
+    wait_for_registration(&server.state, 1 + crate::runtime::COMMAND_QUEUE_CAPACITY).await;
+    let overflow = post(server.address, command("overflow-key")).await;
+    assert_eq!(overflow.status, 503);
+    assert_eq!(
+        overflow.json(),
+        json!({"status":"unavailable", "reason":"queue_full"})
+    );
+    assert!(
+        server
+            .state
+            .retry
+            .terminal_status_body("overflow-key")
+            .is_none(),
+        "pre-acceptance failure must not reserve a retry entry"
+    );
+
+    gate.release();
+    assert_eq!(
+        timeout(TEST_TIMEOUT, running)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        200
+    );
+    for response in queued {
+        assert_eq!(
+            timeout(TEST_TIMEOUT, response)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            200
+        );
+    }
+    let rebound = post(server.address, command("overflow-key")).await;
+    assert_eq!(rebound.status, 200);
+    assert_eq!(post(server.address, command("overflow-key")).await, rebound);
+    wait_for_revision(&server.handle, 66).await;
+    let view = server.handle.view();
+    assert_eq!(view.game.pro.wire.to_string(), "934");
+    assert_eq!(view.game.pro.lifetime_clips.to_string(), "66");
+    assert_eq!(view.game.pro.unused_clips.to_string(), "66");
     server.stop().await;
 }
 

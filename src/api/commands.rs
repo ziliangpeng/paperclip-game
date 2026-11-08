@@ -14,6 +14,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::sync::{Arc, Mutex};
 use tokio::sync::watch;
+use tokio::task::JoinSet;
 
 /// Corruption/allocation guards, not gameplay-value limits.
 pub const MAX_COMMAND_BODY_BYTES: usize = 4 * 1024;
@@ -293,10 +294,23 @@ struct RetryState {
 
 /// Public opaque keys are exact map keys. Internal numeric IDs are allocated
 /// once, checked, and never formed by truncating a hash of client input.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub(crate) struct RetryCoordinator {
     state: Arc<Mutex<RetryState>>,
+    accepted_tasks: Arc<Mutex<JoinSet<()>>>,
 }
+
+impl Default for RetryCoordinator {
+    fn default() -> Self {
+        Self {
+            state: Arc::new(Mutex::new(RetryState::default())),
+            accepted_tasks: Arc::new(Mutex::new(JoinSet::new())),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct CompletionFailure;
 
 enum Registration {
     Existing(Arc<RetryEntry>),
@@ -338,6 +352,73 @@ impl RetryCoordinator {
         state.entries.insert(command.id, Arc::clone(&entry));
         drop(state);
         Registration::New { entry, pending }
+    }
+
+    fn track_accepted(&self, entry: Arc<RetryEntry>, pending: PendingCommand) {
+        // No await occurs between accepted registration and task ownership.
+        // A caller disconnect therefore cannot detach this work from serving.
+        self.accepted_tasks
+            .lock()
+            .expect("accepted task tracker lock")
+            .spawn(complete_accepted(entry, pending));
+    }
+
+    pub(crate) async fn join_accepted(&self) -> Result<(), CompletionFailure> {
+        // serve calls this only after Axum has finished all request handlers,
+        // so no new accepted task can be registered concurrently. Move the set
+        // out of its short synchronous lock before awaiting any task.
+        let mut tasks = {
+            let mut accepted = self
+                .accepted_tasks
+                .lock()
+                .expect("accepted task tracker lock");
+            std::mem::replace(&mut *accepted, JoinSet::new())
+        };
+        let mut failed = false;
+        while let Some(result) = tasks.join_next().await {
+            // Observe every task even after a failure so no accepted wait is
+            // silently dropped. The caller maps this to a sanitized error.
+            failed |= result.is_err();
+        }
+        if failed {
+            Err(CompletionFailure)
+        } else {
+            Ok(())
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn registered_count(&self) -> usize {
+        self.state
+            .lock()
+            .expect("retry registry lock")
+            .entries
+            .len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn tracked_count(&self) -> usize {
+        self.accepted_tasks
+            .lock()
+            .expect("accepted task tracker lock")
+            .len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn terminal_status_body(&self, id: &str) -> Option<(u16, Vec<u8>)> {
+        let entry = self
+            .state
+            .lock()
+            .expect("retry registry lock")
+            .entries
+            .get(id)?
+            .clone();
+        entry
+            .completion
+            .subscribe()
+            .borrow()
+            .clone()
+            .map(|response| (response.status.as_u16(), response.body.as_ref().clone()))
     }
 }
 
@@ -407,11 +488,65 @@ pub(crate) async fn post_command(
         Registration::Unavailable(error) => submit_error(error).into_http(),
         Registration::Existing(entry) => entry.wait().await.into_http(),
         Registration::New { entry, pending } => {
-            // Submission to the bounded runtime queue has succeeded. Complete
-            // the writer wait independently of this HTTP future so disconnect
-            // cannot cancel acceptance or turn a retry into a second write.
-            tokio::spawn(complete_accepted(Arc::clone(&entry), pending));
+            // Submission to the bounded runtime queue has succeeded. Give the
+            // accepted publication wait to the shared lifecycle tracker before
+            // the first response await. Disconnect cannot cancel acceptance or
+            // turn a retry into a second write.
+            state.retry.track_accepted(Arc::clone(&entry), pending);
             entry.wait().await.into_http()
         }
+    }
+}
+
+#[cfg(test)]
+mod completion_lifetime_tests {
+    use super::*;
+    use crate::runtime::CommandReceipt;
+    use tokio::sync::oneshot;
+    use tokio::time::{Duration, timeout};
+
+    #[tokio::test]
+    async fn join_accepted_waits_for_terminal_publication_without_a_client_waiter() {
+        let retry = RetryCoordinator::default();
+        let entry = Arc::new(RetryEntry::new(NormalizedPayload::MakePaperclip));
+        let (sender, receiver) = oneshot::channel();
+        let pending = PendingCommand::from_test_receiver(receiver);
+        retry.track_accepted(Arc::clone(&entry), pending);
+
+        let joining = {
+            let retry = retry.clone();
+            tokio::spawn(async move { retry.join_accepted().await })
+        };
+        tokio::task::yield_now().await;
+        assert!(
+            !joining.is_finished(),
+            "join must wait for the accepted task, not only an idle map"
+        );
+        assert!(entry.completion.subscribe().borrow().is_none());
+
+        sender
+            .send(CommandReceipt {
+                revision: 7,
+                result: Ok(()),
+            })
+            .expect("receipt responder remains available");
+        timeout(Duration::from_secs(3), joining)
+            .await
+            .expect("bounded publication join")
+            .expect("publication join task does not panic")
+            .expect("no publication task failed");
+
+        let first = entry.completion.subscribe().borrow().clone().unwrap();
+        assert_eq!(first.status, StatusCode::OK);
+        assert_eq!(
+            first.body.as_ref(),
+            b"{\"status\":\"applied\",\"revision\":7}"
+        );
+        let replay = entry.wait().await;
+        assert_eq!(
+            replay, first,
+            "join leaves the immutable terminal replay intact"
+        );
+        assert_eq!(retry.tracked_count(), 0, "joined tasks are reaped");
     }
 }

@@ -37,12 +37,16 @@ impl ApiState {
     }
 }
 
-pub fn router(runtime: RuntimeHandle) -> Router {
+fn router_with_state(state: ApiState) -> Router {
     Router::new()
         .route("/api/game/view", get(get_view))
         .route("/api/game/commands", post(commands::post_command))
         .layer(DefaultBodyLimit::max(MAX_COMMAND_BODY_BYTES))
-        .with_state(ApiState::new(runtime))
+        .with_state(state)
+}
+
+pub fn router(runtime: RuntimeHandle) -> Router {
+    router_with_state(ApiState::new(runtime))
 }
 
 async fn get_view(State(state): State<ApiState>) -> Response<Body> {
@@ -71,8 +75,14 @@ fn response(status: StatusCode, payload: impl Serialize) -> Response<Body> {
         .expect("static response headers are valid")
 }
 
-/// Serve one process-lifetime runtime until shutdown, then stop its writer.
-/// No database or snapshot I/O occurs here; persistence belongs to Issue #10.
+#[cfg(not(test))]
+type ShutdownTestSignal = ();
+#[cfg(test)]
+type ShutdownTestSignal = Option<tokio::sync::oneshot::Sender<()>>;
+
+/// Serve one shared state through the complete production lifecycle.
+/// Accepted writer/publication work is drained during graceful stop; this is
+/// not crash persistence and performs no database or snapshot I/O.
 pub async fn serve<F>(
     listener: TcpListener,
     runtime: GameRuntime,
@@ -81,14 +91,42 @@ pub async fn serve<F>(
 where
     F: Future<Output = ()> + Send + 'static,
 {
-    let serving = axum::serve(listener, router(runtime.handle()))
+    let state = ApiState::new(runtime.handle());
+    #[cfg(not(test))]
+    {
+        serve_with_state(listener, runtime, state, shutdown, ()).await
+    }
+    #[cfg(test)]
+    {
+        serve_with_state(listener, runtime, state, shutdown, None).await
+    }
+}
+
+async fn serve_with_state<F>(
+    listener: TcpListener,
+    mut runtime: GameRuntime,
+    state: ApiState,
+    shutdown: F,
+    _shutdown_test_signal: ShutdownTestSignal,
+) -> Result<(), ServerError>
+where
+    F: Future<Output = ()> + Send + 'static,
+{
+    let serving = axum::serve(listener, router_with_state(state.clone()))
         .with_graceful_shutdown(shutdown)
         .await;
-    let stopped = runtime.shutdown().await;
-    match (serving, stopped) {
-        (Ok(()), Ok(())) => Ok(()),
-        (Err(error), _) => Err(ServerError::Http(error)),
-        (Ok(()), Err(error)) => Err(ServerError::Runtime(error)),
+    runtime.request_shutdown();
+    #[cfg(test)]
+    if let Some(signal) = _shutdown_test_signal {
+        let _ = signal.send(());
+    }
+    let stopped = runtime.wait_for_writer().await;
+    let published = state.retry.join_accepted().await;
+    match (serving, stopped, published) {
+        (Err(error), _, _) => Err(ServerError::Http(error)),
+        (_, Err(error), _) => Err(ServerError::Runtime(error)),
+        (_, _, Err(_)) => Err(ServerError::AcceptedPublicationFailed),
+        (Ok(()), Ok(()), Ok(())) => Ok(()),
     }
 }
 
@@ -96,6 +134,7 @@ where
 pub enum ServerError {
     Http(io::Error),
     Runtime(RuntimeShutdownError),
+    AcceptedPublicationFailed,
 }
 
 impl fmt::Display for ServerError {
@@ -103,6 +142,9 @@ impl fmt::Display for ServerError {
         match self {
             Self::Http(_) => formatter.write_str("HTTP listener failed"),
             Self::Runtime(_) => formatter.write_str("game runtime shutdown failed"),
+            Self::AcceptedPublicationFailed => {
+                formatter.write_str("accepted command publication failed")
+            }
         }
     }
 }
