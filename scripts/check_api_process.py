@@ -404,9 +404,36 @@ def main() -> int:
                 stream_initial = stream.read_event()
                 assert stream_initial is not None
                 assert_view_schema(stream_initial)
+                # Accumulate real tick-only frames while this SSE reader is not
+                # consuming. This is a transport backlog fixture, not a sleep
+                # intended to make command publication appear ordered.
+                required_updates = stream_initial["clock"]["update_count"] + 5
+                deadline = time.monotonic() + 2
+                while True:
+                    backlog_observation = checked_json(client.get()[1])
+                    assert backlog_observation["run_id"] == stream_initial["run_id"]
+                    if backlog_observation["clock"]["update_count"] >= required_updates:
+                        break
+                    assert time.monotonic() < deadline, "bounded tick-backlog setup"
+                    time.sleep(0.005)
                 first_command = client.make("process-sse-command")
                 assert first_command[0] == 200
-                updated = stream.next_revision(stream_initial["revision"] + 1)
+                command_result = checked_json(first_command[1])
+                assert command_result["status"] == "applied"
+                command_revision = command_result["revision"]
+                assert type(command_revision) is int and 0 <= command_revision <= SAFE_INTEGER
+
+                # This healthy complete predecessor satisfies the old initial+1
+                # predicate but predates the command receipt. It must not be
+                # accepted as command-complete evidence.
+                older = stream.read_event()
+                assert older is not None
+                assert_view_schema(older)
+                assert older["run_id"] == stream_initial["run_id"]
+                assert stream_initial["revision"] + 1 <= older["revision"] < command_revision
+                assert_production(older, "1000", "0")
+                updated = stream.next_revision(command_revision)
+                assert updated["run_id"] == stream_initial["run_id"]
                 assert_production(updated, "999", "1")
                 first_id = f"{stream_initial['run_id']}:{stream_initial['revision']}"
                 stream.close()

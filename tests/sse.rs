@@ -280,14 +280,37 @@ fn get(address: SocketAddr) -> GameView {
     serde_json::from_slice(&raw).unwrap()
 }
 
-fn command(address: SocketAddr, id: &str) -> u16 {
+fn command_receipt(address: SocketAddr, id: &str) -> (u16, u64) {
     let body = serde_json::to_vec(&json!({
         "command_id": id,
         "type": "make_paperclip",
         "arguments": {}
     }))
     .unwrap();
-    request(address, "POST", "/api/game/commands", &body).0
+    let (status, raw) = request(address, "POST", "/api/game/commands", &body);
+    if status != 200 {
+        return (status, 0);
+    }
+    let result: Value = serde_json::from_slice(&raw).unwrap();
+    assert_eq!(result["status"], "applied");
+    let revision = result["revision"].as_u64().unwrap();
+    assert!(revision <= 9_007_199_254_740_991);
+    (status, revision)
+}
+
+fn command(address: SocketAddr, id: &str) -> u16 {
+    command_receipt(address, id).0
+}
+
+fn wait_for_updates(address: SocketAddr, minimum: u64) {
+    let deadline = std::time::Instant::now() + BOUND;
+    while get(address).clock.update_count.get() < minimum {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "bounded backlog setup"
+        );
+        thread::yield_now();
+    }
 }
 
 fn extreme_state(state: &mut GameState) {
@@ -299,6 +322,17 @@ fn extreme_state(state: &mut GameState) {
         .unwrap()
         .integral()
         .unwrap();
+}
+
+fn assert_one_command_effect(view: &GameView) {
+    assert_eq!(view.game.wire.to_string(), "999");
+    for clips in [
+        &view.game.lifetime_clips,
+        &view.game.unsold_clips,
+        &view.game.unused_clips,
+    ] {
+        assert_eq!(clips.to_string(), "1");
+    }
 }
 
 fn assert_extremes(view: &GameView) {
@@ -330,21 +364,42 @@ fn real_http_initial_updates_reconnect_last_event_id_and_exact_get_parity() {
     let agent_initial = agent.next().unwrap();
     assert_event(&agent_initial);
     assert_extremes(&agent_initial.view);
-    assert_eq!(command(server.address, "sse-one"), 200);
-    let minimum = initial.view.revision.get() + 1;
-    let updated = browser.next_revision(minimum);
-    assert_event(&updated);
-    assert_eq!(updated.view.game.lifetime_clips.to_string(), "1");
-    assert_eq!(updated.view.game.funds.to_string(), "-41117.99");
-    assert_eq!(
-        agent
-            .next_revision(minimum)
+    wait_for_updates(
+        server.address,
+        initial
             .view
-            .game
-            .unused_clips
-            .to_string(),
-        "1"
+            .clock
+            .update_count
+            .get()
+            .max(agent_initial.view.clock.update_count.get())
+            + 5,
     );
+    let (status, command_revision) = command_receipt(server.address, "sse-one");
+    assert_eq!(status, 200);
+    let older_browser = browser.next().unwrap();
+    assert_event(&older_browser);
+    assert_eq!(older_browser.view.run_id, initial.view.run_id);
+    assert!(older_browser.view.revision.get() > initial.view.revision.get());
+    assert!(older_browser.view.revision.get() < command_revision);
+    assert_extremes(&older_browser.view);
+    let older_agent = agent.next().unwrap();
+    assert_event(&older_agent);
+    assert_eq!(older_agent.view.run_id, agent_initial.view.run_id);
+    assert!(older_agent.view.revision.get() < command_revision);
+    assert_extremes(&older_agent.view);
+
+    // Writer responses precede post-turn watch publication. The older full
+    // views above satisfy the rejected baseline+1 barrier, while only a frame
+    // at/after the actual response revision proves this command's effects.
+    let updated = browser.next_revision(command_revision);
+    assert_event(&updated);
+    assert_eq!(updated.view.run_id, initial.view.run_id);
+    assert_one_command_effect(&updated.view);
+    assert_eq!(updated.view.game.funds.to_string(), "-41117.99");
+    let agent_updated = agent.next_revision(command_revision);
+    assert_event(&agent_updated);
+    assert_eq!(agent_updated.view.run_id, initial.view.run_id);
+    assert_one_command_effect(&agent_updated.view);
     let get_after = get(server.address);
     assert_eq!(get_after.game, updated.view.game);
 

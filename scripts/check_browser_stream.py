@@ -36,35 +36,127 @@ const output = document.querySelector("#status");
 const runIds = new Set();
 let firstRun = null;
 let preCrash = null;
+let recoveredBaseline = null;
 let current = null;
+let actualOldGet = null;
+let actualOldGetDecision = null;
+let delayedGetToken = null;
+let delayedGetPromise = null;
+let oldGetChecked = false;
 let opens = 0;
 let initialFrames = 0;
 let presentations = 0;
 let readySent = false;
 let finished = false;
 const checks = [];
+
 function check(condition, label) {
   if (!condition) throw new Error(label);
   checks.push(label);
 }
-const synchronizer = new GameViewSynchronizer((view) => {
+
+function retainedFullView(left, right) {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function healthyOldGetRace(decision, before, after, callbacksBefore, callbacksAfter) {
+  return decision === "stale-source" && retainedFullView(before, after) &&
+    Number.isSafeInteger(callbacksBefore) && callbacksBefore === callbacksAfter;
+}
+
+async function fail(error) {
+  if (finished) return;
+  finished = true;
+  output.textContent = JSON.stringify({status: "fail", error: String(error), checks});
+  try { await fetch("/old-get-checked", {method: "POST", body: "{}"}); } catch {}
+  try { await fetch("/report", {method: "POST", body: output.textContent}); } catch {}
+}
+
+const synchronizer = new GameViewSynchronizer((view, decision) => {
   current = view;
   presentations += 1;
   runIds.add(view.run_id);
   if (firstRun === null) firstRun = view.run_id;
-  if (runIds.size === 1 && view.game.lifetime_clips === "20") {
+  if (runIds.size === 1 && view.game.lifetime_clips === "20" && !readySent) {
     preCrash = structuredClone(view);
-    if (!readySent) {
-      readySent = true;
-      void fetch("/ready-to-crash", {method: "POST", body: "{}"});
-    }
+    readySent = true;
+    delayedGetToken = synchronizer.requestView();
+    // Request the real current public View from the old backend. The test proxy
+    // captures its response and deliberately does not deliver it yet.
+    delayedGetPromise = fetch("/api/game/view").then(async (response) => {
+      if (response.status !== 200) throw new Error(`old GET status ${response.status}`);
+      const view = assertCompleteGameView(await response.json());
+      return {status: response.status, view};
+    }).catch((error) => ({error: String(error)}));
+    void fetch("/ready-to-crash", {method: "POST", body: "{}"});
   }
-  if (firstRun !== null && preCrash !== null && runIds.size === 2 &&
-      opens >= 3 && initialFrames >= 3 && current.run_id !== firstRun &&
-      current.revision < preCrash.revision && current.game.lifetime_clips === "1") {
+  if (firstRun !== null && preCrash !== null && recoveredBaseline === null &&
+      runIds.size === 2 && decision === "adopted-new-run" &&
+      view.run_id !== firstRun) {
+    // This is the actual initial SSE baseline adoption for the recovered run.
+    // The proxy now holds later transport updates until the old-GET race check.
+    recoveredBaseline = structuredClone(view);
+    void verifyDelayedOldGet();
+  }
+  if (oldGetChecked && firstRun !== null && recoveredBaseline !== null &&
+      runIds.size === 2 && current.run_id !== firstRun &&
+      current.game.lifetime_clips === "1") {
     void finish();
   }
 });
+
+async function verifyDelayedOldGet() {
+  try {
+    if (delayedGetPromise === null || delayedGetToken === null) {
+      throw new Error("real old GET was not issued");
+    }
+    // Release only after the recovered initial SSE baseline was adopted.
+    const release = await fetch("/release-old-get", {method: "POST", body: "{}"});
+    if (release.status !== 200) throw new Error(`GET release status ${release.status}`);
+    const actual = await delayedGetPromise;
+    if (actual.error) throw new Error(actual.error);
+    actualOldGet = actual.view;
+    check(actual.status === 200, "real old backend HTTP status 200");
+    check(actualOldGet.run_id === firstRun, "actual held HTTP body is from old run");
+    check(actualOldGet.game.lifetime_clips === "20", "actual old HTTP command state captured");
+    check(recoveredBaseline.run_id !== actualOldGet.run_id, "recovered run differs from actual old GET");
+    check(recoveredBaseline.revision < preCrash.revision, "recovered initial revision is lower in this fixture");
+    check(retainedFullView(current, recoveredBaseline), "no later presentation raced recovered baseline");
+
+    const before = structuredClone(current);
+    const callbacksBefore = presentations;
+    actualOldGetDecision = synchronizer.acceptGet(delayedGetToken, actualOldGet);
+    check(actualOldGetDecision === "stale-source", "actual held old backend GET returns stale-source");
+    check(healthyOldGetRace(actualOldGetDecision, before, current, callbacksBefore, presentations),
+      "actual held old backend GET has no presentation or state effect");
+
+    // Negative control: retimestamping this exact real HTTP body into the new
+    // epoch would wrongly re-adopt the old run. The health predicate must fail.
+    let badPresentations = 0;
+    const badModel = new GameViewSynchronizer(() => { badPresentations += 1; });
+    const badOldStream = badModel.openStream();
+    badModel.acceptStreamInitial(badOldStream, structuredClone(actualOldGet));
+    const badNewStream = badModel.openStream();
+    badModel.acceptStreamInitial(badNewStream, structuredClone(recoveredBaseline));
+    const wrongEpochToken = badModel.requestView();
+    const badBefore = structuredClone(badModel.current);
+    const badCallbacksBefore = badPresentations;
+    const badDecision = badModel.acceptGet(wrongEpochToken, structuredClone(actualOldGet));
+    check(!healthyOldGetRace(badDecision, badBefore, badModel.current,
+      badCallbacksBefore, badPresentations), "known-bad re-epoch old HTTP grant is detected");
+    check(badDecision === "adopted-new-run" && badModel.current.run_id === firstRun &&
+      badPresentations > badCallbacksBefore, "negative control demonstrates forbidden replacement");
+    check(retainedFullView(current, recoveredBaseline), "negative control cannot mutate live recovered state");
+
+    oldGetChecked = true;
+    const checked = await fetch("/old-get-checked", {method: "POST", body: JSON.stringify({
+      oldGetStatus: actual.status, decision: actualOldGetDecision,
+    })});
+    if (checked.status !== 200) throw new Error(`old GET checked status ${checked.status}`);
+  } catch (error) {
+    await fail(error);
+  }
+}
 
 async function finish() {
   if (finished) return;
@@ -100,37 +192,47 @@ async function finish() {
     try { assertCompleteGameView(interior); } catch { rejected = true; }
     check(rejected, "known-bad interior RNG field rejected");
 
-    const model = new GameViewSynchronizer();
+    let modelPresentations = 0;
+    const model = new GameViewSynchronizer(() => { modelPresentations += 1; });
     const oldStream = model.openStream();
-    check(model.acceptStreamInitial(oldStream, structuredClone(preCrash)) === "adopted-new-run", "adopted pre-crash baseline");
-    const oldGet = model.requestView();
+    check(model.acceptStreamInitial(oldStream, structuredClone(preCrash)) === "adopted-new-run",
+      "adopted pre-crash baseline");
     const newStream = model.openStream();
-    check(model.acceptStreamInitial(newStream, structuredClone(current)) === "adopted-new-run", "adopted recovered lower revision");
-    const count = model.presentation_count;
-    check(model.acceptStreamUpdate(oldStream, structuredClone(preCrash)) === "stale-source", "actual old stream rejected");
-    check(model.acceptGet(oldGet, structuredClone(preCrash)) === "stale-source", "actual old GET rejected");
-    check(model.acceptStreamUpdate(newStream, structuredClone(current)) === "equal", "equal revision is presentation-idempotent");
-    check(model.presentation_count === count, "equal revision has no second presentation effect");
-    check(model.current.run_id === current.run_id, "recovered run remains authoritative");
+    check(model.acceptStreamInitial(newStream, structuredClone(recoveredBaseline)) === "adopted-new-run",
+      "adopted recovered lower revision");
+    check(modelPresentations === 2, "fixture callback counts two real baselines");
+    const beforeOldStream = modelPresentations;
+    check(model.acceptStreamUpdate(oldStream, structuredClone(preCrash)) === "stale-source",
+      "actual old stream rejected");
+    check(modelPresentations === beforeOldStream, "old stream causes no presentation callback");
+
+    const beforeEqual = structuredClone(model.current);
+    const equalCallbacksBefore = modelPresentations;
+    const conflictingEqual = structuredClone(beforeEqual);
+    conflictingEqual.game.lifetime_clips = beforeEqual.game.lifetime_clips === "1" ? "2" : "1";
+    check(model.acceptStreamUpdate(newStream, conflictingEqual) === "equal",
+      "equal revision is presentation-idempotent");
+    check(modelPresentations === equalCallbacksBefore,
+      "equal revision has no second presentation callback");
+    check(retainedFullView(model.current, beforeEqual),
+      "equal revision retains previous full conflicting state");
+    check(model.current.run_id === recoveredBaseline.run_id, "recovered run remains authoritative");
     const report = {status: "pass", checks, opens, initialFrames, presentations,
       firstRun, recoveredRun: current.run_id, preCrashRevision: preCrash.revision,
-      recoveredRevision: current.revision};
+      recoveredBaselineRevision: recoveredBaseline.revision,
+      actualOldGetStatus: 200, actualOldGetDecision, oldGetChecked,
+      expectedProxyCounts: {requests: 1, backendCaptured: 1, released: 1}};
     output.textContent = JSON.stringify(report);
     await fetch("/report", {method: "POST", body: JSON.stringify(report)});
   } catch (error) {
-    output.textContent = JSON.stringify({status: "fail", error: String(error), checks});
-    await fetch("/report", {method: "POST", body: output.textContent});
+    await fail(error);
   }
 }
 
 const source = new EventSource("/api/game/stream");
 let token = null;
-let networkErrors = 0;
-source.addEventListener("error", () => { networkErrors += 1; });
 let initial = true;
 source.onopen = () => {
-  // Every physical EventSource connection/reconnection is a new local
-  // generation; a delayed old-response event cannot share this token.
   token = synchronizer.openStream();
   opens += 1;
   initial = true;
@@ -145,16 +247,11 @@ source.addEventListener("game_view", (event) => {
     initial = false;
     if (wasInitial && decision !== "stale-source") initialFrames += 1;
   } catch (error) {
-    output.textContent = JSON.stringify({status: "fail", error: String(error)});
-    void fetch("/report", {method: "POST", body: output.textContent});
+    void fail(error);
   }
 });
 setTimeout(() => {
-  if (!finished) {
-    output.textContent = JSON.stringify({status: "fail", error: "browser scenario timeout", opens,
-      initialFrames, networkErrors, readyState: source.readyState, runIds: [...runIds], current});
-    void fetch("/report", {method: "POST", body: output.textContent});
-  }
+  if (!finished) void fail(new Error("browser scenario timeout"));
 }, 20000);
 </script>'''
 # This fixture is not the product UI and retains no stream history.
@@ -182,6 +279,14 @@ class State:
         self.last_event_ids: list[str | None] = []
         self.stream_diagnostics: list[dict[str, Any]] = []
         self.ready_to_crash = threading.Event()
+        self.game_view_get_requests = 0
+        self.game_view_get_backend_captured = 0
+        self.game_view_get_released = 0
+        self.game_view_get_captured = threading.Event()
+        self.release_game_view_get = threading.Event()
+        self.old_get_checked_count = 0
+        self.old_get_checked = threading.Event()
+        self.allow_new_stream_updates = threading.Event()
         self.report: dict[str, Any] | None = None
         self.reported = threading.Event()
 
@@ -214,10 +319,42 @@ def proxy_handler(state: State) -> type[BaseHTTPRequestHandler]:
                     self.finite(response.read(128 * 1024), "text/javascript; charset=utf-8")
                 finally:
                     client.close()
+            elif self.path == "/api/game/view":
+                self.delayed_game_view()
             elif self.path == "/api/game/stream":
                 self.stream()
             else:
                 self.send_error(404)
+
+        def delayed_game_view(self) -> None:
+            with state.condition:
+                state.game_view_get_requests += 1
+                assert state.game_view_get_requests == 1, "at most one delayed browser GET"
+            client = http.client.HTTPConnection("127.0.0.1", state.backend_port, timeout=5)
+            try:
+                # The driver waits for this real old-backend response before it
+                # kills the process. Only task-proxy delivery is delayed.
+                client.request("GET", "/api/game/view")
+                response = client.getresponse()
+                assert response.status == 200, "actual old backend HTTP status"
+                assert response.getheader("Content-Type") == "application/json"
+                body = response.read(64 * 1024 + 1)
+                assert len(body) <= 64 * 1024, "bounded real HTTP body"
+                with state.condition:
+                    state.game_view_get_backend_captured += 1
+                    assert state.game_view_get_backend_captured == 1
+                    state.game_view_get_captured.set()
+                    state.condition.notify_all()
+                assert state.release_game_view_get.wait(25), "bounded held GET release"
+                # Deliver the exact response captured from the old backend,
+                # after the browser's recovered initial baseline adoption.
+                self.finite(body, "application/json")
+                with state.condition:
+                    state.game_view_get_released += 1
+                    assert state.game_view_get_released == 1
+                    state.condition.notify_all()
+            finally:
+                client.close()
 
         def stream(self) -> None:
             with state.condition:
@@ -258,6 +395,11 @@ def proxy_handler(state: State) -> type[BaseHTTPRequestHandler]:
                         events += 1
                         if number == 1 and events == 1:
                             break
+                        if number >= 3 and events == 1 and not state.old_get_checked.is_set():
+                            # Freeze only proxy delivery after the new initial
+                            # baseline. The backend writer keeps advancing.
+                            diagnostic["baseline_delivery_held"] = True
+                            assert state.allow_new_stream_updates.wait(25), "bounded baseline hold"
                 self.wfile.write(b"0\r\n\r\n")
                 self.wfile.flush()
             except (BrokenPipeError, ConnectionError, OSError, http.client.HTTPException) as error:
@@ -273,6 +415,23 @@ def proxy_handler(state: State) -> type[BaseHTTPRequestHandler]:
             raw = self.rfile.read(length)
             if self.path == "/ready-to-crash":
                 state.ready_to_crash.set()
+                self.finite(b"{}", "application/json")
+            elif self.path == "/release-old-get":
+                with state.condition:
+                    assert state.game_view_get_requests == 1
+                    assert state.game_view_get_backend_captured == 1
+                    assert state.game_view_get_released == 0
+                    state.release_game_view_get.set()
+                    state.condition.notify_all()
+                self.finite(b"{}", "application/json")
+            elif self.path == "/old-get-checked":
+                with state.condition:
+                    assert state.game_view_get_released == 1
+                    state.old_get_checked_count += 1
+                    assert state.old_get_checked_count == 1
+                    state.old_get_checked.set()
+                    state.allow_new_stream_updates.set()
+                    state.condition.notify_all()
                 self.finite(b"{}", "application/json")
             elif self.path == "/report":
                 state.report = json.loads(raw)
@@ -355,6 +514,10 @@ def main() -> int:
                         assert status == 200, (status, body)
                     assert state.ready_to_crash.wait(15), "browser observed pre-crash state"
                     assert api.checked_json(client.get()[1])["game"]["lifetime_clips"] == "20"
+                    assert state.game_view_get_captured.wait(15), "real old backend GET captured"
+                    assert state.game_view_get_requests == 1
+                    assert state.game_view_get_backend_captured == 1
+                    assert state.game_view_get_released == 0
                     client.close()
                     old_process.force_stop()
                     new_out = (temporary / "new.stdout").open("wb")
@@ -362,6 +525,9 @@ def main() -> int:
                     with new_out, new_err:
                         replacements.append(api.start_ready(
                             binary, arguments, backend_port, temporary, new_out, new_err))
+                    assert state.old_get_checked.wait(20), "real delayed browser GET checked"
+                    assert state.game_view_get_released == 1
+                    assert state.old_get_checked_count == 1
                     new_client = api.Client(backend_port)
                     status, body = new_client.make("browser-recovery-19")
                     assert status == 200, (status, body)
@@ -388,8 +554,16 @@ def main() -> int:
             assert state.last_event_ids[2] and state.last_event_ids[2].count(":") == 1
             assert state.last_event_ids[1].split(":", 1)[0] == report["firstRun"]
             assert state.last_event_ids[2].split(":", 1)[0] == report["firstRun"]
+            assert state.game_view_get_requests == 1
+            assert state.game_view_get_backend_captured == 1
+            assert state.game_view_get_released == 1
+            assert state.old_get_checked_count == 1
+            assert report["actualOldGetStatus"] == 200
+            assert report["actualOldGetDecision"] == "stale-source"
+            assert report["oldGetChecked"] is True
             assert replacements
             print(f"browser EventSource: same-run reconnect + recovered-run resync passed: {report}")
+            print("real delayed browser HTTP: requests=1 backend_captured=1 released=1; decision=stale-source; callbacks/state retained")
         finally:
             if browser_process is not None:
                 browser_process.terminate()
@@ -398,6 +572,10 @@ def main() -> int:
                 except subprocess.TimeoutExpired:
                     browser_process.kill()
                     browser_process.wait(timeout=5)
+            # Wake every bounded task-owned proxy wait during teardown, then
+            # close the browser/backend sockets. No held fetch survives cleanup.
+            state.release_game_view_get.set()
+            state.allow_new_stream_updates.set()
             proxy.shutdown()
             proxy.server_close()
             proxy_thread.join(timeout=5)
