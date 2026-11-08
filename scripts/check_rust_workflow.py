@@ -427,8 +427,88 @@ def _check_public_validators(steps: list[Step]) -> list[Finding]:
     return findings
 
 
-def validate_document(text: str) -> list[Finding]:
+REQUIRED_RUST_JOB_METADATA = {"name", "runs-on", "timeout-minutes", "env", "steps"}
+
+
+def _check_job_contract(text: str) -> list[Finding]:
+    """Bound this issue's one unconditional Rust job and its root metadata.
+
+    Only the dedicated rust job is a supported actor. Any if/needs, auxiliary
+    job, unknown metadata shape, or merge/alias construct is rejected rather
+    than evaluated as a GitHub expression. Comments and nested step content do
+    not participate in root job metadata extraction.
+    """
     findings: list[Finding] = []
+    lines = text.splitlines()
+    try:
+        jobs_start = next(index for index, line in enumerate(lines) if line == "jobs:")
+    except StopIteration:
+        return [Finding("workflow-job-contract", "missing required top-level jobs mapping")]
+
+    rust_job = False
+    rust_seen = False
+    job_count = 0
+    metadata_keys: set[str] = set()
+    for number, line in enumerate(lines[jobs_start + 1:], start=jobs_start + 2):
+        stripped = line.strip()
+        if stripped and _indent(line) == 0:
+            break
+        if re.match(r" {2}\S.*:\s*$", line):
+            job_count += 1
+            if line == "  rust:" or line.startswith("  rust: #"):
+                if rust_seen:
+                    findings.append(Finding("workflow-job-contract", f"duplicate required rust job at line {number}"))
+                rust_seen = True
+                rust_job = True
+                metadata_keys = set()
+            else:
+                find_detail = f"unexpected additional job in the single required Rust workflow at line {number}"
+                findings.append(Finding("workflow-job-contract", find_detail))
+                rust_job = False
+            continue
+        if not rust_job or not stripped or stripped.startswith("#"):
+            continue
+        if _indent(line) != 4:
+            continue
+        match = re.match(r" {4}([A-Za-z0-9_-]+):(?:\s|$)", line)
+        if not match:
+            findings.append(Finding(
+                "workflow-job-contract",
+                f"unsupported root metadata structure at line {number}; quoted and merge forms must declare the current known keys only",
+            ))
+            continue
+        key = match.group(1)
+        if key in {"if", "needs"}:
+            findings.append(Finding(
+                "workflow-job-contract",
+                f"required Rust job cannot use conditional/dependent {key} at line {number}; the full required job must execute",
+            ))
+            continue
+        if key not in REQUIRED_RUST_JOB_METADATA:
+            findings.append(Finding(
+                "workflow-job-contract",
+                f"unexpected root job metadata at line {number}; only name, runs-on, timeout-minutes, env, steps are allowed",
+            ))
+            continue
+        if key in metadata_keys:
+            findings.append(Finding("workflow-job-contract", f"duplicate root metadata key {key} at line {number}"))
+        metadata_keys.add(key)
+    if not rust_seen or job_count != 1:
+        findings.append(Finding(
+            "workflow-job-contract",
+            "workflow must contain exactly one unique unconditional rust job; conditional prerequisites and helper-job escapes are not supported",
+        ))
+    missing = REQUIRED_RUST_JOB_METADATA - metadata_keys
+    if rust_seen and missing:
+        findings.append(Finding(
+            "workflow-job-contract",
+            "required root metadata is incomplete for the dedicated Rust job: " + ", ".join(sorted(missing)),
+        ))
+    return findings
+
+
+def validate_document(text: str) -> list[Finding]:
+    findings: list[Finding] = _check_job_contract(text)
     permissions = _permissions(text)
     if permissions is None or permissions.get("contents") != "read" or any(
         value not in {"read", "none"} for value in permissions.values()
@@ -664,6 +744,46 @@ def _mutations(healthy: str) -> list[tuple[str, str, str]]:
         "workflow-browser-contract",
     ))
     cases.append((
+        "job-condition-false",
+        _replace_once(healthy, "  rust:\n", "  rust:\n    if: ${{ false }}\n"),
+        "workflow-job-contract",
+    ))
+    cases.append((
+        "job-pr-condition",
+        _replace_once(healthy, "  rust:\n", "  rust:\n    if: ${{ github.event_name != 'pull_request' }}\n"),
+        "workflow-job-contract",
+    ))
+    cases.append((
+        "job-skipped-dependency",
+        _replace_once(
+            healthy,
+            "  rust:\n",
+            "  disabled-prerequisite:\n"
+            "    runs-on: ubuntu-24.04\n"
+            "    if: ${{ false }}\n"
+            "    steps:\n"
+            "      - run: \"true\"\n"
+            "  rust:\n"
+            "    needs: disabled-prerequisite\n",
+        ),
+        "workflow-job-contract",
+    ))
+    cases.append((
+        "job-quoted-if-key",
+        _replace_once(healthy, "    name: Stable Rust, public hygiene, and planning guards\n", "    name: Stable Rust, public hygiene, and planning guards\n    \"if\": ${{ false }}\n"),
+        "workflow-job-contract",
+    ))
+    cases.append((
+        "job-merge-metadata",
+        _replace_once(healthy, "  rust:\n", "  rust:\n    <<: {\"if\": false}\n"),
+        "workflow-job-contract",
+    ))
+    cases.append((
+        "job-matrix-metadata",
+        _replace_once(healthy, "  rust:\n", "  rust:\n    strategy:\n      matrix:\n        runner: [ubuntu-24.04]\n"),
+        "workflow-job-contract",
+    ))
+    cases.append((
         "missing-plan-guard",
         healthy.replace(_step_block(healthy, "Validate the complete execution plan"), "", 1),
         "workflow-public-contract",
@@ -704,7 +824,10 @@ def _case_result(name: str, expected: int, code: str | None, detail: str | None,
 
 def _static_self_test(script: Path, workflow: Path, root: Path) -> tuple[int, list[dict[str, object]]]:
     healthy = _read_workflow(workflow)
-    fixtures = [("healthy-workflow", healthy, 0, None)]
+    fixtures = [
+        ("healthy-workflow", healthy, 0, None),
+        ("healthy-job-comment", _replace_once(healthy, "  rust:\n", "  rust:\n    # if: ${{ false }}\n"), 0, None),
+    ]
     expected_details = {
         "malformed-extra-cargo": "unparseable Cargo shell",
         "cargo-output-suppression": "Cargo output/status suppression",
@@ -721,6 +844,12 @@ def _static_self_test(script: Path, workflow: Path, root: Path) -> tuple[int, li
         "browser-missing-required-flag": "--require-browser",
         "browser-continue-on-error": "unconditional",
         "browser-order-reversed": "immediately after persistence",
+        "job-condition-false": "cannot use conditional/dependent if",
+        "job-pr-condition": "cannot use conditional/dependent if",
+        "job-skipped-dependency": "cannot use conditional/dependent needs",
+        "job-quoted-if-key": "quoted and merge forms",
+        "job-merge-metadata": "quoted and merge forms",
+        "job-matrix-metadata": "unexpected root job metadata",
         "missing-plan-guard": "public",
     }
     for name, text, code in _mutations(healthy):
@@ -863,11 +992,12 @@ def self_test(script: Path, workflow: Path) -> int:
         if static_status != 0 or runtime_status != 0:
             print("Runtime-output self-test failed", file=sys.stderr)
             return 1
+        healthy_workflows = sum(record["kind"] == "healthy-workflow" for record in static_results)
         workflow_rejections = sum(record["kind"] == "workflow-mutation" for record in static_results)
         bad_inputs = sum(record["kind"] == "bad-input" for record in static_results)
         runtime_rejections = sum(record["actual_exit"] != 0 for record in runtime_results)
         print(
-            f"Runtime-output self-test passed: 1 healthy workflow, {workflow_rejections} rejected workflow mutations, "
+            f"Runtime-output self-test passed: {healthy_workflows} healthy workflows, {workflow_rejections} rejected workflow mutations, "
             f"{bad_inputs} rejected read errors, 1 healthy output case, {runtime_rejections} rejected output cases"
         )
         return 0
