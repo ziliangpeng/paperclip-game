@@ -160,6 +160,12 @@ def check_sqlite_fault_and_health(binary: Path, temporary: Path) -> None:
         assert initial_health["live"] is True
         assert initial_health["last_committed_revision"] == 0
         before_health_mutation = api.checked_json(client.get()[1])
+        # Hold a real observer open without consuming its updates throughout the
+        # existing SQLite busy window. Snapshot health and writer progress must
+        # not depend on this observer draining its bounded queue.
+        delayed_observer = api.SseClient(port)
+        observer_initial = delayed_observer.read_event()
+        assert observer_initial is not None
         # Use an actual unsupported method against health; no command is admitted.
         connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
         connection.request("POST", "/api/health/ready", body=b'{"actor":"forbidden-world"}')
@@ -191,6 +197,7 @@ def check_sqlite_fault_and_health(binary: Path, temporary: Path) -> None:
         assert after["game"]["wire"] == "999"
         assert after["game"]["lifetime_clips"] == "1"
         assert api.assert_ready(client, 503)["live"] is True
+        delayed_observer.close()
 
         blocker.execute("ROLLBACK")
         blocker.close()
@@ -208,12 +215,20 @@ def check_sqlite_fault_and_health(binary: Path, temporary: Path) -> None:
         assert recovered["current_attempt"] == 0
         assert recovered["consecutive_failures"] == 0
         assert recovered["snapshot_overdue"] is False
+        # Reconnect is the recovery path after the delayed observer was closed
+        # or disconnected; it must start from the complete current state.
+        resynchronized = api.SseClient(port)
+        baseline = resynchronized.read_event()
+        assert baseline is not None
+        assert baseline["revision"] >= observer_initial["revision"]
+        assert baseline["game"]["lifetime_clips"] == "1"
         post_stop_view = api.checked_json(client.get()[1])
         stop_checked(process, client, port, temporary, "fault")
         saved = read_snapshot(database)
         assert saved["pro"] == post_stop_view["game"]
         assert saved["revision"] >= recovered["last_committed_revision"]
-        print("process health: real SQLite busy produced 503; commands/ticks continued; valid commit restored 200")
+        resynchronized.close()
+        print("process health: active SSE + real SQLite busy/503 continued; valid commit/final stop restored storage")
     finally:
         if blocker is not None:
             blocker.execute("ROLLBACK")

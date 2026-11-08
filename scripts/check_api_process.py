@@ -173,6 +173,63 @@ def free_port() -> int:
         return int(listener.getsockname()[1])
 
 
+class SseClient:
+    """Small structured-Agent SSE reader with bounded per-event accumulation."""
+
+    def __init__(self, port: int, last_event_id: str | None = None) -> None:
+        self.connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        headers = {"Accept": "text/event-stream"}
+        if last_event_id is not None:
+            headers["Last-Event-ID"] = last_event_id
+        self.connection.request("GET", "/api/game/stream", headers=headers)
+        self.response = self.connection.getresponse()
+        assert self.response.status == 200
+        assert self.response.getheader("Content-Type") == "text/event-stream"
+        assert self.response.getheader("Cache-Control") == "no-store, no-transform"
+
+    def read_event(self) -> dict[str, Any] | None:
+        event_name = None
+        event_id = None
+        data: list[str] = []
+        size = 0
+        for _ in range(32):
+            raw = self.response.readline(64 * 1024 + 1)
+            assert len(raw) <= 64 * 1024, "bounded SSE line"
+            if raw == b"":
+                assert size == 0 and not data, "no partial terminal event"
+                return None
+            line = raw.decode("utf-8").rstrip("\r\n")
+            if line == "":
+                if event_name is None and not data:
+                    continue
+                assert event_name == "game_view"
+                assert event_id is not None and len(data) == 1
+                view = checked_json("\n".join(data).encode())
+                assert event_id == f"{view['run_id']}:{view['revision']}"
+                return view
+            size += len(raw)
+            assert size <= 64 * 1024, "bounded complete SSE event"
+            if line.startswith("event:"):
+                event_name = line.removeprefix("event:").lstrip()
+            elif line.startswith("id:"):
+                event_id = line.removeprefix("id:").lstrip()
+            elif line.startswith("data:"):
+                data.append(line.removeprefix("data:").lstrip())
+        raise AssertionError("SSE event exceeded bounded line count")
+
+    def next_revision(self, minimum: int, *, limit: int = 64) -> dict[str, Any]:
+        for _ in range(limit):
+            view = self.read_event()
+            assert view is not None
+            if view["revision"] >= minimum:
+                return view
+        raise AssertionError("SSE stream did not reach required revision within frame bound")
+
+    def close(self) -> None:
+        self.response.close()
+        self.connection.close()
+
+
 class Process:
     def __init__(
         self,
@@ -342,9 +399,42 @@ def main() -> int:
                 assert after_live["clock"]["update_count"] >= initial["clock"]["update_count"]
                 assert after_live["revision"] >= initial["revision"]
                 assert after_live["game"] == initial["game"]
+
+                stream = SseClient(3000)
+                stream_initial = stream.read_event()
+                assert stream_initial is not None
+                assert_view_schema(stream_initial)
+                first_command = client.make("process-sse-command")
+                assert first_command[0] == 200
+                updated = stream.next_revision(stream_initial["revision"] + 1)
+                assert_production(updated, "999", "1")
+                first_id = f"{stream_initial['run_id']}:{stream_initial['revision']}"
+                stream.close()
+                # Both absent and opaque Last-Event-ID values receive a fresh
+                # complete baseline; neither is a retained replay cursor.
+                for last_event_id in (first_id, "not-a-retained-history-cursor"):
+                    reconnected = SseClient(3000, last_event_id)
+                    baseline = reconnected.read_event()
+                    assert baseline is not None
+                    assert baseline["run_id"] == initial["run_id"]
+                    assert baseline["revision"] >= updated["revision"]
+                    assert_production(baseline, "999", "1")
+                    reconnected.close()
+                active_at_shutdown = SseClient(3000)
+                shutdown_baseline = active_at_shutdown.read_event()
+                assert shutdown_baseline is not None
                 client.close()
             finally:
+                # Keep a real active SSE response across SIGTERM. Process.stop
+                # retains the existing bounded five-second successful exit gate.
                 default.stop()
+                if "active_at_shutdown" in locals():
+                    for _ in range(64):
+                        if active_at_shutdown.read_event() is None:
+                            break
+                    else:
+                        raise AssertionError("active SSE did not terminate after graceful shutdown")
+                    active_at_shutdown.close()
             assert default_db.is_file(), "fresh host must initialize its configured SQLite file"
             assert default_out.name and Path(default_out.name).read_bytes() == b""
             startup = Path(default_err.name).read_text()

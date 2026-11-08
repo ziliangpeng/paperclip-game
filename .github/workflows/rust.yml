@@ -62,6 +62,9 @@ jobs:
       - name: Check real persistence process contracts
         run: python3 -B scripts/check_persistence_process.py target/debug/paperclip-game
 
+      - name: Check real browser stream and recovery contracts
+        run: python3 -B scripts/check_browser_stream.py target/debug/paperclip-game --require-browser
+
       - name: Validate public repository hygiene
         run: python3 -B scripts/check_public_hygiene.py
 
