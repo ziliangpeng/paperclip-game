@@ -24,6 +24,8 @@ import tempfile
 MAX_WORKFLOW_BYTES = 256 * 1024
 CHECKOUT = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
 SETUP_PYTHON = "actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0"
+RUSTUP_COMMAND = "rustup toolchain install stable --profile minimal --component rustfmt,clippy"
+TOOL_VERSIONS_COMMAND = "rustup show active-toolchain\nrustc --version\ncargo --version\npython3 --version"
 EXPECTED_CARGO = [
     ["cargo", "fmt", "--check"],
     ["cargo", "check", "--locked", "--all-targets"],
@@ -33,7 +35,7 @@ EXPECTED_CARGO = [
 ]
 
 
-STEP_METADATA_KEYS = {"name", "run", "uses", "with", "if", "continue-on-error"}
+STEP_METADATA_KEYS = {"name", "run", "uses", "with", "if", "continue-on-error", "shell"}
 STEP_WITH_KEYS = {"fetch-depth", "persist-credentials", "python-version", "check-latest"}
 
 
@@ -45,6 +47,7 @@ class Step:
     uses: str | None = None
     condition: str | None = None
     continue_on_error: str | None = None
+    shell: str | None = None
     with_values: dict[str, str] = field(default_factory=dict)
     unsupported_metadata: list[str] = field(default_factory=list)
 
@@ -156,6 +159,11 @@ def parse_steps(text: str) -> tuple[list[Step], list[Finding]]:
                     step.run = _scalar(raw_value)
                 elif key == "uses":
                     step.uses = _scalar(raw_value)
+                elif key == "shell":
+                    step.shell = _scalar(raw_value)
+                    if step.shell not in {"bash", "sh"}:
+                        step.unsupported_metadata.append(key)
+                        findings.append(Finding("workflow-step-contract", f"unsupported custom shell at line {line_number}"))
                 elif key == "if":
                     step.condition = _scalar(raw_value)
                 elif key == "continue-on-error":
@@ -174,6 +182,8 @@ def parse_steps(text: str) -> tuple[list[Step], list[Finding]]:
                         i += 1
                     continue
                 i += 1
+            if step.shell is not None and step.run is None:
+                findings.append(Finding("workflow-step-contract", f"shell is supported only on run steps at line {step.line}"))
             steps.append(step)
     if not steps:
         findings.append(Finding("workflow-structure", "no job steps found in supported YAML layout"))
@@ -263,6 +273,15 @@ def _check_actions(steps: list[Step]) -> list[Finding]:
     for expected in (CHECKOUT, SETUP_PYTHON):
         if uses.count(expected) != 1:
             findings.append(Finding("workflow-action-pin", f"required action {expected.split('@')[0]} is missing, duplicated, or not exactly pinned"))
+    action_positions = [
+        [index for index, step in enumerate(steps) if step.uses == expected]
+        for expected in (CHECKOUT, SETUP_PYTHON)
+    ]
+    first_run = next((index for index, step in enumerate(steps) if step.run is not None), None)
+    if all(len(positions) == 1 for positions in action_positions):
+        checkout_position, setup_position = (positions[0] for positions in action_positions)
+        if first_run is None or not checkout_position < setup_position < first_run:
+            findings.append(Finding("workflow-action-contract", "checkout then setup-python must precede every run step"))
     for step in steps:
         if not step.uses:
             continue
@@ -282,6 +301,36 @@ def _check_actions(steps: list[Step]) -> list[Finding]:
             findings.append(Finding("workflow-python-version", "setup-python must select Python 3.14"))
         if step.with_values.get("check-latest") != "false":
             findings.append(Finding("workflow-python-version", "setup-python must not select an unreviewed latest patch"))
+    return findings
+
+
+def _check_rust_bootstrap(steps: list[Step]) -> list[Finding]:
+    findings: list[Finding] = []
+    positions: list[int] = []
+    for label, command in (
+        ("stable Rust setup", RUSTUP_COMMAND),
+        ("exact tool version recording", TOOL_VERSIONS_COMMAND),
+    ):
+        matches = [step for step in steps if step.run and step.run.strip() == command]
+        if len(matches) != 1:
+            findings.append(Finding("workflow-bootstrap-contract", f"{label} must appear exactly once"))
+            continue
+        step = matches[0]
+        positions.append(steps.index(step))
+        if step.unsupported_metadata:
+            findings.append(Finding("workflow-bootstrap-contract", f"unsupported execution metadata cannot hide {label} at line {step.line}"))
+        if step.condition is not None or step.continue_on_error not in {None, "false"}:
+            findings.append(Finding("workflow-bootstrap-contract", f"bootstrap step at line {step.line} must be unconditional and propagate failure"))
+    setup_positions = [index for index, step in enumerate(steps) if step.uses == SETUP_PYTHON]
+    first_cargo = next((index for index, step in enumerate(steps) if step.run and step.run.strip() == "cargo fmt --check"), None)
+    if len(positions) == 2 and len(setup_positions) == 1:
+        if (
+            positions != sorted(positions)
+            or positions[0] < setup_positions[0]
+            or first_cargo is None
+            or positions[1] > first_cargo
+        ):
+            findings.append(Finding("workflow-bootstrap-contract", "stable setup and ordered version recording must follow setup-python and precede Cargo"))
     return findings
 
 
@@ -718,6 +767,7 @@ def validate_document(text: str) -> list[Finding]:
     findings.extend(parse_findings)
     if steps:
         findings.extend(_check_actions(steps))
+        findings.extend(_check_rust_bootstrap(steps))
         findings.extend(_check_cargo(steps))
         findings.extend(_check_native_processes(steps))
         findings.extend(_check_browser_contract(steps))
@@ -766,9 +816,9 @@ def _bounded_output_file(path: Path) -> bytes:
 def _output_findings(stdout: Path, stderr: Path, status: str, probe: str) -> tuple[int, list[Finding]]:
     if probe not in {"api", "persistence"}:
         return 2, [Finding("workflow-input", "probe identity must be api or persistence")]
-    if not re.fullmatch(r"-?[0-9]+", status):
-        return 2, [Finding("workflow-input", "probe status must be an integer")]
-    decimal_digits = status[1:] if status.startswith("-") else status
+    if not re.fullmatch(r"[0-9]+", status):
+        return 2, [Finding("workflow-input", "probe status must be a non-negative integer")]
+    decimal_digits = status
     if len(decimal_digits) > 3:
         return 2, [Finding("workflow-input", "probe status is outside the supported range")]
     numeric_status = int(status)
@@ -976,6 +1026,67 @@ def _base_mutations(healthy: str) -> list[tuple[str, str, str]]:
         "      - name: Check out the triggering revision\n        continue-on-error: true\n        uses:",
         "workflow-action-contract",
     )
+    rustup_block = _step_block(healthy, "Install stable Rust components")
+    versions_block = _step_block(healthy, "Record actual tool versions")
+    checkout_block = _step_block(healthy, "Check out the triggering revision")
+    setup_block = _step_block(healthy, "Select stable Python 3.14")
+    fmt_block = _step_block(healthy, "Check Rust formatting")
+    add(
+        "rustup-if-false",
+        "      - name: Install stable Rust components\n        run:",
+        "      - name: Install stable Rust components\n        if: ${{ false }}\n        run:",
+        "workflow-bootstrap-contract",
+    )
+    add(
+        "rustup-continue-on-error",
+        "      - name: Install stable Rust components\n        run:",
+        "      - name: Install stable Rust components\n        continue-on-error: true\n        run:",
+        "workflow-bootstrap-contract",
+    )
+    cases.append(("rustup-removed", healthy.replace(rustup_block, "", 1), "workflow-bootstrap-contract"))
+    add("rustup-clippy-removed", RUSTUP_COMMAND, "rustup toolchain install stable --profile minimal --component rustfmt", "workflow-bootstrap-contract")
+    cases.append(("versions-removed", healthy.replace(versions_block, "", 1), "workflow-bootstrap-contract"))
+    cases.append(("checkout-setup-swapped", _replace_once(healthy, checkout_block + setup_block, setup_block + checkout_block), "workflow-action-contract"))
+    without_checkout = healthy.replace(checkout_block, "", 1)
+    cases.append((
+        "checkout-moved-after-early-guards",
+        _replace_once(without_checkout, fmt_block, checkout_block + fmt_block),
+        "workflow-action-contract",
+    ))
+    without_setup = healthy.replace(setup_block, "", 1)
+    cases.append((
+        "setup-moved-after-early-guards",
+        _replace_once(without_setup, fmt_block, setup_block + fmt_block),
+        "workflow-action-contract",
+    ))
+    add(
+        "versions-quoted-if",
+        "      - name: Record actual tool versions\n        run:",
+        "      - name: Record actual tool versions\n        \"if\": ${{ false }}\n        run:",
+        "workflow-bootstrap-contract",
+    )
+    cases.append((
+        "bootstrap-steps-swapped",
+        _replace_once(healthy, rustup_block + versions_block, versions_block + rustup_block),
+        "workflow-bootstrap-contract",
+    ))
+    cases.append((
+        "bootstrap-duplicate-rustup",
+        _replace_once(healthy, rustup_block, rustup_block + rustup_block),
+        "workflow-bootstrap-contract",
+    ))
+    add(
+        "bootstrap-custom-noop-shell",
+        "      - name: Install stable Rust components\n        run:",
+        "      - name: Install stable Rust components\n        shell: bash -c 'exit 0' {0}\n        run:",
+        "workflow-bootstrap-contract",
+    )
+    add(
+        "shell-on-action-step",
+        "      - name: Check out the triggering revision\n        uses:",
+        "      - name: Check out the triggering revision\n        shell: bash\n        uses:",
+        "workflow-step-contract",
+    )
     return cases
 
 
@@ -1143,6 +1254,19 @@ def _controls_fixtures(healthy: str) -> list[dict[str, object]]:
         "# a root comment does not end the on block\n  push:\n",
     )
     fixtures.append(case("controls-healthy-comments", healthy_comments, None, None))
+    controls_version_step = "      - name: Record actual Python version\n        run: python3 --version\n"
+    fixtures.append(case(
+        "controls-healthy-simple-bash-shell",
+        _replace_once(healthy, controls_version_step, "      - name: Record actual Python version\n        shell: bash\n        run: python3 --version\n"),
+        None,
+        None,
+    ))
+    fixtures.append(case(
+        "controls-healthy-simple-sh-shell",
+        _replace_once(healthy, controls_version_step, "      - name: Record actual Python version\n        shell: sh\n        run: python3 --version\n"),
+        None,
+        None,
+    ))
 
     def add(name: str, old: str, new: str, code: str, detail: str | None = None) -> None:
         fixtures.append(case(name, _replace_once(healthy, old, new), code, detail))
@@ -1326,6 +1450,29 @@ def _controls_fixtures(healthy: str) -> list[dict[str, object]]:
         "        run: python3 -B scripts/check_rust_workflow.py --self-test",
     )
     fixtures.append(case("controls-reordered-validation-steps", reordered, "workflow-controls-contract", "command sequence"))
+    checkout_block = _step_block(healthy, "Check out the triggering revision")
+    setup_block = _step_block(healthy, "Select stable Python 3.14")
+    selfcheck_block = _step_block(healthy, "Check controls workflow document")
+    fixtures.append(case(
+        "controls-checkout-setup-swapped",
+        _replace_once(healthy, checkout_block + setup_block, setup_block + checkout_block),
+        "workflow-action-contract",
+        "precede every run step",
+    ))
+    without_checkout = healthy.replace(checkout_block, "", 1)
+    fixtures.append(case(
+        "controls-checkout-moved-to-end",
+        _replace_once(without_checkout, selfcheck_block, selfcheck_block + checkout_block),
+        "workflow-action-contract",
+        "precede every run step",
+    ))
+    without_setup = healthy.replace(setup_block, "", 1)
+    fixtures.append(case(
+        "controls-setup-moved-to-end",
+        _replace_once(without_setup, selfcheck_block, selfcheck_block + setup_block),
+        "workflow-action-contract",
+        "precede every run step",
+    ))
     return fixtures
 
 
@@ -1390,9 +1537,29 @@ def _static_self_test(script: Path, workflow: Path, root: Path) -> tuple[int, li
     )
     literal_job_text = _replace_once(
         healthy,
-        "          python3 --version\n",
-        "          python3 --version\n"
-        "          printf \"%s\\n\" \"    if: not-job-metadata\" \"  helper: not-a-job\"\n",
+        "      - name: Check Rust formatting\n",
+        "      - name: Record harmless literal step text\n"
+        "        run: |\n"
+        "          printf \"%s\\n\" \"    if: not-job-metadata\" \"  helper: not-a-job\"\n\n"
+        "      - name: Check Rust formatting\n",
+    )
+    version_header = "      - name: Record actual tool versions\n        run: |"
+    healthy_bash_versions = _replace_once(healthy, version_header, "      - name: Record actual tool versions\n        shell: bash\n        run: |")
+    healthy_sh_versions = _replace_once(healthy, version_header, "      - name: Record actual tool versions\n        shell: sh\n        run: |")
+    healthy_bash_cargo = _replace_once(
+        healthy,
+        "      - name: Test all Rust targets against the committed lockfile\n        run:",
+        "      - name: Test all Rust targets against the committed lockfile\n        shell: bash\n        run:",
+    )
+    healthy_quoted_shells = _replace_once(
+        healthy,
+        "      - name: Install stable Rust components\n        run:",
+        "      - shell: \"bash\"\n        name: Install stable Rust components\n        run:",
+    )
+    healthy_quoted_shells = _replace_once(
+        healthy_quoted_shells,
+        version_header,
+        "      - name: Record actual tool versions\n        shell: 'sh'\n        run: |",
     )
     fixtures = [
         ("healthy-workflow", healthy, 0, None),
@@ -1418,6 +1585,10 @@ def _static_self_test(script: Path, workflow: Path, root: Path) -> tuple[int, li
             None,
         ),
         ("healthy-step-literal-job-looking-text", literal_job_text, 0, None),
+        ("healthy-simple-bash-shell-noncargo", healthy_bash_versions, 0, None),
+        ("healthy-simple-sh-shell-noncargo", healthy_sh_versions, 0, None),
+        ("healthy-simple-bash-shell-cargo", healthy_bash_cargo, 0, None),
+        ("healthy-inline-and-quoted-shells", healthy_quoted_shells, 0, None),
     ]
     expected_details = {
         "malformed-extra-cargo": "unparseable Cargo shell",
@@ -1458,6 +1629,24 @@ def _static_self_test(script: Path, workflow: Path, root: Path) -> tuple[int, li
         "early-controls-check-if-false": "workflow and hygiene self-tests",
         "setup-python-if-false": "unconditional and propagate failure",
         "checkout-continue-on-error": "unconditional and propagate failure",
+        "rustup-if-false": "must be unconditional and propagate failure",
+        "rustup-continue-on-error": "must be unconditional and propagate failure",
+        "rustup-removed": "stable Rust setup must appear exactly once",
+        "rustup-clippy-removed": "stable Rust setup must appear exactly once",
+        "versions-removed": "exact tool version recording must appear exactly once",
+        "checkout-setup-swapped": "precede every run step",
+        "checkout-moved-after-early-guards": "precede every run step",
+        "setup-moved-after-early-guards": "precede every run step",
+        "versions-quoted-if": "must be unconditional and propagate failure",
+        "bootstrap-steps-swapped": "ordered version recording",
+        "bootstrap-duplicate-rustup": "stable Rust setup must appear exactly once",
+        "bootstrap-custom-noop-shell": "cannot hide stable Rust setup",
+        "shell-on-action-step": "only on run steps",
+    }
+    expected_auxiliary_codes = {
+        "step-cargo-custom-noop-shell": ["workflow-step-contract"],
+        "step-browser-custom-noop-shell": ["workflow-step-contract"],
+        "bootstrap-custom-noop-shell": ["workflow-step-contract"],
     }
     for name, text, code in _mutations(healthy):
         fixtures.append((name, text, 1, code))
@@ -1467,6 +1656,13 @@ def _static_self_test(script: Path, workflow: Path, root: Path) -> tuple[int, li
         path.write_text(text, encoding="utf-8")
         completed = _run_cli([sys.executable, "-B", str(script), "--workflow", str(path)])
         passed, record = _case_result(name, expected, code, expected_details.get(name), completed)
+        auxiliary_codes = expected_auxiliary_codes.get(name, [])
+        if auxiliary_codes:
+            output = completed.stdout + completed.stderr
+            observed = {auxiliary: f"[{auxiliary}]" in output for auxiliary in auxiliary_codes}
+            passed = passed and all(observed.values())
+            record["auxiliary_codes_observed"] = observed
+            record["passed"] = passed
         record["kind"] = "healthy-workflow" if expected == 0 else "workflow-mutation"
         results.append(record)
         if not passed:
@@ -1547,6 +1743,8 @@ def _runtime_self_test(script: Path, root: Path) -> tuple[int, list[dict[str, ob
 
     if not check("runtime-healthy", healthy_out, healthy_err, "0", 0, None):
         return 1, results
+    if not check("runtime-padded-zero-status", healthy_out, healthy_err, "000", 0, None):
+        return 1, results
     if not variant("runtime-stdout-canary", PROCESS_CANARY.encode(), b"ordinary\n", "0", 1, "workflow-process-output", "captured stdout"):
         return 1, results
     if not variant("runtime-stderr-canary", b"ordinary\n", PROCESS_CANARY.encode(), "0", 1, "workflow-process-output", "captured stderr"):
@@ -1580,8 +1778,15 @@ def _runtime_self_test(script: Path, root: Path) -> tuple[int, list[dict[str, ob
         return 1, results
     if not check("runtime-invalid-status", healthy_out, healthy_err, PROCESS_CANARY, 2, "workflow-input", "integer"):
         return 1, results
-    if not check("runtime-negative-status", healthy_out, healthy_err, "-1", 1, "workflow-process-exit", "nonzero status"):
-        return 1, results
+    for name, status in (
+        ("runtime-negative-status", "-1"),
+        ("runtime-negative-seven-status", "-7"),
+        ("runtime-negative-boundary-status", "-255"),
+        ("runtime-negative-zero-status", "-0"),
+        ("runtime-negative-zero-padded-status", "-000"),
+    ):
+        if not check(name, healthy_out, healthy_err, status, 2, "workflow-input", "non-negative integer", forbid_status_echo=True):
+            return 1, results
     if not check("runtime-long-decimal-status", healthy_out, healthy_err, "9" * 5000, 2, "workflow-input", "outside the supported range", forbid_status_echo=True):
         return 1, results
     return 0, results
@@ -1605,9 +1810,10 @@ def self_test(script: Path, workflow: Path) -> int:
         workflow_rejections = sum(record["kind"] == "workflow-mutation" for record in static_results)
         bad_inputs = sum(record["kind"] == "bad-input" for record in static_results)
         runtime_rejections = sum(record["actual_exit"] != 0 for record in runtime_results)
+        healthy_outputs = sum(record["actual_exit"] == 0 for record in runtime_results)
         print(
             f"Runtime-output self-test passed: {healthy_workflows} healthy workflows, {workflow_rejections} rejected workflow mutations, "
-            f"{bad_inputs} rejected read errors, 1 healthy output case, {runtime_rejections} rejected output cases"
+            f"{bad_inputs} rejected read errors, {healthy_outputs} healthy output cases, {runtime_rejections} rejected output cases"
         )
         return 0
     except (OSError, RuntimeError, subprocess.TimeoutExpired, UnicodeError, ValueError) as error:
