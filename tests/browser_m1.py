@@ -1608,7 +1608,7 @@ def run_r2_response_and_get(binary: Path, executable: str, version: str) -> dict
         result["realJsonWithParameters"] = {"dom": positive_get, "record": first_probe}
 
         # A valid server JSON body under JSONP is not accepted as the initial View.
-        # Withhold its real native-SSE event terminator so the rejection is observable.
+        # Withhold the real SSE HTTP response so `onopen` cannot overwrite this rejection.
         state.get_override_delivered.clear()
         state.next_get_response = {"content_type": "application/jsonp", "body": None}
         state.hold_first_stream = True
