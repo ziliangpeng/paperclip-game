@@ -14,6 +14,7 @@ import collections
 import copy
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -166,6 +167,13 @@ def obj(value):
 
 def arr(value):
     return value if isinstance(value, list) else []
+
+
+def source_number(value):
+    """Accept finite JSON numbers, but never treat booleans as resource quantities."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    return not isinstance(value, float) or math.isfinite(value)
 
 
 class Checker:
@@ -719,8 +727,10 @@ class Checker:
         scenario = obj(self.scenario_map.get("E2E-M1-DECLARED-PLAYABLE-EXIT"))
         fixture = obj(scenario.get("fixture"))
         initial = obj(fixture.get("initial_state"))
-        for field, expected in (("funds", 0), ("auto_clippers", 0), ("auto_clipper_current_cost", 5.0), ("auto_clipper_reveal_latch", False)):
-            self.require(initial.get(field) == expected, "E_AUTOCLIPPER_COST", "E2E-M1.initial_state", f"{field} must be {expected}")
+        self.require(source_number(initial.get("funds")) and initial.get("funds") == 0, "E_AUTOCLIPPER_COST", "E2E-M1.initial_state.funds", "funds must be numeric zero, not boolean")
+        self.integer(initial.get("auto_clippers"), 0, "E_AUTOCLIPPER_COST", "E2E-M1.initial_state.auto_clippers")
+        self.require(source_number(initial.get("auto_clipper_current_cost")) and initial.get("auto_clipper_current_cost") == 5.0, "E_AUTOCLIPPER_COST", "E2E-M1.initial_state.auto_clipper_current_cost", "initial current cost must be the numeric $5 source value")
+        self.require(initial.get("auto_clipper_reveal_latch") is False, "E_AUTOCLIPPER_COST", "E2E-M1.initial_state.auto_clipper_reveal_latch", "initial reveal must be the boolean false, not numeric zero/one")
         expected_cases = [
             {"case": "exact_threshold_first_purchase", "funds_before": 5.0, "current_cost_before": 5.0, "producer_count_before": 0, "accepted": True, "charge": 5.0, "funds_after": 0.0, "producer_count_after": 1, "current_cost_after": 6.1, "reveal_after": True},
             {"case": "successor_second_distinct_purchase", "funds_before": 20.0, "current_cost_before": 6.1, "producer_count_before": 1, "accepted": True, "charge": 6.1, "funds_after": 13.9, "producer_count_after": 2, "current_cost_after": 6.21, "reveal_after": True},
@@ -740,20 +750,31 @@ class Checker:
                     good = actual is expected_value
                 elif field == "case":
                     good = actual == expected_value and isinstance(actual, str)
+                elif field in {"producer_count_before", "producer_count_after"}:
+                    good = type(actual) is int and not isinstance(actual, bool) and actual == expected_value
                 else:
-                    good = actual == expected_value and isinstance(actual, (int, float)) and not isinstance(actual, bool)
+                    good = source_number(actual) and actual == expected_value
                 self.require(good, "E_AUTOCLIPPER_COST", where + "." + field, f"expected {expected_value!r}, got {actual!r}")
         retry = obj(fixture.get("retry_expectation"))
         retry_expected = {"command_id": "first-auto-threshold", "receipt_charge": 5.0, "receipt_producer_count": 1, "receipt_next_cost": 6.1, "additional_charge": 0.0, "additional_producer_count": 0, "producer_count_after": 2, "current_cost_after": 6.21}
         self.exact(retry, set(retry_expected), "E_AUTOCLIPPER_COST", "E2E-M1.retry_expectation")
         for field, expected in retry_expected.items():
-            self.require(retry.get(field) == expected, "E_AUTOCLIPPER_COST", "E2E-M1.retry_expectation." + field, f"expected {expected!r}")
+            actual = retry.get(field)
+            if field == "command_id":
+                self.string(actual, "E_AUTOCLIPPER_COST", "E2E-M1.retry_expectation.command_id")
+            elif field in {"receipt_producer_count", "additional_producer_count", "producer_count_after"}:
+                self.integer(actual, expected, "E_AUTOCLIPPER_COST", "E2E-M1.retry_expectation." + field)
+            else:
+                self.require(source_number(actual) and actual == expected, "E_AUTOCLIPPER_COST", "E2E-M1.retry_expectation." + field, f"expected numeric value {expected!r}, not boolean/other type")
         snapshots = arr(fixture.get("snapshot_expectations"))
         expected_snapshots = [(1, 6.1), (2, 6.21)]
         self.require(len(snapshots) == 2, "E_AUTOCLIPPER_COST", "E2E-M1.snapshot_expectations", "stored count/cost/reveal rows for both purchases are required")
         for index, (count, cost) in enumerate(expected_snapshots):
             row = obj(snapshots[index] if index < len(snapshots) else None)
-            self.require(row.get("producer_count") == count and row.get("current_cost") == cost and row.get("reveal") is True and row.get("offline_progress") == 0, "E_AUTOCLIPPER_COST", f"E2E-M1.snapshot_expectations[{index}]", "stored count/cost/reveal and no backfill must be exact")
+            self.integer(row.get("producer_count"), count, "E_AUTOCLIPPER_COST", f"E2E-M1.snapshot_expectations[{index}].producer_count")
+            self.require(source_number(row.get("current_cost")) and row.get("current_cost") == cost, "E_AUTOCLIPPER_COST", f"E2E-M1.snapshot_expectations[{index}].current_cost", "stored current cost must be finite numeric state, not boolean")
+            self.require(row.get("reveal") is True, "E_AUTOCLIPPER_COST", f"E2E-M1.snapshot_expectations[{index}].reveal", "reveal must remain boolean true")
+            self.require(source_number(row.get("offline_progress")) and row.get("offline_progress") == 0, "E_AUTOCLIPPER_COST", f"E2E-M1.snapshot_expectations[{index}].offline_progress", "offline progress must be numeric zero, never boolean")
         expected_ops = [
             "start_fresh_default_server_and_open_two_anonymous_pages_plus_one_agent",
             "produce_and_sell_manually_until_first_funds_5_with_zero_successful_wire_or_marketing_purchases_before_observation",
@@ -934,6 +955,8 @@ class Checker:
         for path in files:
             texts[str(path)] = self.public_file(path, private_lines)
         self.narrative = texts.get(str(self.root / expected["narrative"]), "")
+        self.require("exact six-path" not in self.narrative and "exactly six paths" not in self.narrative, "E_SCOPE_LEGACY", "scope", "exact stale six-path contract contradicts the authorized seven-path scope")
+        self.require("seven-path scope" in self.narrative, "E_SCOPE", "scope", "authorized planning scope must be explicit seven-path scope")
         for fid in self.feature_map:
             self.require(f"`{fid}`" in self.narrative, "E_NARRATIVE_FEATURE", "execution-plan.md", f"missing readable feature ID {fid}")
         for xid, row in self.exclusion_map.items():
@@ -1190,6 +1213,18 @@ def self_test_cases():
     text("placeholder-narrative", ["E_PLACEHOLDER"], "requirements/execution-plan.md", "\nOWNING" + "_MILESTONE\n")
     p("placeholder-task", ["E_PLACEHOLDER"], lambda x: x["tasks"][0].update(objective=x["tasks"][0]["objective"] + " gameplay" + "-map.m1.unresolved"))
     p("coarse-over-detailed", ["E_COARSE_CONTRACT"], lambda x: next(t for t in x["tasks"] if t["id"] == "M3-C01").update(non_goals=["fake current detail"]))
+    p("lifecycle-initial-funds-bool", ["E_AUTOCLIPPER_COST"], lambda x: next(s for s in x["scenario_catalog"] if s["id"] == "E2E-M1-DECLARED-PLAYABLE-EXIT")["fixture"]["initial_state"].update(funds=False))
+    p("lifecycle-initial-count-bool", ["E_AUTOCLIPPER_COST"], lambda x: next(s for s in x["scenario_catalog"] if s["id"] == "E2E-M1-DECLARED-PLAYABLE-EXIT")["fixture"]["initial_state"].update(auto_clippers=False))
+    p("lifecycle-retry-count-bool", ["E_AUTOCLIPPER_COST"], lambda x: next(s for s in x["scenario_catalog"] if s["id"] == "E2E-M1-DECLARED-PLAYABLE-EXIT")["fixture"]["retry_expectation"].update(receipt_producer_count=True))
+    p("lifecycle-retry-charge-bool", ["E_AUTOCLIPPER_COST"], lambda x: next(s for s in x["scenario_catalog"] if s["id"] == "E2E-M1-DECLARED-PLAYABLE-EXIT")["fixture"]["retry_expectation"].update(receipt_charge=False))
+    p("lifecycle-retry-additional-charge-bool", ["E_AUTOCLIPPER_COST"], lambda x: next(s for s in x["scenario_catalog"] if s["id"] == "E2E-M1-DECLARED-PLAYABLE-EXIT")["fixture"]["retry_expectation"].update(additional_charge=False))
+    p("lifecycle-retry-additional-count-bool", ["E_AUTOCLIPPER_COST"], lambda x: next(s for s in x["scenario_catalog"] if s["id"] == "E2E-M1-DECLARED-PLAYABLE-EXIT")["fixture"]["retry_expectation"].update(additional_producer_count=False))
+    p("lifecycle-snapshot-count-bool", ["E_AUTOCLIPPER_COST"], lambda x: next(s for s in x["scenario_catalog"] if s["id"] == "E2E-M1-DECLARED-PLAYABLE-EXIT")["fixture"]["snapshot_expectations"][0].update(producer_count=True))
+    p("lifecycle-snapshot-offline-progress-bool", ["E_AUTOCLIPPER_COST"], lambda x: next(s for s in x["scenario_catalog"] if s["id"] == "E2E-M1-DECLARED-PLAYABLE-EXIT")["fixture"]["snapshot_expectations"][0].update(offline_progress=False))
+    p("lifecycle-initial-reveal-int", ["E_AUTOCLIPPER_COST"], lambda x: next(s for s in x["scenario_catalog"] if s["id"] == "E2E-M1-DECLARED-PLAYABLE-EXIT")["fixture"]["initial_state"].update(auto_clipper_reveal_latch=0))
+    p("lifecycle-retry-count-float", ["E_AUTOCLIPPER_COST"], lambda x: next(s for s in x["scenario_catalog"] if s["id"] == "E2E-M1-DECLARED-PLAYABLE-EXIT")["fixture"]["retry_expectation"].update(receipt_producer_count=1.0))
+    case("scope-legacy-exact-six", 1, ["E_SCOPE_LEGACY"], ("text", ("requirements/execution-plan.md", "\nexact six-path scope\n")))
+    case("scope-missing-seven", 1, ["E_SCOPE"], ("remove_text", ("requirements/execution-plan.md", "seven-path scope")))
     p("wrong-container-types", ["E_TASK_SCHEMA"], lambda x: x.update(tasks={}))
     p("autoclipper-cost-lifecycle", ["E_AUTOCLIPPER_COST"], lambda x: next(s for s in x["scenario_catalog"] if s["id"] == "E2E-M1-DECLARED-PLAYABLE-EXIT")["fixture"]["auto_clipper_cost_cases"][0].update(current_cost_after=6.0))
     p("xavier-m2-dependency-cycle", ["E_STAGE_SCENARIO"], lambda x: next(s for s in x["scenario_catalog"] if s["id"] == "E2E-XAVIER-ALLOCATION-RESET")["milestone_ids"].insert(0, "M2"))
