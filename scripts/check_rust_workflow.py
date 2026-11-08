@@ -311,7 +311,7 @@ def _check_process(steps: list[Step]) -> list[Finding]:
     ):
         if required not in lines:
             errors.append(f"missing sentinel invariant: {required}")
-    if re.search(r"^\s*(?:echo|printf)\b.*do-not-echo-this-ci-value", body, re.MULTILINE):
+    if re.search(r"^\s*(?:command\s+)?(?:echo|printf)\b.*do-not-echo-this-ci-value", body, re.MULTILINE):
         errors.append("invalid-listener canary must not be printed")
     return [Finding("workflow-process-contract", message) for message in errors]
 
@@ -399,6 +399,18 @@ def _mutations(healthy: str) -> list[tuple[str, str, str]]:
         "workflow-process-contract",
     )
     add(
+        "canary-command-echo",
+        "          capture_process --listen-addr do-not-echo-this-ci-value",
+        "          command echo 'do-not-echo-this-ci-value'\n          capture_process --listen-addr do-not-echo-this-ci-value",
+        "workflow-process-contract",
+    )
+    add(
+        "canary-command-printf",
+        "          capture_process --listen-addr do-not-echo-this-ci-value",
+        "          command printf '%s\\n' 'do-not-echo-this-ci-value'\n          capture_process --listen-addr do-not-echo-this-ci-value",
+        "workflow-process-contract",
+    )
+    add(
         "manifest-skip",
         "      - name: Test all Rust targets against the committed lockfile\n        run:",
         "      - name: Test all Rust targets against the committed lockfile\n        if: hashFiles('Cargo.toml') != ''\n        run:",
@@ -465,6 +477,8 @@ def self_test(script: Path, workflow: Path) -> int:
             expected_details = {
                 "canary-printf": "invalid-listener canary must not be printed",
                 "canary-echo": "invalid-listener canary must not be printed",
+                "canary-command-echo": "invalid-listener canary must not be printed",
+                "canary-command-printf": "invalid-listener canary must not be printed",
                 "malformed-extra-cargo": "unparseable Cargo shell",
                 "cargo-output-suppression": "Cargo output/status suppression",
             }
