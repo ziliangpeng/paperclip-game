@@ -573,3 +573,98 @@ fn normal_shutdown_joins_and_commits_latest_pending_full_snapshot() {
     assert_eq!(restored.revision, 9);
     assert_eq!(restored.capture_sequence, 1);
 }
+
+const CRASH_DATABASE_ENV: &str = "PAPERCLIP_GAME_TEST_CRASH_DATABASE";
+const CRASH_MODE_ENV: &str = "PAPERCLIP_GAME_TEST_CRASH_MODE";
+
+#[test]
+fn crash_store_child_entrypoint() {
+    let Some(database) = std::env::var_os(CRASH_DATABASE_ENV) else {
+        return;
+    };
+    let mode = std::env::var(CRASH_MODE_ENV).expect("crash fixture mode");
+    let database = PathBuf::from(database);
+    let marker = database.with_extension("committed");
+    let mut startup = open(&database);
+    let old = changed_snapshot(&startup, 1, "1");
+    startup.store.commit(1, &old).unwrap();
+    let new = changed_snapshot(&startup, 2, "2");
+
+    if mode == "after" {
+        startup.store.commit(2, &new).unwrap();
+        std::fs::write(&marker, new.to_canonical_bytes().unwrap()).unwrap();
+    } else {
+        assert_eq!(mode, "before");
+        // Capturing does not write SQLite. Revision 2 deliberately stays unsaved.
+        std::fs::write(&marker, old.to_canonical_bytes().unwrap()).unwrap();
+    }
+    // A real child process remains alive with the SQLite connection open until SIGKILL.
+    loop {
+        std::thread::park();
+    }
+}
+
+struct CrashChild(std::process::Child);
+
+impl Drop for CrashChild {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+fn wait_for_commit_marker(marker: &Path, child: &mut std::process::Child) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !marker.exists() {
+        if let Some(status) = child.try_wait().unwrap() {
+            panic!("crash fixture child exited before commit: {status}");
+        }
+        assert!(
+            Instant::now() < deadline,
+            "bounded crash child wait expired"
+        );
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+#[test]
+fn real_process_sigkill_before_and_after_commit_recovers_only_complete_rows() {
+    for (mode, expected_revision) in [("before", 1), ("after", 2)] {
+        let directory = TestDirectory::new();
+        let database = directory.0.join(format!("{mode}.sqlite3"));
+        let marker = database.with_extension("committed");
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "crash_store_child_entrypoint", "--nocapture"])
+            .env(CRASH_DATABASE_ENV, &database)
+            .env(CRASH_MODE_ENV, mode)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut child = CrashChild(child);
+        wait_for_commit_marker(&marker, &mut child.0);
+        let expected_bytes = std::fs::read(&marker).unwrap();
+        let expected = SnapshotV1::from_canonical_bytes(&expected_bytes).unwrap();
+
+        child.0.kill().expect("send actual child process kill");
+        let status = child.0.wait().expect("reap killed crash fixture child");
+        assert!(!status.success());
+        assert!(marker.exists());
+
+        let restored = open(&database);
+        assert_eq!(restored.origin, LoadOrigin::Restored);
+        assert_eq!(restored.revision, expected_revision);
+        assert_eq!(restored.capture_sequence, expected_revision);
+        let expected_state = expected.restore().unwrap();
+        assert_eq!(restored.state.pro, expected_state.state.pro);
+        assert_eq!(restored.state.clock, expected_state.state.clock);
+        assert_eq!(
+            restored.state.rng_state_hex(),
+            expected_state.state.rng_state_hex()
+        );
+        assert_eq!(payload(&database).as_bytes(), expected_bytes);
+        eprintln!(
+            "physical crash case {mode}: real child process killed after commit {expected_revision}; exact complete row recovered from on-disk SQLite/WAL"
+        );
+    }
+}
