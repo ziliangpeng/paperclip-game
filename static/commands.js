@@ -4,6 +4,9 @@
 const COMMAND_TYPE = "make_paperclip";
 const MAX_COMMAND_ID_BYTES = 128;
 const MAX_RESPONSE_BYTES = 16 * 1024;
+
+// Validation failures are distinct from failures to obtain or read a Response.
+class ResponseValidationError extends TypeError {}
 const textEncoder = new TextEncoder();
 
 function hasExactFields(value, fields) {
@@ -34,7 +37,7 @@ export function makePaperclipCommand(commandId) {
 }
 
 export async function readBoundedJson(response) {
-  if (response.body === null) throw new TypeError("empty command response");
+  if (response.body === null) throw new ResponseValidationError("empty command response");
   const reader = response.body.getReader();
   const chunks = [];
   let size = 0;
@@ -45,7 +48,7 @@ export async function readBoundedJson(response) {
       size += value.byteLength;
       if (size > MAX_RESPONSE_BYTES) {
         await reader.cancel("command response limit");
-        throw new TypeError("oversized command response");
+        throw new ResponseValidationError("oversized command response");
       }
       chunks.push(value);
     }
@@ -58,7 +61,11 @@ export async function readBoundedJson(response) {
     body.set(chunk, offset);
     offset += chunk.byteLength;
   }
-  return JSON.parse(new TextDecoder("utf-8", {fatal: true}).decode(body));
+  try {
+    return JSON.parse(new TextDecoder("utf-8", {fatal: true}).decode(body));
+  } catch (error) {
+    throw new ResponseValidationError("invalid JSON response");
+  }
 }
 
 function validRevision(value) {
@@ -114,7 +121,8 @@ export async function postMakePaperclip(command, options = {}) {
       signal: controller.signal,
     });
     const contentType = response.headers.get("Content-Type") ?? "";
-    if (!contentType.toLowerCase().startsWith("application/json")) {
+    const mediaType = contentType.split(";", 1)[0].trim().toLowerCase();
+    if (mediaType !== "application/json" || contentType.includes(",")) {
       return {kind: "invalid_response"};
     }
     return parseOutcome(response.status, await readBoundedJson(response));
@@ -152,7 +160,7 @@ export class MakePaperclipCommandRunner {
     try {
       outcome = await postMakePaperclip(command, this.options);
     } catch (error) {
-      outcome = {kind: "network_error", message: String(error)};
+      outcome = {kind: error instanceof ResponseValidationError ? "invalid_response" : "network_error", message: String(error)};
     }
     if (["network_error", "unavailable", "invalid_response"].includes(outcome.kind)) {
       // The accepted/disconnected window is ambiguous. Only an explicit later

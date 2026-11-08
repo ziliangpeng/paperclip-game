@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import base64
 import copy
+from contextlib import contextmanager
 from collections import deque
 import hashlib
 import http.client
@@ -18,7 +19,7 @@ import sys
 import tempfile
 import threading
 import time
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 from urllib.parse import urlsplit
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -295,6 +296,17 @@ class ProxyState:
         self.get_captured = threading.Event()
         self.get_release = threading.Event()
         self.get_record: dict[str, Any] | None = None
+        # Explicit finite response faults. None is the ordinary real-backend path.
+        self.next_command_response: dict[str, Any] | None = None
+        self.next_get_response: dict[str, Any] | None = None
+        self.get_override_delivered = threading.Event()
+        self.get_override_records: list[dict[str, Any]] = []
+        self.hold_first_stream = False
+        self.first_stream_captured = threading.Event()
+        self.first_stream_release = threading.Event()
+        self.gate_stream_after_baseline: int | None = None
+        self.real_stream_held = threading.Event()
+        self.real_stream_gate = threading.Event()
         self.fixture_frames: list[dict[str, Any]] | None = None
         self.fixture_connections = 0
         self.fixture_sent: list[threading.Event] = []
@@ -359,6 +371,26 @@ def proxy_handler(state: ProxyState) -> type[BaseHTTPRequestHandler]:
             finally:
                 client.close()
 
+        def fault_view_response(self, status: int, raw: bytes, kind: str,
+                                cache: str | None, nosniff: str | None) -> bool:
+            if self.path != "/api/game/view" or state.next_get_response is None:
+                return False
+            override = state.next_get_response
+            state.next_get_response = None
+            body = raw if override.get("body") is None else override["body"]
+            assert isinstance(body, bytes) and len(body) <= 16 * 1024
+            state.get_override_records.append({
+                "upstreamStatus": status, "upstreamBody": json.loads(raw),
+                "upstreamContentType": kind, "upstreamCacheControl": cache,
+                "upstreamNosniff": nosniff,
+                "injectedContentType": override["content_type"],
+                "injectedBodyLength": len(body),
+            })
+            assert len(state.get_override_records) <= 50
+            self.finite(status, body, override["content_type"], cache, nosniff)
+            state.get_override_delivered.set()
+            return True
+
         def do_HEAD(self) -> None:
             self.do_GET()
 
@@ -386,9 +418,13 @@ def proxy_handler(state: ProxyState) -> type[BaseHTTPRequestHandler]:
                     state.get_captured.set()
                     assert state.get_release.wait(12), "bounded held real GET"
                     state.get_record["delivered"] = True
+                    if self.fault_view_response(status, raw, kind, cache, nosniff):
+                        return
                     self.finite(status, raw, kind, cache, nosniff)
                     return
                 status, raw, kind, cache, nosniff = self.backend("GET", self.path, body)
+                if self.fault_view_response(status, raw, kind, cache, nosniff):
+                    return
                 self.finite(status, raw, kind, cache, nosniff)
             except (AssertionError, OSError, http.client.HTTPException) as error:
                 state.errors.append(f"GET {self.path}: {type(error).__name__}: {error}")
@@ -401,6 +437,10 @@ def proxy_handler(state: ProxyState) -> type[BaseHTTPRequestHandler]:
             state.stream_connections += 1
             connection_number = state.stream_connections
             assert state.stream_connections <= 32, "bounded stream connections"
+            if state.hold_first_stream:
+                state.first_stream_captured.set()
+                assert state.first_stream_release.wait(12), "bounded initial SSE request gate"
+                state.hold_first_stream = False
             client = http.client.HTTPConnection("127.0.0.1", state.backend_port, timeout=8)
             try:
                 headers = {"Accept": "text/event-stream"}
@@ -425,6 +465,12 @@ def proxy_handler(state: ProxyState) -> type[BaseHTTPRequestHandler]:
                     if not line:
                         assert initial_lines is None or not initial_lines, "no partial initial SSE event"
                         break
+
+                    if (state.gate_stream_after_baseline == connection_number
+                            and initial_lines is None):
+                        state.gate_stream_after_baseline = None
+                        state.real_stream_held.set()
+                        assert state.real_stream_gate.wait(12), "bounded real SSE gate"
                     self.wfile.write(line)
                     self.wfile.flush()
                     if initial_lines is not None:
@@ -465,6 +511,16 @@ def proxy_handler(state: ProxyState) -> type[BaseHTTPRequestHandler]:
                     state.command_arrived.notify_all()
                 if state.hold_commands:
                     assert state.command_release.wait(10), "bounded command barrier"
+                override = state.next_command_response
+                state.next_command_response = None
+                if override is not None:
+                    response_body = override["body"]
+                    assert isinstance(response_body, bytes) and len(response_body) <= 16 * 1024 + 1
+                    record["response_status"] = override.get("status", 200)
+                    record["responseContentType"] = override["content_type"]
+                    record["injectedResponse"] = True
+                    self.finite(record["response_status"], response_body, override["content_type"])
+                    return
                 if state.conflict_next:
                     state.conflict_next = False
                     record["response_status"] = 409
@@ -1089,6 +1145,115 @@ def run_main_ui(browser: Browser, state: ProxyState, backend_port: int, page1: C
 
 
 
+def check_response_boundaries(page: Cdp, closed_port: int) -> dict[str, Any]:
+    """Native-Chrome response boundaries; synthetic Responses are explicit here."""
+    result = page.evaluate(f"""(async () => {{
+      const module = await import('/static/commands.js');
+      const {{makePaperclipCommand, postMakePaperclip, readBoundedJson, MakePaperclipCommandRunner}} = module;
+      if (Object.hasOwn(module, 'ResponseValidationError')) throw new Error('validation class must remain private');
+      const headers = {{"Content-Type": "application/json"}};
+      const command = makePaperclipCommand('response-validation-fixed-id');
+      const response = (body, contentType = 'application/json') => new Response(body, {{status: 200, headers: {{"Content-Type": contentType}}}});
+      const outcomes = {{}};
+      const accepted = ['application/json', ' Application/JSON ; charset=UTF-8 ', 'application/json;charset=utf-8'];
+      for (const contentType of accepted) {{
+        const outcome = await postMakePaperclip(command, {{fetch: () => response('{{"status":"applied","revision":4}}', contentType)}});
+        if (outcome.kind !== 'applied' || outcome.revision !== 4) throw new Error('valid JSON media rejected: ' + contentType);
+      }}
+      const rejected = ['application/jsonp', 'application/json-not-json', 'application/json-sequence',
+        'application/json2', 'application/json...', 'application/json,application/json',
+        'application/json, application/json; charset=utf-8', 'text/plain', '', 'application/json; charset=utf-8,application/json'];
+      for (const contentType of rejected) {{
+        const outcome = await postMakePaperclip(command, {{fetch: () => response('{{"status":"applied","revision":7}}', contentType)}});
+        if (outcome.kind !== 'invalid_response') throw new Error('invalid JSON media accepted: ' + contentType);
+      }}
+      outcomes.mediaTypes = {{accepted: accepted.length, rejected: rejected.length}};
+      const invalidBodies = [
+        ['malformed', '{{bad json'], ['empty', ''],
+        ['invalidUtf8', new Uint8Array([123, 34, 120, 34, 58, 255, 125])],
+        ['oversize', new Uint8Array(16385)], ['nullBody', null],
+      ];
+      const bodyCases = {{}};
+      for (const [name, body] of invalidBodies) {{
+        let error = null;
+        try {{ await readBoundedJson(response(body)); }} catch (caught) {{ error = caught; }}
+        if (!error || !(error instanceof TypeError) || error.constructor.name !== 'ResponseValidationError') {{
+          throw new Error('validation type: ' + name + ' ' + String(error));
+        }}
+        if (name === 'oversize' && error.message !== 'oversized command response') throw new Error('oversize message changed');
+        if (name === 'nullBody' && error.message !== 'empty command response') throw new Error('null body message changed');
+        const events = [];
+        const runner = new MakePaperclipCommandRunner(event => events.push(event), {{fetch: () => response(body)}});
+        const outcome = await runner.run();
+        bodyCases[name] = {{...outcome, command: undefined, retry: runner.retryAvailable,
+          pending: runner.pending, events: events.map(event => event.kind)}};
+        if (outcome.kind !== 'invalid_response' || !runner.retryAvailable || runner.pending ||
+            events.map(event => event.kind).join(',') !== 'pending,invalid_response') {{
+          throw new Error('invalid response lifecycle: ' + name + ' ' + JSON.stringify(bodyCases[name]));
+        }}
+        const retryEvents = [];
+        const retry = new MakePaperclipCommandRunner(event => retryEvents.push(event), {{fetch: () => response(body)}});
+        const first = await retry.run();
+        const retryBody = retry.retryCommand;
+        if (first.kind !== 'invalid_response' || !retry.retryAvailable || !retryBody) throw new Error('missing invalid retry');
+        const posted = JSON.stringify(retryBody);
+        if (Object.keys(retryBody).join(',') !== 'command_id,type,arguments' ||
+            retryBody.type !== 'make_paperclip' || Object.keys(retryBody.arguments).length !== 0 ||
+            JSON.stringify(retryBody) !== posted) throw new Error('immutable exact command retry');
+        const real = await postMakePaperclip(retryBody, {{fetch: () => response('{{"status":"applied","revision":8}}')}});
+        if (real.kind !== 'applied' || JSON.stringify(retryBody) !== posted) throw new Error('retry payload normalization');
+      }}
+      outcomes.invalidBodies = bodyCases;
+      const wrongShape = await postMakePaperclip(command, {{fetch: () => response('null')}});
+      if (wrongShape.kind !== 'invalid_response') throw new Error('valid JSON wrong shape');
+      const bodyStream = new ReadableStream({{start(controller) {{controller.error(new TypeError('native-body-read-failure'));}}}});
+      const readRunner = new MakePaperclipCommandRunner(() => {{}}, {{fetch: () => response(bodyStream)}});
+      outcomes.bodyReadFailure = await readRunner.run();
+      if (outcomes.bodyReadFailure.kind !== 'network_error' || !readRunner.retryAvailable || readRunner.pending) {{
+        throw new Error('body read is not response validation: ' + JSON.stringify(outcomes.bodyReadFailure));
+      }}
+      const network = new MakePaperclipCommandRunner(() => {{}}, {{
+        timeoutMs: 2000,
+        fetch: (url, options) => globalThis.fetch('http://127.0.0.1:{closed_port}/unreachable', {{signal: options.signal}}),
+      }});
+      outcomes.realFetchFailure = await network.run();
+      if (outcomes.realFetchFailure.kind !== 'network_error' || !network.retryAvailable || network.pending) {{
+        throw new Error('real network failure classification: ' + JSON.stringify(outcomes.realFetchFailure));
+      }}
+      const sent = [];
+      let attempt = 0;
+      const retryEvents = [];
+      const retry = new MakePaperclipCommandRunner(event => retryEvents.push(event), {{fetch: (url, options) => {{
+        sent.push(options.body);
+        attempt += 1;
+        if (attempt === 1) throw new TypeError('native-fetch-rejection-control');
+        return response('{{"status":"applied","revision":9}}');
+      }}}});
+      const first = await retry.run();
+      if (!retry.retryAvailable) throw new Error('network retry unavailable');
+      const second = await retry.run();
+      outcomes.retry = {{first: first.kind, second: second.kind, attempts: attempt,
+        commandId: retryEvents[0].command.command_id,
+        sameBytes: sent[0] === sent[1], envelope: sent[0], retry: retry.retryAvailable,
+        events: retryEvents.map(event => event.kind)}};
+      if (first.kind !== 'network_error' || second.kind !== 'applied' || attempt !== 2 ||
+          sent[0] !== sent[1] || retry.retryAvailable ||
+          retryEvents.map(event => event.kind).join(',') !== 'pending,network_error,pending,applied') {{
+        throw new Error('same-body network retry: ' + JSON.stringify(outcomes.retry));
+      }}
+      return outcomes;
+    }})()""")
+    assert result["mediaTypes"] == {"accepted": 3, "rejected": 10}, result["mediaTypes"]
+    assert set(result["invalidBodies"]) == {"malformed", "empty", "invalidUtf8", "oversize", "nullBody"}, result
+    assert result["bodyReadFailure"]["kind"] == "network_error"
+    assert "native-body-read-failure" in result["bodyReadFailure"]["message"]
+    expected_retry = {"command_id": result["retry"]["commandId"], "type": "make_paperclip", "arguments": {}}
+    assert isinstance(expected_retry["command_id"], str) and expected_retry["command_id"]
+    assert result["retry"]["sameBytes"] is True
+    assert result["retry"]["envelope"] == json.dumps(expected_retry, separators=(",", ":")), result["retry"]
+    return result
+
+
 def check_numeric_helpers(page: Cdp, worktree: Path) -> dict[str, Any]:
     result = page.evaluate("""(async () => {
       const amount = await import('/static/stream.js');
@@ -1368,6 +1533,322 @@ def run_recovery(binary: Path, temporary: Path, browser: Browser) -> dict[str, A
         err.close()
 
 
+@contextmanager
+def isolated_r2_browser(binary: Path, executable: str, version: str, label: str) -> Iterator[dict[str, Any]]:
+    """An owned real backend, fresh SQLite file, proxy and real Chrome process."""
+    with tempfile.TemporaryDirectory(prefix=f"paperclip-{label}-") as temporary_name:
+        temporary = Path(temporary_name)
+        port = api.free_port()
+        state = ProxyState(port)
+        proxy, proxy_thread = start_proxy(state)
+        process = None
+        browser = None
+        client = None
+        info: dict[str, Any] = {}
+        out = (temporary / "backend.stdout").open("wb")
+        err = (temporary / "backend.stderr").open("wb")
+        try:
+            process = api.start_ready(binary, ["--listen-addr", f"127.0.0.1:{port}",
+                                                "--database-path", str(temporary / "owned.sqlite3")],
+                                      port, temporary, out, err)
+            client = api.Client(port)
+            browser = Browser(executable, temporary, f"http://127.0.0.1:{proxy.server_address[1]}")
+            info.update({"state": state, "browser": browser, "client": client,
+                         "version": version, "temporary": temporary,
+                         "chromeProcess": browser.process, "backendProcess": process.process})
+            yield info
+            assert not state.errors, state.errors[:10]
+        finally:
+            state.command_release.set()
+            state.get_release.set()
+            state.first_stream_release.set()
+            state.real_stream_gate.set()
+            state.fixture_get_gate.set()
+            state.fixture_close.set()
+            for release in state.fixture_release:
+                release.set()
+            if browser is not None:
+                browser.close()
+                info["chromeExit"] = info["chromeProcess"].poll()
+                assert info["chromeExit"] == 0, info
+            proxy.shutdown()
+            proxy.server_close()
+            proxy_thread.join(timeout=5)
+            assert not proxy_thread.is_alive()
+            if client is not None:
+                client.close()
+            if process is not None:
+                process.stop()
+                info["backendExit"] = info["backendProcess"].poll()
+                assert info["backendExit"] is not None, info
+            out.close()
+            err.close()
+
+
+def run_r2_response_and_get(binary: Path, executable: str, version: str) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    with isolated_r2_browser(binary, executable, version, "native-r2-responses") as case:
+        state: ProxyState = case["state"]
+        browser: Browser = case["browser"]
+        client: api.Client = case["client"]
+        template = api.checked_json(client.get()[1])
+        assert template["game"]["lifetime_clips"] == "0" and template["game"]["wire"] == "1000"
+        state.get_override_delivered.clear()
+        module = check_response_boundaries(browser.new_page("/")[0], api.free_port())
+        result["module"] = module
+        # Ordinary MIME parameters remain a healthy real GET and real upstream JSON.
+        state.next_get_response = {"content_type": " Application/JSON ; charset=UTF-8 ", "body": None}
+        positive_page = browser.new_page("/")[0]
+        positive_get = wait_for(lambda: dom_state(positive_page),
+            lambda value: value.get("viewState") == "ready" and value.get("lifetime") == "0" and value.get("wire") == "1000",
+            "real JSON View with ordinary parameters")
+        assert len(state.get_override_records) == 1
+        first_probe = state.get_override_records[0]
+        assert first_probe["upstreamStatus"] == 200 and first_probe["upstreamBody"]["game"] == template["game"], first_probe
+        result["realJsonWithParameters"] = {"dom": positive_get, "record": first_probe}
+
+        # A valid server JSON body under JSONP is not accepted as the initial View.
+        # Withhold its real native-SSE event terminator so the rejection is observable.
+        state.get_override_delivered.clear()
+        state.next_get_response = {"content_type": "application/jsonp", "body": None}
+        state.hold_first_stream = True
+        state.first_stream_captured.clear()
+        state.first_stream_release.clear()
+        page, context, target = browser.new_page("/")
+        assert state.get_override_delivered.wait(8), "initial wrong-MIME response reached client"
+        assert state.first_stream_captured.wait(8), "real native SSE request captured"
+        blocked = wait_for(lambda: {**dom_state(page), "connection": page.evaluate("document.getElementById('connection-status').textContent")},
+            lambda value: value.get("viewState") == "loading" and value.get("lifetime") is None and
+                "waiting for a live server baseline" in value["connection"],
+            "observable initial wrong-MIME rejection")
+        state.first_stream_release.set()
+        healthy = wait_for(lambda: dom_state(page),
+            lambda value: value.get("viewState") == "ready" and value.get("lifetime") == "0" and value.get("wire") == "1000",
+            "real SSE baseline after rejected full View")
+        result["rejectedInitialJsonpGet"] = {"beforeRealBaseline": blocked, "afterRealBaseline": healthy}
+
+        page.evaluate("document.getElementById('make-paperclip').focus()")
+        page.press("Enter")
+        wait_commands(state, 1)
+        healthy_command = wait_for(lambda: dom_state(page),
+            lambda value: value.get("lifetime") == "1" and value.get("wire") == "999" and "Server applied" in value.get("status", ""),
+            "genuine first UI command")
+        assert state.command_records[0]["forwarded"] == 1 and "injectedResponse" not in state.command_records[0]
+        before_game = api.checked_json(client.get()[1])["game"]
+        assert before_game["lifetime_clips"] == "1" and before_game["wire"] == "999", before_game
+
+        # Exact original adversarial wire input: finite JSONP HTTP 200, no backend write.
+        fake_body = b'{"status":"applied","revision":7}'
+        state.next_command_response = {"body": fake_body, "content_type": "application/jsonp"}
+        page.evaluate("document.getElementById('make-paperclip').focus()")
+        page.press("Enter")
+        wait_commands(state, 2)
+        rejected = state.command_records[1]
+        wrong = wait_for(lambda: dom_state(page),
+            lambda value: "response could not be validated" in value.get("status", ""), "visible JSONP rejection")
+        assert rejected["forwarded"] == 0 and rejected["response_status"] == 200
+        assert rejected["responseContentType"] == "application/jsonp" and rejected["injectedResponse"] is True
+        assert "response_body" not in rejected
+        assert wrong["lifetime"] == "1" and wrong["wire"] == "999" and wrong["ariaDisabled"] == "false"
+        assert wrong["button"] == "Retry Make Paperclip" and "revision 7" not in wrong["status"]
+        assert "SyntaxError" not in wrong["status"] and "{bad" not in wrong["status"]
+        after_game = api.checked_json(client.get()[1])["game"]
+        assert after_game == before_game, (before_game, after_game)
+        result["actualUiJsonpRejection"] = {"request": exact_command(rejected), "httpStatus": 200,
+            "responseContentType": "application/jsonp", "responseBody": fake_body.decode(),
+            "forwarded": 0, "dom": wrong, "serverUnchanged": True}
+
+        # The only induced failure is removed; a real user retry must hit the backend once.
+        page.evaluate("document.getElementById('make-paperclip').focus()")
+        page.press("Enter")
+        wait_commands(state, 3)
+        retry = state.command_records[2]
+        assert retry["raw"] == rejected["raw"] and retry["json"] == rejected["json"]
+        assert retry["raw"].decode() == json.dumps(rejected["json"], separators=(",", ":"))
+        assert set(retry["json"]) == {"command_id", "type", "arguments"}
+        applied = wait_for(lambda: dom_state(page),
+            lambda value: value.get("lifetime") == "2" and value.get("wire") == "998" and
+                int(value.get("revision", -1)) >= retry["response_body"]["revision"], "real same-ID/body retry")
+        assert retry["forwarded"] == 1 and "injectedResponse" not in retry
+        assert applied["status"] == (f"Server applied the command at revision {retry['response_body']['revision']}. "
+            "Displayed resources come from the newest full server View.")
+        after_retry_game = api.checked_json(client.get()[1])["game"]
+        assert after_retry_game["lifetime_clips"] == "2" and after_retry_game["wire"] == "998"
+        result["sameIntentRetry"] = {"request": exact_command(retry), "identicalToRejected": True,
+            "forwarded": 1, "serverRevision": retry["response_body"]["revision"], "dom": applied}
+
+        # Real HTTP response-body failures use the real POST and proxy, but no backend mutation.
+        body_faults = [
+            ("malformed", b'{bad json', "application/json; charset=utf-8"),
+            ("empty", b"", "application/json"),
+            ("invalidUtf8", bytes([123, 34, 120, 34, 58, 255, 125]), "application/json"),
+            ("oversize", b" " * 16385, "application/json"),
+        ]
+        http_outcomes = {}
+        for name, body, content_type in body_faults:
+            state.next_command_response = {"body": body, "content_type": content_type}
+            outcome = page.evaluate(f"""(async () => {{
+              const {{makePaperclipCommand, MakePaperclipCommandRunner}} = await import('/static/commands.js');
+              const events = [];
+              const runner = new MakePaperclipCommandRunner(event => events.push(event), {{fetch: globalThis.fetch, timeoutMs: 2000}});
+              const outcome = await runner.run();
+              return {{outcome, kind: outcome.kind, retry: runner.retryAvailable, pending: runner.pending,
+                events: events.map(event => event.kind), commandId: runner.retryCommand?.command_id}};
+            }})()""")
+            record = state.command_records[-1]
+            assert outcome["kind"] == "invalid_response" and outcome["retry"] is True and outcome["pending"] is False, (name, outcome)
+            assert outcome["events"] == ["pending", "invalid_response"] and isinstance(outcome["commandId"], str), (name, outcome)
+            assert record["forwarded"] == 0 and record["json"]["command_id"] == outcome["commandId"]
+            assert record["injectedResponse"] is True and record["responseContentType"] == content_type
+            expected_http_body = {"command_id": outcome["commandId"], "type": "make_paperclip", "arguments": {}}
+            assert record["json"] == expected_http_body
+            assert exact_command(record) == expected_http_body
+            assert record["raw"].decode() == json.dumps(expected_http_body, separators=(",", ":"))
+            http_outcomes[name] = outcome
+        assert api.checked_json(client.get()[1])["game"] == after_retry_game
+        result["realHttpInvalidBodies"] = http_outcomes
+
+        # Malformed real GET arrives after a real baseline for the same two-real-UI-command world.
+        state.hold_next_get = True
+        state.get_captured.clear()
+        state.get_release.clear()
+        state.next_get_response = {"body": b'{bad json', "content_type": "application/json"}
+        late_page, late_context, late_target = browser.new_page("/")
+        assert state.get_captured.wait(8), "actual backend GET captured"
+        baseline = wait_for(lambda: dom_state(late_page),
+            lambda value: value.get("viewState") == "ready" and value.get("lifetime") == "2" and value.get("wire") == "998",
+            "real two-command late-GET baseline")
+        assert state.gate_stream_after_baseline is None
+        state.gate_stream_after_baseline = state.stream_connections
+        assert baseline["lifetime"] == "2" and baseline["wire"] == "998"
+        assert state.get_record["body"]["game"] == after_retry_game and state.get_record["delivered"] is False
+        state.get_release.set()
+        failed_get = wait_for(lambda: late_page.evaluate("document.getElementById('connection-status').textContent"),
+            lambda value: "waiting for a live server baseline" in value, "visible delayed malformed GET", timeout=8)
+        assert state.real_stream_held.wait(8), "real subsequent SSE frame held before recovery"
+        failed_dom = dom_state(late_page)
+        assert failed_dom["lifetime"] == "2" and failed_dom["wire"] == "998" and failed_dom["viewState"] == "ready", failed_dom
+        before_revision = int(failed_dom["revision"])
+        state.real_stream_gate.set()
+        recovered = wait_for(lambda: dom_state(late_page),
+            lambda value: value.get("lifetime") == "2" and value.get("wire") == "998" and
+                int(value.get("revision", -1)) >= before_revision + 3,
+            "three real later SSE revisions", timeout=12)
+        connection = late_page.evaluate("document.getElementById('connection-status').textContent")
+        assert connection == "Newest accepted server View displayed.", connection
+        assert api.checked_json(client.get()[1])["game"] == after_retry_game
+        result["lateMalformedGet"] = {"upstreamCaptured": state.get_record["body"]["game"],
+            "baseline": baseline, "failureText": failed_get, "heldRealFrame": True,
+            "failedDom": failed_dom, "recoveredDom": recovered, "recoveredText": connection,
+            "realRevisionBeforeRecovery": before_revision, "realRevisionAfterRecovery": int(recovered["revision"])}
+    return {**result, "browser": version, "chromeExit": case["chromeExit"], "backendExit": case["backendExit"]}
+
+
+def run_r2_connection_lifecycle(binary: Path, executable: str, version: str) -> dict[str, Any]:
+    """Real native EventSource with explicit complete-View fixture wire input."""
+    with isolated_r2_browser(binary, executable, version, "native-r2-connection") as case:
+        state: ProxyState = case["state"]
+        browser: Browser = case["browser"]
+        template = api.checked_json(case["client"].get()[1])
+        run_id = "r2-native-eventsource-lifecycle"
+        good1 = fixture_view(template, run_id, 1, {})
+        bad2 = fixture_view(template, run_id, 2, {"funds": "1.0"})
+        good2 = fixture_view(template, run_id, 2, {
+            "lifetime_clips": "22", "unsold_clips": "22", "unused_clips": "22", "wire": "978",
+        })
+        bad3 = fixture_view(template, run_id, 3, {"funds": "1.0"})
+        lower1 = fixture_view(template, run_id, 1, {})
+        equal2 = fixture_view(template, run_id, 2, {
+            "lifetime_clips": "999", "unsold_clips": "999", "unused_clips": "999", "wire": "1",
+        })
+        good3 = fixture_view(template, run_id, 3, {
+            "lifetime_clips": "23", "unsold_clips": "23", "unused_clips": "23", "wire": "977",
+        })
+        pure_views = [fixture_view(template, run_id, revision, {
+            "lifetime_clips": "23", "unsold_clips": "23", "unused_clips": "23", "wire": "977",
+        }) for revision in range(4, 54)]
+        state.fixture_frames = [good1, bad2, good2, bad3, lower1, equal2, good3, *pure_views]
+        state.fixture_sent = [threading.Event() for _ in state.fixture_frames]
+        state.fixture_release = [threading.Event() for _ in state.fixture_frames]
+        page = browser.new_page("/")[0]
+        assert state.fixture_sent[0].wait(8), "real EventSource sent first complete fixture"
+        baseline = wait_for(lambda: dom_state(page),
+            lambda value: value.get("revision") == "1" and value.get("viewState") == "ready", "good revision 1")
+        state.fixture_release[0].set()
+        assert state.fixture_sent[1].wait(8)
+        invalid2 = wait_for(lambda: page.evaluate("document.getElementById('connection-status').textContent"),
+            lambda value: "invalid server View" in value, "invalid same-run revision 2")
+        assert dom_state(page) == baseline, dom_state(page)
+        state.fixture_release[1].set()
+        assert state.fixture_sent[2].wait(8)
+        recovered = wait_for(lambda: dom_state(page),
+            lambda value: value.get("revision") == "2" and value.get("lifetime") == "22" and value.get("wire") == "978",
+            "valid same-run revision 2 after invalid frame")
+        recovered_text = page.evaluate("document.getElementById('connection-status').textContent")
+        stream_held = not state.fixture_release[2].is_set() and state.fixture_connections == 1
+        assert recovered_text == "Newest accepted server View displayed.", recovered_text
+        assert stream_held is True, "observe DOM before releasing/closing the physical fixture stream"
+        page.evaluate("""(() => {
+          window.r2CommandMutations = 0;
+          window.r2ConnectionHistory = [];
+          new MutationObserver(records => { window.r2CommandMutations += records.length; })
+            .observe(document.getElementById('command-status'), {childList: true, characterData: true, subtree: true});
+          new MutationObserver(() => window.r2ConnectionHistory.push(document.getElementById('connection-status').textContent))
+            .observe(document.getElementById('connection-status'), {childList: true, characterData: true, subtree: true});
+        })()""")
+        result: dict[str, Any] = {"transport": "real native EventSource over CDP-attached Chrome",
+            "authority": "explicit typed complete-View fixtures from a genuine server template, not production commands",
+            "goodInvalidGood": {"before": baseline, "invalidText": invalid2,
+            "recoveredDom": recovered, "recoveredText": recovered_text, "streamHeld": stream_held}}
+
+        # A higher bad View, then stale GET/lower/equal Views, must retain its diagnostic.
+        state.fixture_release[2].set()
+        assert state.fixture_sent[3].wait(8)
+        bad3_text = wait_for(lambda: page.evaluate("document.getElementById('connection-status').textContent"),
+            lambda value: "invalid server View" in value, "bad higher View diagnostic")
+        state.fixture_get_gate.set()
+        assert state.fixture_get_delivered.wait(8), "delayed valid GET really delivered"
+        settle_dom(page)
+        assert page.evaluate("document.getElementById('connection-status').textContent") == bad3_text
+        stale_get_retained = dom_state(page)
+        assert stale_get_retained["revision"] == "2" and stale_get_retained["lifetime"] == "22"
+        inert = []
+        for index in (4, 5):
+            state.fixture_release[index - 1].set()
+            assert state.fixture_sent[index].wait(8)
+            settle_dom(page)
+            snapshot = dom_state(page)
+            assert snapshot["revision"] == "2" and snapshot["lifetime"] == "22" and snapshot["wire"] == "978", snapshot
+            assert page.evaluate("document.getElementById('connection-status').textContent") == bad3_text
+            inert.append({"wireRevision": state.fixture_frames[index]["revision"], "dom": snapshot})
+        result["diagnosticsRetained"] = {"errorText": bad3_text, "staleGetDom": stale_get_retained,
+                                          "ignoredLowerAndEqual": inert}
+
+        state.fixture_release[5].set()
+        assert state.fixture_sent[6].wait(8)
+        recovered3 = wait_for(lambda: dom_state(page),
+            lambda value: value.get("revision") == "3" and value.get("lifetime") == "23" and value.get("wire") == "977",
+            "valid higher recovery after ignored lower/equal")
+        assert page.evaluate("document.getElementById('connection-status').textContent") == "Newest accepted server View displayed."
+        state.fixture_release[6].set()
+        for index, frame in enumerate(pure_views, start=7):
+            assert state.fixture_sent[index].wait(8), f"bounded fixture frame {index}"
+            wait_dom(page, "document.documentElement.dataset.revision", str(frame["revision"]), "pure View-only tick")
+            state.fixture_release[index].set()
+        final_page = page.evaluate("""({commandMutations: window.r2CommandMutations,
+          connectionHistory: window.r2ConnectionHistory, revision: document.documentElement.dataset.revision})""")
+        assert final_page["commandMutations"] == 0, final_page
+        assert final_page["connectionHistory"] == [
+            "An invalid server View was ignored; the last valid View is retained.",
+            "Newest accepted server View displayed.",
+        ], final_page
+        assert final_page["revision"] == "53"
+        result["deduplication"] = {"validPureViewFrames": 50, **final_page, "recoveredDom": recovered3}
+        result["completeFixtureWireInputs"] = len(state.fixture_frames)
+        state.fixture_close.set()
+    return {**result, "browser": version, "chromeExit": case["chromeExit"], "backendExit": case["backendExit"]}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("binary", type=Path)
@@ -1387,6 +1868,10 @@ def main() -> int:
     binary = args.binary.resolve()
     startup_result = run_startup_feedback_and_cleanup(binary, executable, version)
     print(f"native UI: first-View feedback and constructor-failure cleanup passed: {startup_result}")
+    response_result = run_r2_response_and_get(binary, executable, version)
+    print("NATIVE_R2_RESPONSE_EVIDENCE=" + json.dumps(response_result, separators=(",", ":")))
+    lifecycle_result = run_r2_connection_lifecycle(binary, executable, version)
+    print("NATIVE_R2_LIFECYCLE_EVIDENCE=" + json.dumps(lifecycle_result, separators=(",", ":")))
     worktree = Path(__file__).resolve().parent.parent
     started = time.perf_counter()
     with tempfile.TemporaryDirectory(prefix="paperclip-native-ui-browser-") as temporary_name:

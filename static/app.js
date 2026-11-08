@@ -33,6 +33,8 @@ const synchronizer = new GameViewSynchronizer((view, decision) => {
     renderView(document, synchronizer.current);
     if (decision === "adopted-new-run") {
       setConnectionStatus("Connected to the current server run.");
+    } else {
+      setConnectionStatus("Newest accepted server View displayed.");
     }
     if (!readyAnnounced) {
       readyAnnounced = true;
@@ -116,17 +118,13 @@ async function fetchCurrentView() {
     });
     if (response.status !== 200) throw new Error(`View HTTP status ${response.status}`);
     const contentType = response.headers.get("Content-Type") ?? "";
-    if (!contentType.toLowerCase().startsWith("application/json")) {
+    const mediaType = contentType.split(";", 1)[0].trim().toLowerCase();
+    if (mediaType !== "application/json" || contentType.includes(",")) {
       throw new Error("invalid View content type");
     }
     const view = assertCompleteGameView(await readBoundedJson(response));
-    const decision = synchronizer.acceptGet(token, view);
-    if (decision === "stale-source") {
-      // A newer connection/run already owns presentation; no resync request is
-      // needed because its complete baseline is authoritative.
-      return;
-    }
-    setConnectionStatus("Current server View received; live updates are active.");
+    // Adoption, not HTTP success or an ignored lower/equal View, owns recovery text.
+    synchronizer.acceptGet(token, view);
   } catch (error) {
     setConnectionStatus("The current View request failed or arrived too late; waiting for a live server baseline.");
   } finally {
