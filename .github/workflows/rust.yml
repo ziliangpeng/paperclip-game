@@ -66,11 +66,29 @@ jobs:
       - name: Build locked library and binary
         run: cargo build --locked
 
-      - name: Check real API process contracts
-        run: python3 -B scripts/check_api_process.py target/debug/paperclip-game --repo .
+      - name: Capture real API process contracts
+        run: |
+          set -e
+          api_stdout="$(mktemp)"
+          api_stderr="$(mktemp)"
+          trap 'rm -f "$api_stdout" "$api_stderr"' EXIT
+          set +e
+          python3 -B scripts/check_api_process.py target/debug/paperclip-game --repo . > "$api_stdout" 2> "$api_stderr"
+          status=$?
+          set -e
+          python3 -B scripts/check_rust_workflow.py check-process-output --stdout "$api_stdout" --stderr "$api_stderr" --probe-status "$status" --probe api
 
-      - name: Check real persistence process contracts
-        run: python3 -B scripts/check_persistence_process.py target/debug/paperclip-game
+      - name: Capture real persistence process contracts
+        run: |
+          set -e
+          persistence_stdout="$(mktemp)"
+          persistence_stderr="$(mktemp)"
+          trap 'rm -f "$persistence_stdout" "$persistence_stderr"' EXIT
+          set +e
+          python3 -B scripts/check_persistence_process.py target/debug/paperclip-game > "$persistence_stdout" 2> "$persistence_stderr"
+          status=$?
+          set -e
+          python3 -B scripts/check_rust_workflow.py check-process-output --stdout "$persistence_stdout" --stderr "$persistence_stderr" --probe-status "$status" --probe persistence
 
       - name: Check real browser stream and recovery contracts
         run: python3 -B scripts/check_browser_stream.py target/debug/paperclip-game --require-browser
