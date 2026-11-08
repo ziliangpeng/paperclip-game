@@ -59,6 +59,53 @@ def assert_production(view: dict[str, Any], wire: str, clips: str) -> None:
     assert game == expected, (game, expected)
 
 
+HEALTH_FIELDS = {
+    "consecutive_failures",
+    "current_attempt",
+    "last_committed_revision",
+    "last_committed_sequence",
+    "last_failure_code",
+    "latest_captured_revision",
+    "latest_captured_sequence",
+    "live",
+    "pending_snapshot_count",
+    "phase",
+    "ready",
+    "snapshot_overdue",
+    "write_in_progress",
+}
+
+
+def assert_ready(client: Client, expected_status: int = 200) -> dict[str, Any]:
+    status, raw = client.get("/api/health/ready")
+    assert status == expected_status, (status, raw)
+    health = checked_json(raw)
+    assert set(health) == HEALTH_FIELDS
+    assert isinstance(health["live"], bool)
+    assert isinstance(health["ready"], bool)
+    assert health["ready"] is (expected_status == 200)
+    assert health["phase"] in {"unconfigured", "ready", "saving", "retrying", "degraded", "stopped"}
+    for field in (
+        "last_committed_revision",
+        "last_committed_sequence",
+        "latest_captured_revision",
+        "latest_captured_sequence",
+    ):
+        value = health[field]
+        assert value is None or (type(value) is int and 0 <= value <= SAFE_INTEGER)
+    assert type(health["pending_snapshot_count"]) is int and health["pending_snapshot_count"] in (0, 1)
+    assert isinstance(health["write_in_progress"], bool)
+    assert type(health["current_attempt"]) is int and health["current_attempt"] >= 0
+    assert type(health["consecutive_failures"]) is int and health["consecutive_failures"] >= 0
+    assert isinstance(health["snapshot_overdue"], bool)
+    assert health["last_failure_code"] is None or health["last_failure_code"] in {
+        "database_busy", "open_failed", "schema_failure", "invalid_snapshot",
+        "checksum_mismatch", "transaction_failed", "commit_outcome_unknown",
+        "stale_capture", "sequence_conflict", "resource_limit",
+    }
+    return health
+
+
 def assert_view_schema(view: dict[str, Any]) -> None:
     assert set(view) == {"schema_version", "run_id", "revision", "clock", "game"}
     assert view["schema_version"] == 1
@@ -92,8 +139,8 @@ class Client:
     def close(self) -> None:
         self.connection.close()
 
-    def get(self) -> tuple[int, bytes]:
-        self.connection.request("GET", "/api/game/view")
+    def get(self, path: str = "/api/game/view") -> tuple[int, bytes]:
+        self.connection.request("GET", path)
         response = self.connection.getresponse()
         return response.status, response.read()
 
@@ -213,6 +260,13 @@ def drain_stock(client: Client) -> None:
     print("process HTTP: 1,000 distinct writes, terminal replay, rejection replay, and 409 passed")
 
 
+def remove_owned_database(database: Path) -> None:
+    # The caller first proves absence and then creates this exact test database.
+    # Only its known SQLite artifacts are removed, never a directory or glob.
+    for suffix in ("", "-journal", "-shm", "-wal"):
+        Path(str(database) + suffix).unlink(missing_ok=True)
+
+
 def run_invalid_checks(binary: Path, cwd: Path, sentinel: Path) -> None:
     sentinel.write_bytes(b"original-database-bytes")
     before = sentinel.read_bytes()
@@ -277,14 +331,25 @@ def main() -> int:
                 client = Client(3000)
                 status, body = client.get()
                 assert status == 200
-                assert_view_schema(checked_json(body))
+                initial = checked_json(body)
+                assert_view_schema(initial)
+                assert client.get("/api/health/live") == (200, b'{"status":"ok"}')
+                ready = assert_ready(client)
+                assert ready["live"] is True
+                assert ready["snapshot_overdue"] is False
+                after_live = checked_json(client.get()[1])
+                assert after_live["run_id"] == initial["run_id"]
+                assert after_live["clock"]["update_count"] >= initial["clock"]["update_count"]
+                assert after_live["revision"] >= initial["revision"]
+                assert after_live["game"] == initial["game"]
                 client.close()
             finally:
                 default.stop()
+            assert default_db.is_file(), "fresh host must initialize its configured SQLite file"
             assert default_out.name and Path(default_out.name).read_bytes() == b""
             startup = Path(default_err.name).read_text()
             assert startup == "paperclip-game: listening on http://127.0.0.1:3000\n"
-            assert not default_db.exists()
+            remove_owned_database(default_db)
 
         port = free_port()
         explicit_out = (temp / "explicit.stdout").open("wb")
@@ -316,10 +381,11 @@ def main() -> int:
             assert Path(explicit_out.name).read_bytes() == b""
             startup = Path(explicit_err.name).read_text()
             assert startup == f"paperclip-game: listening on http://127.0.0.1:{port}\n"
-            assert not explicit_db.exists()
+            assert explicit_db.is_file(), "normal shutdown must leave its committed snapshot"
+            remove_owned_database(explicit_db)
 
     elapsed = time.perf_counter() - run_started
-    print(f"process service checks passed in {elapsed:.3f}s; no SQLite files created")
+    print(f"process service checks passed in {elapsed:.3f}s; real persistence initialized and cleaned")
     return 0
 
 

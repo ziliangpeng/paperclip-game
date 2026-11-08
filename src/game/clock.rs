@@ -34,6 +34,40 @@ impl ClockState {
         }
     }
 
+    /// Rehydrate only a clock whose redundant cadence fields prove one exact position.
+    pub(crate) fn from_snapshot_parts(
+        update_count: u64,
+        fast_phase: u8,
+        second_phase: u8,
+        slow_phase: u16,
+        combat_remainder_nanos: u32,
+        combat_pulses: u64,
+    ) -> Result<Self, ClockRestoreError> {
+        if update_count > MAX_SAFE_JSON_INTEGER || combat_pulses > MAX_SAFE_JSON_INTEGER {
+            return Err(ClockRestoreError::IntegerOutOfRange);
+        }
+        let expected_remainder =
+            (u128::from(update_count) * UPDATE_QUANTUM_NANOS) % COMBAT_QUANTUM_NANOS;
+        let expected_pulses = (u128::from(update_count) * 5) / 8;
+        let coherent = fast_phase == (update_count % u64::from(FAST_PHASE_TICKS)) as u8
+            && second_phase == (update_count % u64::from(SECOND_PHASE_TICKS)) as u8
+            && slow_phase == (update_count % u64::from(SLOW_PHASE_TICKS)) as u16
+            && u128::from(combat_remainder_nanos) == expected_remainder
+            && u128::from(combat_pulses) == expected_pulses
+            && combat_remainder_nanos < COMBAT_QUANTUM_NANOS as u32;
+        if !coherent {
+            return Err(ClockRestoreError::FieldMismatch);
+        }
+        Ok(Self {
+            update_count,
+            fast_phase,
+            second_phase,
+            slow_phase,
+            combat_remainder_nanos,
+            combat_pulses,
+        })
+    }
+
     pub fn update_count(&self) -> u64 {
         self.update_count
     }
@@ -122,6 +156,23 @@ impl fmt::Display for ClockError {
 }
 
 impl Error for ClockError {}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ClockRestoreError {
+    IntegerOutOfRange,
+    FieldMismatch,
+}
+
+impl fmt::Display for ClockRestoreError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::IntegerOutOfRange => "snapshot clock integer exceeds its safe range",
+            Self::FieldMismatch => "snapshot clock fields do not identify one logical position",
+        })
+    }
+}
+
+impl Error for ClockRestoreError {}
 
 #[cfg(test)]
 mod tests {

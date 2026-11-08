@@ -2,6 +2,7 @@ use super::*;
 use crate::game::amount::Amount;
 use crate::game::rng::GameRng;
 use crate::game::state::GameState;
+use crate::health::PersistenceFailure;
 use crate::runtime::{CommandTestGate, MonotonicClock, RuntimeHandle};
 use serde_json::{Value, json};
 use std::io::{Read, Write};
@@ -57,9 +58,23 @@ struct TestServer {
 
 impl TestServer {
     fn start(state: GameState, gate: Arc<CommandTestGate>, clock: Arc<TestClock>) -> Self {
+        Self::start_with_health(
+            state,
+            gate,
+            clock,
+            PersistenceHealth::unconfigured_for_testing(Duration::from_secs(30)),
+        )
+    }
+
+    fn start_with_health(
+        state: GameState,
+        gate: Arc<CommandTestGate>,
+        clock: Arc<TestClock>,
+        health: PersistenceHealth,
+    ) -> Self {
         let runtime = GameRuntime::start_with_test_gate(clock, state, gate).unwrap();
         let handle = runtime.handle();
-        let state = ApiState::new(handle.clone());
+        let state = ApiState::new(handle.clone(), health);
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let address = listener.local_addr().unwrap();
@@ -516,6 +531,157 @@ async fn queue_full_503_does_not_bind_key_and_tracked_drain_allows_later_success
     assert_eq!(view.game.pro.wire.to_string(), "934");
     assert_eq!(view.game.pro.lifetime_clips.to_string(), "66");
     assert_eq!(view.game.pro.unused_clips.to_string(), "66");
+    server.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn health_routes_expose_typed_failures_without_mutating_or_stopping_the_world() {
+    let gate = Arc::new(CommandTestGate::default());
+    gate.release();
+    let clock = Arc::new(TestClock::new());
+    let health = PersistenceHealth::new(Duration::from_secs(30), 0, 0);
+    let server = TestServer::start_with_health(
+        state_with_wire("2"),
+        Arc::clone(&gate),
+        Arc::clone(&clock),
+        health.clone(),
+    );
+    let live = get(server.address).await;
+    assert_eq!(live.status, 200);
+    let live = request(server.address, "GET", "/api/health/live", Vec::new()).await;
+    assert_eq!(live.status, 200);
+    assert_eq!(live.body, br#"{"status":"ok"}"#);
+
+    let ready = request(server.address, "GET", "/api/health/ready", Vec::new()).await;
+    assert_eq!(ready.status, 200);
+    let ready_json = ready.json();
+    let mut fields = ready_json
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    fields.sort_unstable();
+    assert_eq!(
+        fields,
+        [
+            "consecutive_failures",
+            "current_attempt",
+            "last_committed_revision",
+            "last_committed_sequence",
+            "last_failure_code",
+            "latest_captured_revision",
+            "latest_captured_sequence",
+            "live",
+            "pending_snapshot_count",
+            "phase",
+            "ready",
+            "snapshot_overdue",
+            "write_in_progress",
+        ]
+    );
+    assert_eq!(ready_json["phase"], "ready");
+    assert_eq!(ready_json["last_committed_revision"], 0);
+    assert_eq!(ready_json["last_committed_sequence"], 0);
+    assert_eq!(ready_json["latest_captured_revision"], 0);
+    assert_eq!(ready_json["pending_snapshot_count"], 0);
+    assert_eq!(ready_json["last_failure_code"], Value::Null);
+    assert!(!ready.body.is_empty());
+    let printed = String::from_utf8(ready.body).unwrap();
+    for forbidden in [
+        "SELECT",
+        "INSERT",
+        "sqlite3",
+        "rng_state",
+        "payload",
+        "retry",
+    ] {
+        assert!(!printed.contains(forbidden));
+    }
+
+    // A coalesced pending snapshot is distinct from the one in-flight write.
+    health.captured(1, 1, 0);
+    assert_eq!(
+        request(server.address, "GET", "/api/health/ready", Vec::new())
+            .await
+            .json()["pending_snapshot_count"],
+        1
+    );
+    health.pending_taken();
+    health.write_started(1, false);
+    let saving = request(server.address, "GET", "/api/health/ready", Vec::new())
+        .await
+        .json();
+    assert_eq!(saving["pending_snapshot_count"], 0);
+    assert_eq!(saving["write_in_progress"], true);
+    health.write_failed(PersistenceFailure::DatabaseBusy, true, 2);
+    let failed = request(server.address, "GET", "/api/health/ready", Vec::new()).await;
+    assert_eq!(failed.status, 503);
+    let failed = failed.json();
+    assert_eq!(failed["phase"], "retrying");
+    assert_eq!(failed["ready"], false);
+    assert_eq!(failed["live"], true);
+    assert_eq!(failed["current_attempt"], 2);
+    assert_eq!(failed["last_failure_code"], "database_busy");
+    assert_eq!(failed["last_committed_revision"], 0);
+    assert_eq!(failed["latest_captured_revision"], 1);
+
+    let applied = post(server.address, command("health-does-not-stop-world")).await;
+    assert_eq!(applied.status, 200);
+    clock.advance(Duration::from_millis(10));
+    timeout(TEST_TIMEOUT, async {
+        loop {
+            if server.handle.view().game.clock.update_count() == 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let live_view = server.handle.view();
+    assert_eq!(live_view.game.pro.wire.to_string(), "1");
+    assert_eq!(live_view.game.pro.lifetime_clips.to_string(), "1");
+    assert!(live_view.process.lag_debt_nanos == 0);
+
+    health.committed(1, 1, 1);
+    let healthy = request(server.address, "GET", "/api/health/ready", Vec::new()).await;
+    assert_eq!(healthy.status, 200);
+    let healthy = healthy.json();
+    assert_eq!(healthy["current_attempt"], 0);
+    assert_eq!(healthy["consecutive_failures"], 0);
+    assert_eq!(healthy["last_failure_code"], Value::Null);
+    health.observe(6_001);
+    assert!(!health.snapshot().snapshot_overdue);
+    health.observe(6_002);
+    let overdue = request(server.address, "GET", "/api/health/ready", Vec::new()).await;
+    assert_eq!(overdue.status, 503);
+    assert_eq!(overdue.json()["snapshot_overdue"], true);
+    health.committed(2, 2, 6_002);
+    assert_eq!(
+        request(server.address, "GET", "/api/health/ready", Vec::new())
+            .await
+            .status,
+        200
+    );
+
+    let before = server.handle.view();
+    for path in ["/api/health/live", "/api/health/ready"] {
+        let response = request(
+            server.address,
+            "POST",
+            path,
+            br#"{"actor":"other-world","game_id":"forbidden"}"#.to_vec(),
+        )
+        .await;
+        assert_eq!(response.status, 405);
+    }
+    let after = server.handle.view();
+    assert_eq!(after.revision, before.revision);
+    assert_eq!(after.game.pro, before.game.pro);
+    assert_eq!(after.game.clock, before.game.clock);
+    assert_eq!(after.game.rng_state_hex(), before.game.rng_state_hex());
+    assert!(live_view.process.lag_debt_nanos == 0);
     server.stop().await;
 }
 

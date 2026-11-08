@@ -1,8 +1,10 @@
 //! Axum transport for the authoritative runtime.
 
 mod commands;
+mod health;
 mod view;
 
+use crate::health::PersistenceHealth;
 use crate::runtime::{GameRuntime, RuntimeHandle, RuntimeShutdownError};
 use axum::Router;
 use axum::body::Body;
@@ -26,13 +28,15 @@ pub use view::GameView;
 pub(crate) struct ApiState {
     runtime: RuntimeHandle,
     retry: RetryCoordinator,
+    health: PersistenceHealth,
 }
 
 impl ApiState {
-    fn new(runtime: RuntimeHandle) -> Self {
+    fn new(runtime: RuntimeHandle, health: PersistenceHealth) -> Self {
         Self {
             runtime,
             retry: RetryCoordinator::default(),
+            health,
         }
     }
 }
@@ -41,12 +45,14 @@ fn router_with_state(state: ApiState) -> Router {
     Router::new()
         .route("/api/game/view", get(get_view))
         .route("/api/game/commands", post(commands::post_command))
+        .route("/api/health/live", get(health::live))
+        .route("/api/health/ready", get(health::ready))
         .layer(DefaultBodyLimit::max(MAX_COMMAND_BODY_BYTES))
         .with_state(state)
 }
 
-pub fn router(runtime: RuntimeHandle) -> Router {
-    router_with_state(ApiState::new(runtime))
+pub fn router(runtime: RuntimeHandle, health: PersistenceHealth) -> Router {
+    router_with_state(ApiState::new(runtime, health))
 }
 
 async fn get_view(State(state): State<ApiState>) -> Response<Body> {
@@ -82,16 +88,18 @@ type ShutdownTestSignal = Option<tokio::sync::oneshot::Sender<()>>;
 
 /// Serve one shared state through the complete production lifecycle.
 /// Accepted writer/publication work is drained during graceful stop; this is
-/// not crash persistence and performs no database or snapshot I/O.
+/// not crash persistence and performs no database or snapshot I/O. The caller
+/// owns final snapshot capture after this accepted-work drain has completed.
 pub async fn serve<F>(
     listener: TcpListener,
     runtime: GameRuntime,
+    health: PersistenceHealth,
     shutdown: F,
 ) -> Result<(), ServerError>
 where
     F: Future<Output = ()> + Send + 'static,
 {
-    let state = ApiState::new(runtime.handle());
+    let state = ApiState::new(runtime.handle(), health);
     #[cfg(not(test))]
     {
         serve_with_state(listener, runtime, state, shutdown, ()).await
