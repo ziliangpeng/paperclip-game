@@ -51,6 +51,9 @@ function updateControls() {
 }
 
 const runner = new MakePaperclipCommandRunner((outcome) => {
+  // Any command outcome supersedes the one-time initial generic Ready message.
+  // Read-only transport recovery remains free to announce the first good View.
+  readyAnnounced = true;
   switch (outcome.kind) {
     case "pending":
       setCommandStatus("pending", "Command pending. The page has not changed any resources.");

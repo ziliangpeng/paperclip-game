@@ -216,16 +216,22 @@ class Browser:
             "--remote-debugging-address=127.0.0.1", "--remote-debugging-port=0",
             f"--user-data-dir={profile}", "about:blank",
         ], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        active_port = profile / "DevToolsActivePort"
-        def port_text() -> str | None:
-            try:
-                return active_port.read_text().splitlines()[0]
-            except (FileNotFoundError, IndexError):
-                return None
-        port = int(wait_for(port_text, description="isolated CDP port"))
-        self.port = port
-        version = self.http_json("/json/version")
-        self.browser_connection = Cdp(version["webSocketDebuggerUrl"])
+        try:
+            active_port = profile / "DevToolsActivePort"
+            def port_text() -> str | None:
+                try:
+                    return active_port.read_text().splitlines()[0]
+                except (FileNotFoundError, IndexError):
+                    return None
+            port = int(wait_for(port_text, description="isolated CDP port"))
+            self.port = port
+            version = self.http_json("/json/version")
+            self.browser_connection = Cdp(version["webSocketDebuggerUrl"])
+        except BaseException:
+            # The caller cannot close a Browser whose constructor did not
+            # return. Release this instance's own Chrome before propagating.
+            self.close()
+            raise
 
     def http_json(self, path: str) -> Any:
         client = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
@@ -314,13 +320,15 @@ def proxy_handler(state: ProxyState) -> type[BaseHTTPRequestHandler]:
             pass
 
         def finite(self, status: int, body: bytes, content_type: str,
-                   cache_control: str | None = None) -> None:
+                   cache_control: str | None = None, nosniff: str | None = None) -> None:
             self.send_response(status)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Connection", "close")
             if cache_control:
                 self.send_header("Cache-Control", cache_control)
+            if nosniff:
+                self.send_header("X-Content-Type-Options", nosniff)
             self.end_headers()
             if self.command != "HEAD":
                 self.wfile.write(body)
@@ -334,7 +342,7 @@ def proxy_handler(state: ProxyState) -> type[BaseHTTPRequestHandler]:
             return self.rfile.read(length)
 
         def backend(self, method: str, path: str, body: bytes | None = None,
-                    content_type: str | None = None) -> tuple[int, bytes, str, str | None]:
+                    content_type: str | None = None) -> tuple[int, bytes, str, str | None, str | None]:
             client = http.client.HTTPConnection("127.0.0.1", state.backend_port, timeout=8)
             try:
                 headers = {}
@@ -344,7 +352,10 @@ def proxy_handler(state: ProxyState) -> type[BaseHTTPRequestHandler]:
                 response = client.getresponse()
                 raw = response.read(2 * 1024 * 1024 + 1)
                 assert len(raw) <= 2 * 1024 * 1024, "bounded proxy response"
-                return response.status, raw, response.getheader("Content-Type") or "application/octet-stream", response.getheader("Cache-Control")
+                return (response.status, raw,
+                        response.getheader("Content-Type") or "application/octet-stream",
+                        response.getheader("Cache-Control"),
+                        response.getheader("X-Content-Type-Options"))
             finally:
                 client.close()
 
@@ -369,16 +380,16 @@ def proxy_handler(state: ProxyState) -> type[BaseHTTPRequestHandler]:
                 body = self.bounded_body()
                 if self.path == "/api/game/view" and state.hold_next_get:
                     state.hold_next_get = False
-                    status, raw, kind, cache = self.backend("GET", self.path, body)
+                    status, raw, kind, cache, nosniff = self.backend("GET", self.path, body)
                     state.get_record = {"status": status, "body": json.loads(raw),
                                         "delivered": False}
                     state.get_captured.set()
                     assert state.get_release.wait(12), "bounded held real GET"
                     state.get_record["delivered"] = True
-                    self.finite(status, raw, kind, cache)
+                    self.finite(status, raw, kind, cache, nosniff)
                     return
-                status, raw, kind, cache = self.backend("GET", self.path, body)
-                self.finite(status, raw, kind, cache)
+                status, raw, kind, cache, nosniff = self.backend("GET", self.path, body)
+                self.finite(status, raw, kind, cache, nosniff)
             except (AssertionError, OSError, http.client.HTTPException) as error:
                 state.errors.append(f"GET {self.path}: {type(error).__name__}: {error}")
                 try:
@@ -459,7 +470,7 @@ def proxy_handler(state: ProxyState) -> type[BaseHTTPRequestHandler]:
                     record["response_status"] = 409
                     self.finite(409, b'{"status":"conflict"}', "application/json")
                     return
-                status, response_body, kind, cache = self.backend(
+                status, response_body, kind, cache, nosniff = self.backend(
                     "POST", self.path, raw, self.headers.get("Content-Type"))
                 record["response_status"] = status
                 record["response_body"] = json.loads(response_body)
@@ -471,7 +482,7 @@ def proxy_handler(state: ProxyState) -> type[BaseHTTPRequestHandler]:
                     self.connection.shutdown(socket.SHUT_RDWR)
                     self.connection.close()
                     return
-                self.finite(status, response_body, kind, cache)
+                self.finite(status, response_body, kind, cache, nosniff)
             except (AssertionError, ValueError, OSError, http.client.HTTPException) as error:
                 state.errors.append(f"POST command: {type(error).__name__}: {error}")
                 try:
@@ -586,6 +597,9 @@ def check_assets_and_negative_commands(page: Cdp, port: int) -> None:
         response = client.connection.getresponse()
         assert response.status == 200, (path, response.status)
         assert response.getheader("Content-Type") == kind, (path, response.getheader("Content-Type"))
+        assert response.getheader("X-Content-Type-Options") == "nosniff", path
+        if path == "/static/stream.js":
+            assert response.getheader("Cache-Control") == "no-cache"
         body = response.read(256 * 1024 + 1)
         assert len(body) <= 256 * 1024
     for path in ("/static/../Cargo.toml", "/static/index.html%00", "/src/main.rs", "/favicon.ico"):
@@ -708,6 +722,236 @@ def check_accessibility_and_keyboard_order(page: Cdp) -> None:
     assert focused[0] == "Skip to game controls", focused
     assert focused[1:4] == ["Production", "Business", "Manufacturing"], focused
     assert focused[4] == "make-paperclip", focused
+
+
+def drain_render_tasks(page: Cdp) -> None:
+    """Drain queued Render/MutationObserver work, never wait on guessed sleeps."""
+    page.evaluate("new Promise(resolve => queueMicrotask(() => queueMicrotask(() => resolve(true))))")
+
+
+def run_startup_feedback_and_cleanup(binary: Path, executable: str, version: str) -> dict[str, Any]:
+    """Actual pre-baseline command orderings and failed-constructor ownership."""
+    with tempfile.TemporaryDirectory(prefix="paperclip-native-ui-startup-") as temporary_name:
+        temporary = Path(temporary_name)
+        backend_port = api.free_port()
+        database = temporary / "startup.sqlite3"
+        state = ProxyState(backend_port)
+        # Only this isolated startup proxy delays physical transport delivery.
+        state.stream_release = threading.Event()
+        state.stream_started = threading.Event()
+        state.stream_release.set()
+        BaseHandler = proxy_handler(state)
+
+        class StartupHandler(BaseHandler):
+            def stream(self) -> None:
+                state.stream_started.set()
+                assert state.stream_release.wait(12), "bounded real initial-stream gate"
+                super().stream()
+
+        proxy = Proxy(("127.0.0.1", 0), StartupHandler)
+        proxy_thread = threading.Thread(target=proxy.serve_forever, daemon=True)
+        proxy_thread.start()
+        origin = f"http://127.0.0.1:{proxy.server_address[1]}"
+        process = None
+        browser = None
+        out = (temporary / "startup.stdout").open("wb")
+        err = (temporary / "startup.stderr").open("wb")
+        result: dict[str, Any] = {"browser": version}
+        owner = None
+        assigned = None
+        try:
+            process = api.start_ready(binary, ["--listen-addr", f"127.0.0.1:{backend_port}",
+                                                "--database-path", str(database)],
+                                      backend_port, temporary, out, err)
+            browser = Browser(executable, temporary, origin)
+            healthy, healthy_context, healthy_target = browser.new_page("/")
+            healthy_view = wait_for(
+                lambda: dom_state(healthy),
+                lambda value: value.get("viewState") == "ready" and value.get("lifetime") == "0"
+                and value.get("wire") == "1000" and value["status"].startswith("Ready."),
+                "ordinary no-action startup Ready")
+            assert healthy_view["runId"] and healthy_view["ariaDisabled"] == "false"
+            result["ordinaryStartup"] = healthy_view
+            assert browser.browser_connection is not None
+            browser.browser_connection.call("Target.closeTarget", {"targetId": healthy_target})
+            browser.pages.remove(healthy)
+            healthy.close()
+
+            def activate_before_baseline() -> Cdp:
+                state.hold_next_get = True
+                state.get_captured.clear()
+                state.get_release.clear()
+                state.stream_started.clear()
+                state.stream_release.clear()
+                page, _, _ = browser.new_page("/")
+                wait_dom(page, "document.getElementById('make-paperclip').getAttribute('aria-disabled')", "false", "startup module initialized")
+                assert state.get_captured.wait(8), "real initial GET body captured"
+                assert state.stream_started.wait(8), "real initial EventSource gated"
+                page.evaluate("""(() => {
+                  window.startupStatusHistory = [];
+                  window.startupStatusObserver = new MutationObserver(() => {
+                    window.startupStatusHistory.push(document.getElementById('command-status').textContent);
+                  });
+                  window.startupStatusObserver.observe(document.getElementById('command-status'),
+                    {childList: true, characterData: true, subtree: true});
+                  document.getElementById('make-paperclip').focus();
+                  return true;
+                })()""")
+                page.press("Enter")
+                return page
+
+            # A: a valid first View hydrates 0/1000 while the exact POST stays held.
+            state.hold_commands = True
+            state.command_release.clear()
+            pending_page = activate_before_baseline()
+            wait_commands(state, 1)
+            pending = wait_for(lambda: dom_state(pending_page),
+                               lambda value: "pending" in value["status"].lower() and value["ariaDisabled"] == "true",
+                               "early held pending")
+            assert pending["viewState"] == "loading" and pending.get("lifetime") is None and pending.get("wire") is None
+            assert pending["focus"] == "make-paperclip" and pending["button"] == "Sending…" and not pending["disabled"]
+            state.stream_release.set()
+            state.get_release.set()
+            after_pending = wait_for(
+                lambda: dom_state(pending_page),
+                lambda value: value.get("viewState") == "ready" and value.get("lifetime") == "0" and value.get("wire") == "1000",
+                "baseline released while command remains held")
+            drain_render_tasks(pending_page)
+            pending_history = list(pending_page.evaluate("window.startupStatusHistory"))
+            assert pending_history == [pending["status"]], pending_history
+            assert "pending" in after_pending["status"].lower() and after_pending["ariaDisabled"] == "true"
+            assert after_pending["button"] == "Sending…" and after_pending["focus"] == "make-paperclip"
+            assert all(not message.startswith("Ready.") for message in pending_history)
+            state.command_release.set()
+            state.hold_commands = False
+            after_release = wait_for(
+                lambda: dom_state(pending_page),
+                lambda value: value.get("lifetime") == "1" and value.get("wire") == "999" and "applied" in value["status"],
+                "released exact command applies once")
+            assert after_release["ariaDisabled"] == "false" and after_release["focus"] == "make-paperclip"
+            result["pendingBeforeBaseline"] = {
+                "afterFirstView": after_pending, "mutationHistory": pending_history,
+                "afterReleasedPost": after_release,
+            }
+
+            # B: actual applied receipt arrives before either initial View transport.
+            applied_page = activate_before_baseline()
+            wait_commands(state, 2)
+            early_applied = wait_for(lambda: dom_state(applied_page),
+                                     lambda value: value.get("viewState") == "loading" and "applied" in value["status"],
+                                     "actual applied receipt before baseline")
+            assert early_applied.get("lifetime") is None and early_applied.get("wire") is None
+            assert state.command_records[1]["response_status"] == 200
+            state.stream_release.set()
+            state.get_release.set()
+            after_applied = wait_for(
+                lambda: dom_state(applied_page),
+                lambda value: value.get("viewState") == "ready" and value.get("lifetime") == "2" and value.get("wire") == "998",
+                "coherent View after applied receipt")
+            drain_render_tasks(applied_page)
+            applied_history = list(applied_page.evaluate("window.startupStatusHistory"))
+            applied_revision = state.command_records[1]["response_body"]["revision"]
+            assert f"applied the command at revision {applied_revision}." in after_applied["status"]
+            assert any("applied" in message for message in applied_history)
+            assert all(not message.startswith("Ready.") for message in applied_history)
+            result["appliedBeforeBaseline"] = {"afterFirstView": after_applied, "mutationHistory": applied_history}
+
+            # C: convert real stock through the public Agent API, then receive a true
+            # insufficient-wire 422 on a third fresh page before its first View.
+            public = api.Client(backend_port)
+            current = api.checked_json(public.get()[1])
+            api.assert_production(current, "998", "2")
+            remaining_wire = int(current["game"]["wire"])
+            for index in range(remaining_wire):
+                status, response_body = public.make(f"m1-startup-stock-{index}")
+                assert status == 200, (index, status, response_body)
+            exhausted = api.checked_json(public.get()[1])
+            api.assert_production(exhausted, "0", "1000")
+            public.close()
+            rejected_page = activate_before_baseline()
+            wait_commands(state, 3)
+            early_rejection = wait_for(lambda: dom_state(rejected_page),
+                                       lambda value: value.get("viewState") == "loading" and "not enough Wire" in value["status"],
+                                       "real exhausted-stock 422 before baseline")
+            assert early_rejection.get("lifetime") is None and early_rejection.get("wire") is None
+            assert state.command_records[2]["response_status"] == 422
+            assert state.command_records[2]["response_body"]["status"] == "rule_rejected"
+            assert state.command_records[2]["response_body"]["reason"] == "insufficient_wire"
+            state.stream_release.set()
+            state.get_release.set()
+            after_rejection = wait_for(
+                lambda: dom_state(rejected_page),
+                lambda value: value.get("viewState") == "ready" and value.get("lifetime") == "1000" and value.get("wire") == "0",
+                "authoritative exhausted View after 422")
+            drain_render_tasks(rejected_page)
+            rejection_history = list(rejected_page.evaluate("window.startupStatusHistory"))
+            assert "not enough Wire" in after_rejection["status"]
+            assert after_rejection["focus"] == "make-paperclip" and after_rejection["ariaDisabled"] == "false"
+            assert any("not enough Wire" in message for message in rejection_history)
+            assert all(not message.startswith("Ready.") for message in rejection_history)
+            result["ruleRejectedBeforeBaseline"] = {
+                "afterFirstView": after_rejection, "mutationHistory": rejection_history,
+                "structuredAgentApplied": remaining_wire, "agentDrainedStock": True,
+            }
+            envelopes = [exact_command(record) for record in state.command_records]
+            assert len(envelopes) == 3 and len({body["command_id"] for body in envelopes}) == 3
+            assert all(record["forwarded"] == 1 and not record["dropped"] for record in state.command_records)
+            assert not state.errors, state.errors[:10]
+            result["exactStartupEnvelopes"] = len(envelopes)
+            result["proxyErrors"] = state.errors
+
+            # Separate failed PROFILE/process from the healthy browser above.
+            failed_directory = temporary / "failed-constructor"
+            failed_directory.mkdir()
+
+            class InjectedVersionFailure(Browser):
+                def http_json(self, path: str) -> Any:
+                    nonlocal owner
+                    owner = self
+                    raise TimeoutError("injected CDP /json/version failure")
+            constructor_error = None
+            try:
+                assigned = InjectedVersionFailure(executable, failed_directory, "http://127.0.0.1:9")
+            except TimeoutError as error:
+                constructor_error = str(error)
+            assert constructor_error == "injected CDP /json/version failure"
+            assert assigned is None, "constructor could not complete; caller cleanup is unavailable"
+            assert owner is not None and owner.port > 0
+            failed_child = owner.process
+            # Crucially, no owner.close() has run before this observable assertion.
+            failed_child_status = failed_child.poll()
+            assert failed_child_status is not None, "constructor itself must terminate its owned Chrome"
+            result["injectedConstructorCleanup"] = {
+                "errorPreserved": constructor_error, "realDevToolsPortAssigned": True,
+                "callerAssignmentIsNone": assigned is None, "childExitedBeforeFallback": True,
+            }
+            live_browser_process = browser.process
+            browser.close()
+            assert live_browser_process.poll() is not None
+            browser = None
+            result["healthyChromeClosed"] = True
+            process.stop()
+            result["backendProcessEnded"] = process.process.poll() is not None
+            assert result["backendProcessEnded"]
+            return result
+        finally:
+            state.command_release.set()
+            state.get_release.set()
+            state.stream_release.set()
+            # Failed-test fallback cannot make the earlier poll observation pass.
+            if assigned is not None:
+                assigned.close()
+            elif owner is not None and owner.process.poll() is None:
+                owner.close()
+            if browser is not None:
+                browser.close()
+            proxy.shutdown()
+            proxy.server_close()
+            proxy_thread.join(timeout=5)
+            if process is not None and process.process.poll() is None:
+                process.stop()
+            out.close()
+            err.close()
 
 
 def run_main_ui(browser: Browser, state: ProxyState, backend_port: int, page1: Cdp, page2: Cdp) -> dict[str, Any]:
@@ -1141,6 +1385,8 @@ def main() -> int:
                              timeout=10, check=True).stdout.strip()
     print(f"real browser: {version}")
     binary = args.binary.resolve()
+    startup_result = run_startup_feedback_and_cleanup(binary, executable, version)
+    print(f"native UI: first-View feedback and constructor-failure cleanup passed: {startup_result}")
     worktree = Path(__file__).resolve().parent.parent
     started = time.perf_counter()
     with tempfile.TemporaryDirectory(prefix="paperclip-native-ui-browser-") as temporary_name:
@@ -1179,8 +1425,9 @@ def main() -> int:
             assert not state.errors, state.errors[:10]
             summary = {
                 "status": "pass", "browser": version, "independentBrowserContexts": 2,
-                "main": main_result, "numericOrdering": numeric_result,
-                "recovery": recovery_result, "durationSeconds": round(time.perf_counter() - started, 3),
+                "startup": startup_result, "main": main_result,
+                "numericOrdering": numeric_result, "recovery": recovery_result,
+                "durationSeconds": round(time.perf_counter() - started, 3),
             }
             print("NATIVE_UI_BROWSER_SUMMARY=" + json.dumps(summary, separators=(",", ":")))
             return 0
