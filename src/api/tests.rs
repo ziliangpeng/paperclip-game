@@ -167,6 +167,30 @@ fn blocking_request(address: SocketAddr, method: &str, path: &str, body: &[u8]) 
     }
 }
 
+fn connect_active_stream(address: SocketAddr) -> TcpStream {
+    let mut stream = TcpStream::connect_timeout(&address, TEST_TIMEOUT).unwrap();
+    stream.set_read_timeout(Some(TEST_TIMEOUT)).unwrap();
+    stream.set_write_timeout(Some(TEST_TIMEOUT)).unwrap();
+    write!(
+        stream,
+        "GET /api/game/stream HTTP/1.1\r\nHost: {address}\r\nAccept: text/event-stream\r\n\r\n"
+    )
+    .unwrap();
+    let mut headers = Vec::new();
+    let mut byte = [0_u8; 1];
+    while headers.len() < 16 * 1024 && !headers.ends_with(b"\r\n\r\n") {
+        stream.read_exact(&mut byte).unwrap();
+        headers.push(byte[0]);
+    }
+    assert!(headers.ends_with(b"\r\n\r\n"));
+    assert!(
+        String::from_utf8(headers)
+            .unwrap()
+            .starts_with("HTTP/1.1 200 OK\r\n")
+    );
+    stream
+}
+
 async fn request(
     address: SocketAddr,
     method: &'static str,
@@ -429,6 +453,7 @@ async fn production_serve_drains_21_accepted_disconnected_commands_before_return
     timeout(TEST_TIMEOUT, gate.wait_entered(1))
         .await
         .expect("one accepted command is local pending at the real writer");
+    let active_stream = connect_active_stream(server.address);
     assert_eq!(server.state.retry.registered_count(), 21);
     assert_eq!(server.state.retry.tracked_count(), 21);
     let state = server.state.clone();
@@ -440,6 +465,17 @@ async fn production_serve_drains_21_accepted_disconnected_commands_before_return
     server.wait_shutdown_requested().await;
     gate.release();
     server.wait_stopped().await;
+    let active_stream = active_stream;
+    let mut terminal_sse = Vec::new();
+    active_stream
+        .take(64 * 1024)
+        .read_to_end(&mut terminal_sse)
+        .expect("active SSE reaches EOF during accepted-command drain");
+    assert!(
+        terminal_sse
+            .windows(b"game_view".len())
+            .any(|window| window == b"game_view")
+    );
 
     let outcomes: Vec<_> = (0..21)
         .map(|index| {

@@ -2,10 +2,12 @@
 
 mod commands;
 mod health;
+mod stream;
 mod view;
 
 use crate::health::PersistenceHealth;
 use crate::runtime::{GameRuntime, RuntimeHandle, RuntimeShutdownError};
+use crate::view_broadcast::ViewBroadcast;
 use axum::Router;
 use axum::body::Body;
 use axum::extract::{DefaultBodyLimit, State};
@@ -29,11 +31,13 @@ pub(crate) struct ApiState {
     runtime: RuntimeHandle,
     retry: RetryCoordinator,
     health: PersistenceHealth,
+    views: ViewBroadcast,
 }
 
 impl ApiState {
     fn new(runtime: RuntimeHandle, health: PersistenceHealth) -> Self {
         Self {
+            views: ViewBroadcast::new(runtime.clone()),
             runtime,
             retry: RetryCoordinator::default(),
             health,
@@ -44,6 +48,8 @@ impl ApiState {
 fn router_with_state(state: ApiState) -> Router {
     Router::new()
         .route("/api/game/view", get(get_view))
+        .route("/api/game/stream", get(stream::get_stream))
+        .route("/static/stream.js", get(stream::browser_synchronizer))
         .route("/api/game/commands", post(commands::post_command))
         .route("/api/health/live", get(health::live))
         .route("/api/health/ready", get(health::ready))
@@ -120,9 +126,15 @@ async fn serve_with_state<F>(
 where
     F: Future<Output = ()> + Send + 'static,
 {
+    let stream_shutdown = state.views.clone();
+    let shutdown = async move {
+        shutdown.await;
+        stream_shutdown.initiate_shutdown();
+    };
     let serving = axum::serve(listener, router_with_state(state.clone()))
         .with_graceful_shutdown(shutdown)
         .await;
+    state.views.initiate_shutdown();
     runtime.request_shutdown();
     #[cfg(test)]
     if let Some(signal) = _shutdown_test_signal {
