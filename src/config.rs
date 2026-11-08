@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 /// Loopback-only default; no external interface is exposed implicitly.
 pub const DEFAULT_LISTEN_ADDR: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 3000);
-/// Repository-relative default; the host never embeds a developer's home path.
+/// Working-directory-relative default; later persistence owns safe database initialization.
 pub const DEFAULT_DATABASE_PATH: &str = "data/paperclip.sqlite3";
 
 const LISTEN_OPTION: &str = "--listen-addr";
@@ -201,6 +201,9 @@ mod tests {
 
     #[test]
     fn defaults_match_the_source_contract() {
+        assert_eq!(DEFAULT_LISTEN_ADDR, "127.0.0.1:3000".parse().unwrap());
+        assert_eq!(DEFAULT_DATABASE_PATH, "data/paperclip.sqlite3");
+
         let config = Config::parse_from(std::iter::empty::<&str>()).expect("default config");
         assert_eq!(config, Config::default());
         assert_eq!(config.listen_addr(), DEFAULT_LISTEN_ADDR);
