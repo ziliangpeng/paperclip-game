@@ -115,6 +115,65 @@ fn directory_names(path: &Path) -> Vec<String> {
     names
 }
 
+fn directory_bytes(path: &Path) -> std::collections::BTreeMap<String, Vec<u8>> {
+    std::fs::read_dir(path)
+        .unwrap()
+        .map(|entry| {
+            let entry = entry.unwrap();
+            (
+                entry.file_name().to_string_lossy().into_owned(),
+                std::fs::read(entry.path()).unwrap(),
+            )
+        })
+        .collect()
+}
+
+#[cfg(unix)]
+struct PermissionRestorer {
+    directory: PathBuf,
+    directory_permissions: std::fs::Permissions,
+    files: Vec<(PathBuf, std::fs::Permissions)>,
+}
+
+#[cfg(unix)]
+impl PermissionRestorer {
+    fn new(directory: &TestDirectory) -> Self {
+        let files = std::fs::read_dir(&directory.0)
+            .unwrap()
+            .map(|entry| {
+                let path = entry.unwrap().path();
+                let permissions = std::fs::metadata(&path).unwrap().permissions();
+                (path, permissions)
+            })
+            .collect();
+        Self {
+            directory_permissions: std::fs::metadata(&directory.0).unwrap().permissions(),
+            directory: directory.0.clone(),
+            files,
+        }
+    }
+
+    fn make_read_only(&self) {
+        use std::os::unix::fs::PermissionsExt;
+
+        // Only this test's freshly-created files/directory are changed.
+        for (path, _) in &self.files {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o444)).unwrap();
+        }
+        std::fs::set_permissions(&self.directory, std::fs::Permissions::from_mode(0o555)).unwrap();
+    }
+}
+
+#[cfg(unix)]
+impl Drop for PermissionRestorer {
+    fn drop(&mut self) {
+        let _ = std::fs::set_permissions(&self.directory, self.directory_permissions.clone());
+        for (path, permissions) in &self.files {
+            let _ = std::fs::set_permissions(path, permissions.clone());
+        }
+    }
+}
+
 fn assert_rejected_without_mutation(
     directory: &TestDirectory,
     initial: &SnapshotV1,
@@ -397,6 +456,144 @@ fn corrupt_non_sqlite_and_empty_files_follow_distinct_fail_closed_paths() {
     let loaded = open(&empty_path);
     assert_eq!(loaded.origin, LoadOrigin::FreshInitialized);
     assert_eq!(loaded.revision, 0);
+
+    let sidecar_sets: [&[&str]; 4] = [
+        &["-wal"],
+        &["-shm"],
+        &["-journal"],
+        &["-wal", "-shm", "-journal"],
+    ];
+    for main_exists in [false, true] {
+        for suffixes in sidecar_sets {
+            let orphaned = TestDirectory::new();
+            let path = orphaned.database();
+            if main_exists {
+                std::fs::write(&path, []).unwrap();
+            }
+            for suffix in suffixes {
+                let mut sidecar = path.as_os_str().to_os_string();
+                sidecar.push(suffix);
+                let bytes = if *suffix == "-wal" {
+                    Vec::new()
+                } else {
+                    format!("original {suffix} sentinel").into_bytes()
+                };
+                std::fs::write(sidecar, bytes).unwrap();
+            }
+            let before = directory_bytes(&orphaned.0);
+            let error = SnapshotStore::open_or_initialize(&path, &initial)
+                .expect_err("any known existing sidecar forbids fresh initialization");
+            assert_eq!(
+                error,
+                StorageError::InvalidDatabase,
+                "main_exists={main_exists}, suffixes={suffixes:?}"
+            );
+            assert_eq!(
+                directory_bytes(&orphaned.0),
+                before,
+                "preserved main_exists={main_exists}, suffixes={suffixes:?}"
+            );
+            assert!(!error.to_string().contains(path.to_str().unwrap()));
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn dangling_and_directory_sidecars_fail_closed_without_new_world_creation() {
+    let directory = TestDirectory::new();
+    let source = open(&directory.database());
+    let initial = snapshot(&source, 0);
+    drop(source);
+    for main_exists in [false, true] {
+        for kind in ["dangling", "directory"] {
+            let fixture = TestDirectory::new();
+            let path = fixture.database();
+            if main_exists {
+                std::fs::write(&path, []).unwrap();
+            }
+            let mut sidecar = path.as_os_str().to_os_string();
+            sidecar.push(if kind == "dangling" { "-wal" } else { "-shm" });
+            if kind == "dangling" {
+                std::os::unix::fs::symlink("never-created-target.sqlite3", &sidecar).unwrap();
+            } else {
+                std::fs::create_dir(&sidecar).unwrap();
+            }
+            let before = directory_names(&fixture.0);
+            let error = SnapshotStore::open_or_initialize(&path, &initial)
+                .expect_err("a dangling symlink/directory is not an empty database location");
+            assert_eq!(error, StorageError::InvalidDatabase);
+            assert_eq!(directory_names(&fixture.0), before, "{kind}");
+            if main_exists {
+                assert_eq!(std::fs::read(&path).unwrap(), b"");
+            } else {
+                assert!(!path.exists());
+            }
+            if kind == "dangling" {
+                assert_eq!(
+                    std::fs::read_link(&sidecar).unwrap(),
+                    PathBuf::from("never-created-target.sqlite3")
+                );
+                assert!(!fixture.0.join("never-created-target.sqlite3").exists());
+            } else {
+                assert_eq!(std::fs::read_dir(&sidecar).unwrap().count(), 0);
+            }
+            assert!(!error.to_string().contains(path.to_str().unwrap()));
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn real_filesystem_io_rejection_preserves_the_committed_row_and_original_bytes() {
+    let uid = std::process::Command::new("id")
+        .arg("-u")
+        .output()
+        .expect("query the actual Unix runtime uid");
+    assert!(uid.status.success());
+    let uid = String::from_utf8(uid.stdout)
+        .unwrap()
+        .trim()
+        .parse::<u32>()
+        .expect("numeric Unix runtime uid");
+    assert_ne!(uid, 0, "root would bypass the real permission fault");
+    let directory = TestDirectory::new();
+    let path = directory.database();
+    let startup = open(&path);
+    let committed = changed_snapshot(&startup, 1, "9007199254740993.000000000000000001");
+    let replacement = snapshot(&startup, 0);
+    let mut store = startup.store;
+    store.commit(1, &committed).unwrap();
+    drop(store);
+    let before = directory_bytes(&directory.0);
+    let permissions = PermissionRestorer::new(&directory);
+    permissions.make_read_only();
+    let precondition = std::fs::write(directory.0.join("must-not-be-created"), b"")
+        .expect_err("the real UID must be unable to write into the read-only fixture");
+    assert_eq!(precondition.kind(), std::io::ErrorKind::PermissionDenied);
+
+    let error = SnapshotStore::open_or_initialize(&path, &replacement)
+        .expect_err("the real OS permissions must reject writable SQLite access");
+    assert!(
+        matches!(&error, StorageError::OpenFailed | StorageError::IoFailed),
+        "unexpected typed I/O rejection: {error:?}"
+    );
+    assert!(!error.to_string().contains(path.to_str().unwrap()));
+    drop(permissions);
+    assert_eq!(directory_bytes(&directory.0), before);
+    eprintln!(
+        "real Unix uid {uid}, readonly directory/file rejection {error:?}; exact old bytes preserved"
+    );
+
+    let restored = open(&path);
+    assert_eq!(restored.origin, LoadOrigin::Restored);
+    assert_eq!(restored.revision, 1);
+    assert_eq!(restored.capture_sequence, 1);
+    assert_eq!(snapshot(&restored, 1), committed);
+    assert_eq!(
+        payload(&path).as_bytes(),
+        committed.to_canonical_bytes().unwrap().as_slice()
+    );
 }
 
 #[test]
@@ -590,14 +787,18 @@ fn crash_store_child_entrypoint() {
     startup.store.commit(1, &old).unwrap();
     let new = changed_snapshot(&startup, 2, "2");
 
+    let marker_staging = marker.with_extension("committed.tmp");
     if mode == "after" {
         startup.store.commit(2, &new).unwrap();
-        std::fs::write(&marker, new.to_canonical_bytes().unwrap()).unwrap();
+        std::fs::write(&marker_staging, new.to_canonical_bytes().unwrap()).unwrap();
     } else {
         assert_eq!(mode, "before");
         // Capturing does not write SQLite. Revision 2 deliberately stays unsaved.
-        std::fs::write(&marker, old.to_canonical_bytes().unwrap()).unwrap();
+        std::fs::write(&marker_staging, old.to_canonical_bytes().unwrap()).unwrap();
     }
+    // Publish visibility only after the complete canonical payload is written.
+    // write + rename in the same fixture directory makes exists() a ready signal.
+    std::fs::rename(&marker_staging, &marker).unwrap();
     // A real child process remains alive with the SQLite connection open until SIGKILL.
     loop {
         std::thread::park();

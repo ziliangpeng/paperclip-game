@@ -191,6 +191,15 @@ impl SnapshotStore {
         };
         let fresh = metadata.as_ref().is_none_or(|metadata| metadata.len() == 0);
         if fresh {
+            for suffix in ["-wal", "-shm", "-journal"] {
+                let mut sidecar = path.as_os_str().to_os_string();
+                sidecar.push(suffix);
+                match std::fs::symlink_metadata(sidecar) {
+                    Ok(_) => return Err(StorageError::InvalidDatabase),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(_) => return Err(StorageError::IoFailed),
+                }
+            }
             if metadata.is_none()
                 && let Some(parent) = path.parent()
                 && !parent.as_os_str().is_empty()
@@ -279,6 +288,15 @@ impl SnapshotStore {
     }
 
     fn commit_prepared(&mut self, prepared: &PreparedSnapshot) -> Result<(), StorageError> {
+        self.commit_prepared_before_commit(prepared, || {})
+    }
+
+    // The test-only module can pause after the actual UPSERT, before COMMIT.
+    fn commit_prepared_before_commit(
+        &mut self,
+        prepared: &PreparedSnapshot,
+        before_commit: impl FnOnce(),
+    ) -> Result<(), StorageError> {
         if prepared.sequence < self.last_sequence {
             return Err(StorageError::StaleCapture);
         }
@@ -297,6 +315,7 @@ impl SnapshotStore {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(map_transaction_error)?;
         insert_prepared(&transaction, prepared)?;
+        before_commit();
         transaction.commit().map_err(map_transaction_error)?;
         self.last_sequence = prepared.sequence;
         self.last_revision = prepared.revision;
@@ -358,6 +377,7 @@ impl ReadOnlyValidationCopy {
         std::fs::copy(source, &self.database).map_err(|_| StorageError::IoFailed)?;
         copy_sidecar(source, &self.database, "-wal")?;
         copy_sidecar(source, &self.database, "-shm")?;
+        copy_sidecar(source, &self.database, "-journal")?;
         Ok(())
     }
 
@@ -395,16 +415,16 @@ fn open_writable(path: &Path, create: bool) -> Result<Connection, StorageError> 
 fn configure_durability(connection: &Connection) -> Result<(), StorageError> {
     let journal: String = connection
         .query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))
-        .map_err(|_| StorageError::DurabilityFailure)?;
+        .map_err(map_durability_error)?;
     if !journal.eq_ignore_ascii_case("wal") {
         return Err(StorageError::DurabilityFailure);
     }
     connection
         .pragma_update(None, "synchronous", "FULL")
-        .map_err(|_| StorageError::DurabilityFailure)?;
+        .map_err(map_durability_error)?;
     connection
         .busy_timeout(DEFAULT_BUSY_TIMEOUT)
-        .map_err(|_| StorageError::DurabilityFailure)
+        .map_err(map_durability_error)
 }
 
 fn validate_read_only(connection: &Connection) -> Result<StoredSnapshot, StorageError> {
@@ -533,7 +553,27 @@ fn insert_prepared(
     Ok(())
 }
 
+fn is_sqlite_filesystem_error(error: &rusqlite::Error) -> bool {
+    error.sqlite_error_code().is_some_and(|code| {
+        matches!(
+            code,
+            rusqlite::ErrorCode::ReadOnly | rusqlite::ErrorCode::SystemIoFailure
+        )
+    })
+}
+
+fn map_durability_error(error: rusqlite::Error) -> StorageError {
+    if is_sqlite_filesystem_error(&error) {
+        StorageError::IoFailed
+    } else {
+        StorageError::DurabilityFailure
+    }
+}
+
 fn map_transaction_error(error: rusqlite::Error) -> StorageError {
+    if is_sqlite_filesystem_error(&error) {
+        return StorageError::IoFailed;
+    }
     if error.sqlite_error_code().is_some_and(|code| {
         matches!(
             code,
@@ -1001,4 +1041,142 @@ fn note_capture_failure(health: &PersistenceHealth, error: &RuntimePersistenceEr
         | RuntimePersistenceError::PublisherTaskEnded => PersistenceFailure::TransactionFailed,
     };
     health.write_failed(failure, false, 0);
+}
+
+#[cfg(test)]
+mod replacement_fault_tests {
+    use super::*;
+    use crate::game::amount::Amount;
+    use crate::game::rng::GameRng;
+    use crate::game::state::GameState;
+    use std::time::Instant;
+
+    const TEST_DATABASE: &str = "PAPERCLIP_GAME_TEST_INFLIGHT_DATABASE";
+    const TEST_MARKER: &str = "PAPERCLIP_GAME_TEST_INFLIGHT_MARKER";
+
+    struct FixtureDirectory(std::path::PathBuf);
+
+    impl FixtureDirectory {
+        fn new() -> Self {
+            let id = VALIDATION_COPY_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "paperclip-game-inflight-test-{}-{id}",
+                std::process::id()
+            ));
+            std::fs::create_dir(&path).expect("create a previously nonexistent test directory");
+            Self(path)
+        }
+    }
+
+    impl Drop for FixtureDirectory {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    struct KilledChild(std::process::Child);
+
+    impl Drop for KilledChild {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    fn publish_ready_marker(path: &Path, snapshot: &SnapshotV1) {
+        let staging = path.with_extension("tmp");
+        std::fs::write(&staging, snapshot.to_canonical_bytes().unwrap()).unwrap();
+        // Visibility implies the whole marker is present, not merely its creation.
+        std::fs::rename(staging, path).unwrap();
+    }
+
+    #[test]
+    fn in_progress_store_child_entrypoint() {
+        let (Some(database), Some(marker)) = (
+            std::env::var_os(TEST_DATABASE),
+            std::env::var_os(TEST_MARKER),
+        ) else {
+            return;
+        };
+        let database = std::path::PathBuf::from(database);
+        let marker = std::path::PathBuf::from(marker);
+        let initial =
+            SnapshotV1::capture(&GameState::fresh(GameRng::from_test_seed([81_u8; 32])), 0)
+                .unwrap();
+        let (mut store, stored) = SnapshotStore::open_or_initialize(&database, &initial).unwrap();
+        assert_eq!(stored.origin, LoadOrigin::FreshInitialized);
+        let mut changed = stored.snapshot.restore().unwrap().state;
+        changed.pro.funds = Amount::parse("7").unwrap();
+        let next = SnapshotV1::capture(&changed, 1).unwrap();
+        let prepared = PreparedSnapshot::new(1, &next).unwrap();
+        store
+            .commit_prepared_before_commit(&prepared, || {
+                // The real BEGIN IMMEDIATE and UPSERT have already succeeded.
+                // The SQLite transaction is deliberately left uncommitted.
+                publish_ready_marker(&marker, &next);
+                loop {
+                    std::thread::park();
+                }
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn real_kill_during_replacement_rolls_back_then_allows_a_new_complete_commit() {
+        let directory = FixtureDirectory::new();
+        let database = directory.0.join("state.sqlite3");
+        let marker = directory.0.join("ready.marker");
+        let initial =
+            SnapshotV1::capture(&GameState::fresh(GameRng::from_test_seed([81_u8; 32])), 0)
+                .unwrap();
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "persistence::replacement_fault_tests::in_progress_store_child_entrypoint",
+                "--nocapture",
+            ])
+            .env(TEST_DATABASE, &database)
+            .env(TEST_MARKER, &marker)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut child = KilledChild(child);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !marker.exists() {
+            if let Some(status) = child.0.try_wait().unwrap() {
+                panic!("in-flight fixture exited before its uncommitted marker: {status}");
+            }
+            assert!(Instant::now() < deadline, "bounded in-flight marker wait");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let next = SnapshotV1::from_canonical_bytes(&std::fs::read(&marker).unwrap()).unwrap();
+        assert_eq!(next.revision.get(), 1);
+        assert_eq!(next.pro.funds, Amount::parse("7").unwrap());
+        assert!(!marker.with_extension("tmp").exists());
+
+        child
+            .0
+            .kill()
+            .expect("really kill the child holding the transaction");
+        let status = child
+            .0
+            .wait()
+            .expect("reap the child killed during replacement");
+        assert!(!status.success());
+
+        let (mut store, restored) = SnapshotStore::open_or_initialize(&database, &initial).unwrap();
+        assert_eq!(restored.origin, LoadOrigin::Restored);
+        assert_eq!(restored.capture_sequence, 0);
+        assert_eq!(restored.snapshot, initial);
+        store.commit(1, &next).unwrap();
+        drop(store);
+        let (_, restored_again) = SnapshotStore::open_or_initialize(&database, &initial).unwrap();
+        assert_eq!(restored_again.origin, LoadOrigin::Restored);
+        assert_eq!(restored_again.capture_sequence, 1);
+        assert_eq!(restored_again.snapshot, next);
+        eprintln!(
+            "real in-flight kill after UPSERT before COMMIT: old then new complete rows restored"
+        );
+    }
 }
