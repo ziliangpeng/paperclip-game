@@ -30,6 +30,12 @@ The runtime observes coherent writer views and captures approximately every 30 l
 
 ## HTTP contract
 
+### GET `/`
+
+Serves the semantic native browser page for the same default game. Its ES modules, stylesheet, and #11 synchronizer are compile-time allowlisted assets under `/static/`; no public filesystem directory, user-supplied asset path, framework build, or server-side Python renderer is involved. HTML, CSS, and JavaScript receive their corresponding UTF-8 MIME types and `X-Content-Type-Options: nosniff`.
+
+The current page exposes only the genuinely implemented Make Paperclip command. Native Enter/Space activation, pending/rejected/conflict/ambiguous-outcome feedback, a polite command status, and full-View rendering do not create a client economy. Ambiguous manual retries retain the exact same opaque command ID and body. Resources render only after the #11 synchronizer accepts complete Views. Business, Wire, and current AutoClipper/computing fields are readouts only; unimplemented feature controls and actor/world/reset/debug selectors remain absent.
+
 ### GET `/api/game/view`
 
 Returns a complete, statically typed public `GameView`. Its top-level fields are:
@@ -123,10 +129,11 @@ cargo build --locked
 python3 -B scripts/check_api_process.py target/debug/paperclip-game --repo .
 python3 -B scripts/check_persistence_process.py target/debug/paperclip-game
 python3 -B scripts/check_browser_stream.py target/debug/paperclip-game --require-browser
+python3 -B scripts/run_browser_tests.py target/debug/paperclip-game --require-browser
 ```
 
 The Rust suites include duplicate/unknown-field and primitive negative tables, real HTTP client/socket/SSE checks, browser-compatible native synchronization models, deterministic real-writer gates for in-flight coalescing and conflicts, terminal success/rejection replay, final-stock contention, accepted disconnect behavior, exact Amount view fixtures, independent-client writes, strict snapshot/clock/RNG checks, real SQLite rollback/busy/coalescing failures, per-sidecar fail-closed initialization, fake-time 30-second publication, and logical-clock readiness recovery. Real process recovery races captured pre-crash views against a lower-revision recovered baseline. The browser checker executes the new native EventSource module in an isolated Chrome/Chromium profile and covers same-run reconnect, crash/recovery resync, exact BigInt operations, and known-bad frames/sources; it does not read a personal browser profile or execute captured upstream JavaScript. A Unix-only fixture checks actual permission denial under a verified non-root runtime UID, restores permissions through a guard, and compares the original files and complete old row; root or another privilege bypass fails that precondition rather than being counted as an injected fault. A separate real child is killed after the production transaction's UPSERT but before COMMIT, and recovery/recommit proves old then new complete rows. The API process checker starts the default and explicit listeners, performs 1,000 distinct legal writes, reaches a real stock-exhaustion rejection, checks terminal replay/conflict and health, verifies SSE reconnect plus `SIGTERM` with an active stream, and protects existing-data sentinels. The persistence process checker injects a real SQLite busy transaction, observes 503 while game progress continues, requires a valid commit to restore 200, rejects corrupt startup without source changes, and uses actual process `kill`/`wait` for bounded rollback and repeated-restart evidence.
 
 ## Current limits
 
-Issue #10 implements schema-v1 snapshots and observational persistence health. Later logical fields require explicit versioned migrations in the same PR that introduces those fields; no later-game state, unrestricted save/debug command, multi-instance registry, per-actor database, browser UI (#12), automated production and other feature packs (#14-#16), or full playable integration (#17) is implemented by this issue. Unsupported actions are never accepted placeholders.
+Issue #10 implements schema-v1 snapshots and observational persistence health. Later logical fields require explicit versioned migrations in the same PR that introduces those fields; no later-game state, unrestricted save/debug command, multi-instance registry, per-actor database, automated production and other feature packs (#14-#16), or full playable integration (#17) is implemented by this issue. The native UI does not advertise those future feature panels or claim complete M1 gameplay. Unsupported actions are never accepted placeholders.
