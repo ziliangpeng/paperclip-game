@@ -282,7 +282,7 @@ async fn accepted_socket_disconnect_still_completes_once_and_retry_gets_terminal
     let (server, gate, _clock) = fixture();
     let address = server.address;
     let body = command("disconnect");
-    tokio::task::spawn_blocking(move || {
+    let disconnected = tokio::task::spawn_blocking(move || {
         let mut stream = TcpStream::connect_timeout(&address, TEST_TIMEOUT).unwrap();
         stream.set_write_timeout(Some(TEST_TIMEOUT)).unwrap();
         write!(
@@ -292,13 +292,18 @@ async fn accepted_socket_disconnect_still_completes_once_and_retry_gets_terminal
         )
         .unwrap();
         stream.write_all(&body).unwrap();
-        // Drop the real socket without reading an HTTP response.
+        // Keep the real client connection open until the actual writer gate
+        // proves that the typed command was accepted by the runtime queue.
+        stream
     })
     .await
     .unwrap();
     timeout(TEST_TIMEOUT, gate.wait_entered(1))
         .await
-        .expect("accepted writer operation is independent of the disconnected response");
+        .expect("accepted writer operation reaches the real execution gate");
+    // Acceptance is now established independently of socket write completion.
+    // Disconnect before starting the retry and before releasing the writer.
+    drop(disconnected);
 
     let retry = tokio::spawn(post(server.address, command("disconnect")));
     assert!(
