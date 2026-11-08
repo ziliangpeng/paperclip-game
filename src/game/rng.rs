@@ -9,6 +9,7 @@ const STATE_VERSION: u8 = 1;
 const STATE_BYTES: usize = 1 + 32 + 8 + 16;
 const STATE_HEX_BYTES: usize = STATE_BYTES * 2;
 const MEANINGFUL_WORD_BITS: u32 = 68;
+const WORD_POSITION_MASK: u128 = (1u128 << MEANINGFUL_WORD_BITS) - 1;
 
 /// ChaCha20's output stream is the only source used by game decisions.
 #[derive(Clone)]
@@ -38,14 +39,17 @@ impl GameRng {
     }
 
     /// Export version 1: version byte, 32-byte seed, big-endian u64 stream,
-    /// then big-endian u128 word position. Only the low 68 position bits are
-    /// meaningful to `rand_chacha` 0.10; imports reject nonzero upper bits.
+    /// then big-endian u128 word position. The backend may report carry bits
+    /// when its 68-bit stream wraps; export canonicalizes those backend-owned
+    /// bits to the low 68-bit position. Imports still reject nonzero upper bits
+    /// supplied by external state, rather than accepting ambiguous encodings.
     pub fn export_hex(&self) -> String {
         let mut bytes = [0u8; STATE_BYTES];
         bytes[0] = STATE_VERSION;
         bytes[1..33].copy_from_slice(&self.inner.get_seed());
         bytes[33..41].copy_from_slice(&self.inner.get_stream().to_be_bytes());
-        bytes[41..57].copy_from_slice(&self.inner.get_word_pos().to_be_bytes());
+        bytes[41..57]
+            .copy_from_slice(&(self.inner.get_word_pos() & WORD_POSITION_MASK).to_be_bytes());
         encode_hex(&bytes)
     }
 
@@ -202,6 +206,105 @@ mod tests {
         restored.fill_bytes(&mut a);
         original.fill_bytes(&mut b);
         assert_eq!(a, b);
+    }
+
+    fn state_encoding(seed: [u8; 32], stream: u64, word_position: u128) -> String {
+        let mut bytes = [0u8; STATE_BYTES];
+        bytes[0] = STATE_VERSION;
+        bytes[1..33].copy_from_slice(&seed);
+        bytes[33..41].copy_from_slice(&stream.to_be_bytes());
+        bytes[41..57].copy_from_slice(&word_position.to_be_bytes());
+        encode_hex(&bytes)
+    }
+
+    fn direct_backend(seed: [u8; 32], stream: u64, word_position: u128) -> ChaCha20Rng {
+        let mut reference = ChaCha20Rng::from_seed(seed);
+        reference.set_stream(stream);
+        reference.set_word_pos(word_position);
+        reference
+    }
+
+    fn direct_backend_state(reference: &ChaCha20Rng) -> String {
+        state_encoding(
+            reference.get_seed(),
+            reference.get_stream(),
+            reference.get_word_pos() % (1u128 << MEANINGFUL_WORD_BITS),
+        )
+    }
+
+    #[test]
+    fn export_at_stream_wrap_remains_importable_and_continuous() {
+        let final_word = WORD_POSITION_MASK;
+        let seed = [0x5au8; 32];
+        let stream = 0x0123_4567_89ab_cdef;
+        let mut actual = GameRng::import_hex(&state_encoding(seed, stream, final_word)).unwrap();
+        let mut reference = direct_backend(seed, stream, final_word);
+        assert_eq!(actual.next_u32(), reference.next_u32());
+        assert_eq!(reference.get_word_pos(), 1u128 << MEANINGFUL_WORD_BITS);
+
+        let encoded = actual.export_hex();
+        let position_hex_start = (1 + 32 + 8) * 2;
+        assert_eq!(
+            u128::from_str_radix(&encoded[position_hex_start..], 16).unwrap(),
+            0
+        );
+        assert_eq!(encoded, direct_backend_state(&reference));
+        let mut restored = GameRng::import_hex(&encoded).expect("canonical wrapped export");
+        for index in 0..32 {
+            assert_eq!(restored.next_u32(), reference.next_u32(), "word {index}");
+        }
+        assert_eq!(restored.next_u64(), reference.next_u64());
+        eprintln!(
+            "RNG word wrap: legal 2^68-1 advanced to backend 2^68; exported position 0, reimport OK, 32 words plus one u64 matched direct ChaCha20"
+        );
+    }
+
+    #[test]
+    fn wrap_and_partial_byte_exports_match_direct_backend_continuation() {
+        let seed: [u8; 32] = std::array::from_fn(|index| (index * 7 + 3) as u8);
+        let stream = 0xfedc_ba98_7654_3210;
+        let initial = WORD_POSITION_MASK - 1;
+        let mut actual = GameRng::import_hex(&state_encoding(seed, stream, initial)).unwrap();
+        let mut reference = direct_backend(seed, stream, initial);
+        assert_eq!(actual.next_u32(), reference.next_u32());
+
+        for (round, byte_count) in [3usize, 13, 31].into_iter().enumerate() {
+            let mut actual_bytes = vec![0u8; byte_count];
+            let mut reference_bytes = vec![0u8; byte_count];
+            actual.fill_bytes(&mut actual_bytes);
+            reference.fill_bytes(&mut reference_bytes);
+            assert_eq!(actual_bytes, reference_bytes, "partial-byte round {round}");
+
+            let encoded = actual.export_hex();
+            assert_eq!(encoded, direct_backend_state(&reference), "round {round}");
+            actual = GameRng::import_hex(&encoded).unwrap_or_else(|error| {
+                panic!("reimport failed in partial-byte round {round}: {error}")
+            });
+            if round == 0 {
+                assert_eq!(reference.get_word_pos(), 1u128 << MEANINGFUL_WORD_BITS);
+                eprintln!(
+                    "RNG partial-byte wrap: one final word plus 3 bytes exported canonical position 0 and reimported successfully"
+                );
+            }
+
+            assert_eq!(
+                actual.next_u64(),
+                reference.next_u64(),
+                "word round {round}"
+            );
+            let encoded = actual.export_hex();
+            assert_eq!(encoded, direct_backend_state(&reference));
+            actual = GameRng::import_hex(&encoded).expect("post-word export must import");
+        }
+
+        let mut actual_bytes = [0u8; 29];
+        let mut reference_bytes = [0u8; 29];
+        actual.fill_bytes(&mut actual_bytes);
+        reference.fill_bytes(&mut reference_bytes);
+        assert_eq!(actual_bytes, reference_bytes);
+        for _ in 0..32 {
+            assert_eq!(actual.next_u32(), reference.next_u32());
+        }
     }
 
     #[test]
