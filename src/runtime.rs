@@ -19,6 +19,50 @@ pub const MAX_UPDATES_PER_TURN: u8 = 10;
 pub const MAX_COMMANDS_PER_TURN: usize = 16;
 pub const HOST_DISCONTINUITY: Duration = Duration::from_secs(60);
 
+#[cfg(test)]
+type TestGate = Option<std::sync::Arc<CommandTestGate>>;
+#[cfg(not(test))]
+type TestGate = ();
+
+/// Test-only admission gate at the real writer execution boundary. It is not
+/// compiled into production and is never reachable from configuration or HTTP.
+#[cfg(test)]
+pub(crate) struct CommandTestGate {
+    entered: watch::Sender<usize>,
+    released: watch::Sender<bool>,
+}
+
+#[cfg(test)]
+impl Default for CommandTestGate {
+    fn default() -> Self {
+        let (entered, _) = watch::channel(0);
+        let (released, _) = watch::channel(false);
+        Self { entered, released }
+    }
+}
+
+#[cfg(test)]
+impl CommandTestGate {
+    async fn wait(&self) {
+        self.entered.send_modify(|entered| *entered += 1);
+        let mut released = self.released.subscribe();
+        while !*released.borrow_and_update() {
+            released.changed().await.expect("test release sender lives");
+        }
+    }
+
+    pub(crate) async fn wait_entered(&self, expected: usize) {
+        let mut entered = self.entered.subscribe();
+        while *entered.borrow_and_update() < expected {
+            entered.changed().await.expect("test entry sender lives");
+        }
+    }
+
+    pub(crate) fn release(&self) {
+        self.released.send_replace(true);
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct CommandId(u64);
 
@@ -81,6 +125,11 @@ pub struct PendingCommand {
 impl PendingCommand {
     pub async fn wait(self) -> Result<CommandReceipt, SubmitError> {
         self.receiver.await.map_err(|_| SubmitError::RuntimeClosed)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_test_receiver(receiver: oneshot::Receiver<CommandReceipt>) -> Self {
+        Self { receiver }
     }
 }
 
@@ -189,10 +238,40 @@ impl GameRuntime {
     where
         C: MonotonicClock,
     {
+        #[cfg(not(test))]
+        {
+            Self::start_with_gate(clock, state, ())
+        }
+        #[cfg(test)]
+        {
+            Self::start_with_gate(clock, state, None)
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn start_with_test_gate<C>(
+        clock: C,
+        state: GameState,
+        gate: std::sync::Arc<CommandTestGate>,
+    ) -> Result<Self, RuntimeStartError>
+    where
+        C: MonotonicClock,
+    {
+        Self::start_with_gate(clock, state, Some(gate))
+    }
+
+    fn start_with_gate<C>(
+        clock: C,
+        state: GameState,
+        test_gate: TestGate,
+    ) -> Result<Self, RuntimeStartError>
+    where
+        C: MonotonicClock,
+    {
         let runtime =
             tokio::runtime::Handle::try_current().map_err(|_| RuntimeStartError::NoRuntime)?;
         let run_id = fresh_run_id().map_err(RuntimeStartError::Entropy)?;
-        let writer = Writer::new(clock, state, run_id);
+        let writer = Writer::new(clock, state, run_id, test_gate);
         let (sender, receiver) = mpsc::channel(COMMAND_QUEUE_CAPACITY);
         let initial = writer.view();
         let (view_sender, views) = watch::channel(initial);
@@ -207,16 +286,28 @@ impl GameRuntime {
         })
     }
 
-    pub async fn shutdown(mut self) -> Result<(), RuntimeShutdownError> {
+    /// Request graceful termination. The writer closes admission when it
+    /// observes this signal, then drains everything already accepted.
+    pub(crate) fn request_shutdown(&mut self) {
         if let Some(shutdown) = self.shutdown.take() {
             let _ = shutdown.send(());
         }
+    }
+
+    /// Wait for bounded accepted-queue drain and final publication of the
+    /// runtime view. This never implements crash persistence.
+    pub(crate) async fn wait_for_writer(mut self) -> Result<(), RuntimeShutdownError> {
         let writer = self.writer.take().expect("shutdown consumes a live writer");
         match writer.await {
             Ok(Ok(())) => Ok(()),
             Ok(Err(error)) => Err(RuntimeShutdownError::Writer(error)),
             Err(_) => Err(RuntimeShutdownError::WriterTaskEnded),
         }
+    }
+
+    pub async fn shutdown(mut self) -> Result<(), RuntimeShutdownError> {
+        self.request_shutdown();
+        self.wait_for_writer().await
     }
 }
 
@@ -293,7 +384,7 @@ fn fresh_run_id() -> Result<String, getrandom::Error> {
     Ok(output)
 }
 
-trait MonotonicClock: Send + Sync + 'static {
+pub(crate) trait MonotonicClock: Send + Sync + 'static {
     fn now(&self) -> Instant;
     fn wait_until(&self, deadline: Instant) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
 }
@@ -325,6 +416,8 @@ struct RetryRecord {
 
 struct Writer<C> {
     clock: C,
+    #[cfg(test)]
+    test_gate: TestGate,
     state: GameState,
     revision: u64,
     run_id: String,
@@ -335,10 +428,12 @@ struct Writer<C> {
 }
 
 impl<C: MonotonicClock> Writer<C> {
-    fn new(clock: C, state: GameState, run_id: String) -> Self {
+    fn new(clock: C, state: GameState, run_id: String, _test_gate: TestGate) -> Self {
         let last_observation = clock.now();
         Self {
             clock,
+            #[cfg(test)]
+            test_gate: _test_gate,
             state,
             revision: 0,
             run_id,
@@ -440,7 +535,7 @@ impl<C: MonotonicClock> Writer<C> {
         self.execute_new(command)
     }
 
-    fn turn(
+    async fn turn(
         &mut self,
         receiver: &mut mpsc::Receiver<QueuedCommand>,
         pending: &mut Option<QueuedCommand>,
@@ -467,6 +562,10 @@ impl<C: MonotonicClock> Writer<C> {
                 None => receiver.try_recv().ok(),
             };
             let Some(queued) = queued else { break };
+            #[cfg(test)]
+            if let Some(gate) = &self.test_gate {
+                gate.wait().await;
+            }
             let receipt = self.execute(queued.command)?;
             let _ = queued.response.send(receipt);
             commands += 1;
@@ -503,13 +602,28 @@ async fn run_writer<C: MonotonicClock>(
     views: watch::Sender<RuntimeView>,
 ) -> Result<(), RuntimeFailure> {
     let mut pending = None;
+    let mut draining = false;
     loop {
-        match shutdown.try_recv() {
-            Ok(()) | Err(oneshot::error::TryRecvError::Closed) => break,
-            Err(oneshot::error::TryRecvError::Empty) => {}
+        if !draining {
+            match shutdown.try_recv() {
+                Ok(()) | Err(oneshot::error::TryRecvError::Closed) => {
+                    // This is the admission linearization point. try_send
+                    // succeeds only before close; every success before it is
+                    // retained by mpsc for the bounded turns below.
+                    receiver.close();
+                    draining = true;
+                }
+                Err(oneshot::error::TryRecvError::Empty) => {}
+            }
         }
-        writer.turn(&mut receiver, &mut pending)?;
+        if draining && pending.is_none() && receiver.is_empty() {
+            break;
+        }
+        writer.turn(&mut receiver, &mut pending).await?;
         let _ = views.send(writer.view());
+        if draining {
+            continue;
+        }
 
         if writer.lag_debt_nanos >= UPDATE_QUANTUM_NANOS || pending.is_some() {
             continue;
@@ -518,11 +632,17 @@ async fn run_writer<C: MonotonicClock>(
         let deadline = writer.last_observation + Duration::from_nanos(remaining as u64);
         tokio::select! {
             biased;
-            _ = &mut shutdown => break,
+            _ = &mut shutdown => {
+                receiver.close();
+                draining = true;
+            },
             received = receiver.recv() => {
                 match received {
                     Some(command) => pending = Some(command),
-                    None => break,
+                    None => {
+                        receiver.close();
+                        draining = true;
+                    },
                 }
             }
             _ = writer.clock.wait_until(deadline) => {}
@@ -734,7 +854,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn negative_table_bounded_queue_and_cancellation_have_explicit_results() {
+    async fn negative_table_bounded_queue_and_graceful_drain_have_explicit_results() {
         let (runtime, handle, _clock) = test_runtime();
         let before = handle.view().game.clone();
         let mut pending = Vec::new();
@@ -746,19 +866,63 @@ mod tests {
             Err(SubmitError::QueueFull)
         ));
         runtime.shutdown().await.unwrap();
-        for item in pending {
-            assert_eq!(item.wait().await, Err(SubmitError::RuntimeClosed));
+        for (index, item) in pending.into_iter().enumerate() {
+            let receipt = item.wait().await.expect("accepted command drains");
+            assert_eq!(receipt.revision, index as u64 + 1);
+            assert_eq!(receipt.result, Ok(()));
         }
         assert_eq!(
             handle.execute(command(1_000)).await,
             Err(SubmitError::RuntimeClosed)
         );
-        assert_eq!(handle.view().revision, 0);
-        assert_eq!(handle.view().game.pro, before.pro);
-        assert_eq!(handle.view().game.clock, before.clock);
-        assert_eq!(handle.view().game.rng_state_hex(), before.rng_state_hex());
-        eprintln!(
-            "full queue/closed runtime: explicit transport errors; state and revision unchanged"
+        let view = handle.view();
+        assert_eq!(view.revision, COMMAND_QUEUE_CAPACITY as u64);
+        assert_eq!(view.game.pro.wire.to_string(), "936");
+        assert_eq!(view.game.pro.lifetime_clips.to_string(), "64");
+        assert_eq!(view.game.pro.unsold_clips.to_string(), "64");
+        assert_eq!(view.game.pro.unused_clips.to_string(), "64");
+        assert_eq!(view.game.clock, before.clock);
+        assert_eq!(view.game.rng_state_hex(), before.rng_state_hex());
+        eprintln!("full queue/closed runtime: pre-close commands drain; later commands are closed");
+    }
+
+    #[tokio::test]
+    async fn graceful_shutdown_drains_local_pending_and_more_than_one_batch() {
+        let state = GameState::fresh(GameRng::from_test_seed([17u8; 32]));
+        let clock = Arc::new(FakeClock::new());
+        let gate = Arc::new(CommandTestGate::default());
+        let mut runtime =
+            GameRuntime::start_with_test_gate(clock, state, Arc::clone(&gate)).unwrap();
+        let handle = runtime.handle();
+        let pending: Vec<_> = (0..21)
+            .map(|id| handle.try_submit(command(id)).unwrap())
+            .collect();
+        timeout(Duration::from_secs(3), gate.wait_entered(1))
+            .await
+            .expect("first accepted command is local writer pending");
+
+        runtime.request_shutdown();
+        gate.release();
+        for (index, item) in pending.into_iter().enumerate() {
+            let receipt = item
+                .wait()
+                .await
+                .expect("every accepted receipt survives shutdown");
+            assert_eq!(receipt.result, Ok(()));
+            assert_eq!(receipt.revision, index as u64 + 1);
+        }
+        let view = wait_for(&handle, |view| view.revision == 21).await;
+        runtime.wait_for_writer().await.unwrap();
+        assert_eq!(view.game.pro.wire.to_string(), "979");
+        assert_eq!(view.game.pro.lifetime_clips.to_string(), "21");
+        assert_eq!(view.game.pro.unsold_clips.to_string(), "21");
+        assert_eq!(view.game.pro.unused_clips.to_string(), "21");
+        assert_eq!(view.process.applied_commands, 21);
+        assert!(view.process.command_batches >= 2);
+        assert_eq!(view.process.max_commands_in_turn, MAX_COMMANDS_PER_TURN);
+        assert_eq!(
+            handle.execute(command(100)).await,
+            Err(SubmitError::RuntimeClosed)
         );
     }
 
