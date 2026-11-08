@@ -132,7 +132,7 @@ The single final assembly is `M1-PLAYABLE-INTEGRATION`; there is no separate dup
 - Define GameState with the exact source initial three clip ledgers, Wire and other fields required by the selected M1 gameplay contracts; keep process metadata separate from game state.
 - Implement GameRuntime with bounded Command intake, single-writer validation/application, monotonic fixed-step scheduling, bounded online lag batches without discarded debt, revision accounting, and injected production/random-clock interfaces for pure tests.
 - Implement the ordinary shared Wire conversion floor/cap/equal-ledger helper and the legal manual one-unit intent; compute a controlled sequence for later stochastic M1 systems.
-- Select and document the M1 numeric/serialization invariants, proposed 10 ms quantum and ten-tick maximum lag batch, and prove no offline advancement is hidden in the clock type.
+- Implement the proposed Amount, checked integer, canonical decimal-string and RNG invariants, fixed 10 ms quantum, ten-tick maximum lag batch, and fake-clock-tested host-discontinuity rule; prove no offline advancement is hidden in the clock type.
 - Integrate the gameplay-map owner's ACT-CLIP-MANUAL/PROG-START implementation without duplicating that feature under a second task owner.
 
 **Non-goals.**
@@ -148,20 +148,20 @@ The single final assembly is `M1-PLAYABLE-INTEGRATION`; there is no separate dup
 - **AC1:** Fresh state matches the selected source initial values; one legal manual Command consumes exactly one Wire and adds exactly one to each of lifetime, Unsold, and Unused ledgers, while below-one Wire rejects without mutation. Scenarios: `ENG-WIRE-MANUAL-FLOOR`.
 - **AC2:** The internal helper permits a source-grounded fractional automatic request only with Wire at least one, caps it by current Wire, and updates all three ledgers by the actual amount; no public caller can supply that request. Scenarios: `ENG-WIRE-AUTOMATIC-FLOOR-CAP`.
 - **AC3:** Commands and test-driven ticks have one explicit serial order, validation occurs at execution, state remains coherent under contention, and rejected operations leave state/revision unchanged. Scenarios: `CONC-COMMANDS-BOTH-LEGAL`, `CONC-COMMANDS-ONE-STOCK`, `ENG-TICK-COMMAND-SERIALIZATION`.
-- **AC4:** Ticks progress from the runtime clock with zero external clients and without a Command; lag debt is bounded per writer turn but not dropped, and scheduling fairly services queued Commands. Scenarios: `RT-NO-CLIENTS-CONTINUOUS`.
-- **AC5:** Selected numeric values remain finite and serde round trips preserve all chosen representations; capped conversion assigns exact zero when all available Wire is consumed rather than introducing an epsilon gate. Scenarios: `ENG-WIRE-AUTOMATIC-FLOOR-CAP`.
+- **AC4:** Ticks progress from the runtime clock with zero external clients and without a Command; ordinary lag processing is limited to ten updates per writer turn without dropping remaining debt, a selected discontinuity bound prevents suspend catch-up while recording degraded health, and scheduling fairly services queued Commands. Scenarios: `RT-NO-CLIENTS-CONTINUOUS`.
+- **AC5:** Authoritative numeric state uses Amount and checked bounded integers; canonical decimal-string and integer round trips are exact, large and tiny values retain their meaning, and capped conversion reaches exact zero by subtraction without an epsilon or clamp. Scenarios: `ENG-WIRE-AUTOMATIC-FLOOR-CAP`.
 
 **Required tests.**
 - Layers `rule_unit`, `property`; acceptance `AC1`, `AC2`; scenarios `ENG-WIRE-MANUAL-FLOOR`, `ENG-WIRE-AUTOMATIC-FLOOR-CAP`. Initial-state and conversion rules: Use pure rule tests for fresh values, ordinary full conversions, Wire exactly one, Wire below one, request greater than stock, request below stock, fractional automatic output, and exact capped exhaustion.
 - Layers `state_sequence`, `concurrency`, `property`; acceptance `AC3`; scenarios `CONC-COMMANDS-BOTH-LEGAL`, `CONC-COMMANDS-ONE-STOCK`, `ENG-TICK-COMMAND-SERIALIZATION`. Writer sequence/property tests: Compare generated Commands and fixed-step ticks against a serial reference model, including two legal manual Commands, final-Wire contention, and tick-versus-writer boundaries.
-- Layers `state_sequence`, `long_simulation`; acceptance `AC4`; scenarios `RT-NO-CLIENTS-CONTINUOUS`. Clock and lag tests: Drive a fake monotonic clock through ordinary time, multiple lag batches, Command flood, and a simulated startup boundary; do not use long sleeps.
-- Layers `rule_unit`, `property`; acceptance `AC5`; scenarios `ENG-WIRE-AUTOMATIC-FLOOR-CAP`. Numeric/RNG evidence: Round-trip selected integer/f64 types and a controlled RNG state, reject non-finite state generation, and replay a controlled random sequence in pure tests.
+- Layers `state_sequence`, `long_simulation`; acceptance `AC4`; scenarios `RT-NO-CLIENTS-CONTINUOUS`. Clock and lag tests: Drive a fake monotonic clock through ordinary time, multiple lag batches, Command flood, a simulated startup boundary, and both sides of the selected host-discontinuity bound; verify zero startup/restart debt and a health event without catch-up, and do not use long sleeps.
+- Layers `rule_unit`, `property`; acceptance `AC5`; scenarios `ENG-WIRE-AUTOMATIC-FLOOR-CAP`. Numeric/RNG evidence: Round-trip Amount canonical strings and checked integers including 0, 10^-18, 2^53+1, values beyond u128, and 3e55+1; reject non-canonical/wrong-type/out-of-domain values and non-finite evaluator results; prove exact arithmetic/conservation vectors and replay a controlled random sequence from fixed-width hex state in pure tests.
 
 **Evidence required by the future implementation PR.**
 - Initial-state and conversion rules: Wire and all three ledgers match the actual min-capped amount on every accepted path and remain unchanged on rejection.
 - Writer sequence/property tests: No lost update, double-spend, negative stock, or result inconsistent with the recorded serial order.
-- Clock and lag tests: Equivalent online elapsed time yields equivalent economic steps; debt is retained, Commands receive service, and startup creates no elapsed-time debt.
-- Numeric/RNG evidence: Finite exact representation round trips, reproducible test failures, and no random draw from a View/clock helper.
+- Clock and lag tests: Equivalent ordinary online elapsed time yields equivalent economic steps; debt is retained, Commands receive service, a discontinuity never backfills, and startup creates no elapsed-time debt.
+- Numeric/RNG evidence: Exact canonical round trips and zero-error conversion/conservation vectors, explicit quantization budgets, reproducible failures, and no random draw from a View/clock helper.
 
 **Risk and review.** `core_simulation`, `concurrency_persistence_recovery`; `two_independent_reviewers_including_one_adversarial`. These are planned gates, not approvals recorded here.
 
@@ -186,7 +186,7 @@ The single final assembly is `M1-PLAYABLE-INTEGRATION`; there is no separate dup
 - [requirements/gameplay-actions.md](./gameplay-actions.md) — `8. Implementation boundaries and dependencies`
 
 **Scope.**
-- Serve a pure derived full GameView with schema_version, run_id, revision, and all currently implemented public M1 fields; never expose internal RNG/retry/persistence state.
+- Serve a pure derived full GameView with schema_version, run_id, revision, and all currently implemented public M1 fields; encode every Amount as a canonical decimal string and bounded counters as JSON integers <=2^53-1; never expose internal RNG/retry/persistence state.
 - Adopt the proposed required opaque command_id envelope and closed typed Command enum, starting with make_paperclip {}; add only source-legal M1 variants owned by integrated gameplay tasks.
 - Implement typed normalization, structural-error handling without execution binding, Pending/Terminal retry entries, waiter coalescing, first success/rule-rejection replay, and same-key/different-payload HTTP 409 without mutation.
 - Retain terminal bindings for the whole process, keep them out of snapshots, and ensure HTTP disconnect after writer acceptance cannot cancel or duplicate the operation.
@@ -202,23 +202,23 @@ The single final assembly is `M1-PLAYABLE-INTEGRATION`; there is no separate dup
 - `M1-RUNTIME-CORE`: Authoritative state, single-writer execution, legal internal conversion, and continuous fake-testable time are shared prerequisites.
 
 **Acceptance criteria and scenarios.**
-- **AC1:** GET returns a consistent full View and POST returns the documented applied or rule_rejected result; unknown actions/fields and malformed arguments cannot mutate state or reserve a retry key. Scenarios: `API-COMMAND-SCHEMA-BOUNDARIES`.
+- **AC1:** GET returns a consistent full View with statically typed Amount strings and safe bounded integers, and POST returns the documented applied or rule_rejected result; unknown actions/fields, wrong numeric primitives, and malformed arguments cannot mutate state or reserve a retry key. Scenarios: `API-COMMAND-SCHEMA-BOUNDARIES`.
 - **AC2:** Concurrent identical requests queue exactly one writer execution and receive the same first result; sequential retries after success and rule rejection also return that first status/body without additional revision/mutation. Scenarios: `API-COMMAND-ID-INFLIGHT-SAME`, `API-COMMAND-ID-TERMINAL-SUCCESS`, `API-COMMAND-ID-TERMINAL-REJECTION`.
 - **AC3:** Same-key/different-normalized-payload requests receive HTTP 409 during pending and after terminal completion, leave the original binding intact, and cause no state/revision change. Scenarios: `API-COMMAND-ID-CONFLICT`.
 - **AC4:** Two new IDs represent two new legal intents and can both execute; final-stock contention succeeds only as affordability permits, and one client's retry never blocks another client's different legal Command. Scenarios: `CONC-COMMANDS-BOTH-LEGAL`, `CONC-COMMANDS-ONE-STOCK`, `API-COMMAND-ID-INFLIGHT-SAME`.
 - **AC5:** All currently implemented M1 controls use execution-time validation; unimplemented future controls are unknown_command rather than permissive stubs, and the manual anchor is genuinely usable through HTTP. Scenarios: `API-COMMAND-SCHEMA-BOUNDARIES`.
 
 **Required tests.**
-- Layers `api_contract`; acceptance `AC1`; scenarios `API-COMMAND-SCHEMA-BOUNDARIES`. Schema and normalization matrix: Exercise reordered JSON keys and explicit typed defaults as equivalent; test malformed JSON, duplicate/unknown fields, missing/overlong IDs, unknown types, wrong numeric types, actor/game_id/totals/revision injection, and body limits.
+- Layers `api_contract`; acceptance `AC1`; scenarios `API-COMMAND-SCHEMA-BOUNDARIES`. Schema and normalization matrix: Exercise reordered JSON keys and explicit typed defaults as equivalent; test malformed JSON, duplicate/unknown fields, missing/overlong IDs, unknown types, arbitrary Amount/resource/time inputs, wrong numeric primitives, integer control values 1.0/1e0/string/boolean/fraction/overflow, actor/game_id/totals/revision injection, Amount strings above 2^53 and below one, and body limits.
 - Layers `concurrency`, `api_contract`; acceptance `AC2`, `AC3`; scenarios `API-COMMAND-ID-INFLIGHT-SAME`, `API-COMMAND-ID-TERMINAL-SUCCESS`, `API-COMMAND-ID-TERMINAL-REJECTION`, `API-COMMAND-ID-CONFLICT`. Pending and terminal concurrency: Hold writer execution with a test gate while sending many identical and conflicting requests, then release it; repeat after success and after a rule rejection and include caller disconnect.
 - Layers `concurrency`, `api_contract`, `property`; acceptance `AC4`, `AC5`; scenarios `CONC-COMMANDS-BOTH-LEGAL`, `CONC-COMMANDS-ONE-STOCK`, `ENG-TICK-COMMAND-SERIALIZATION`. Independent-client serial races: Run two legal Commands, one-resource contention, tick/Command races, retry-versus-other-legal-Command, and new IDs after prior success or rule rejection using separate HTTP clients. Do not create a project one-shot fixture before M2 owns official projects.
-- Layers `api_contract`, `state_sequence`; acceptance `AC1`, `AC5`; scenarios `API-COMMAND-SCHEMA-BOUNDARIES`, `SSE-SAME-RUN-ORDERING`. View authority: Submit stale and forged client values and compare GET Views before/after applied, rejected, retry, and conflict requests.
+- Layers `api_contract`, `state_sequence`; acceptance `AC1`, `AC5`; scenarios `API-COMMAND-SCHEMA-BOUNDARIES`, `SSE-SAME-RUN-ORDERING`. View authority: Submit stale and forged client values and compare GET Views before/after applied, rejected, retry, and conflict requests; verify canonical Amount strings including 2^53+1, 3e55+1, 10^-18 and exact zero, with no numeric JSON authority path.
 
 **Evidence required by the future implementation PR.**
-- Schema and normalization matrix: Only valid typed Commands reach the dispatcher, structural errors have the selected HTTP/code behavior and no binding/mutation, and normalization comparisons match the typed value.
+- Schema and normalization matrix: Only valid typed Commands reach the dispatcher, structural errors have the selected HTTP/code behavior and no binding/mutation, wrong numeric primitives are rejected before execution, and normalization comparisons match the typed value.
 - Pending and terminal concurrency: One state application, all identical waiters receive the first result, conflicts leave it unchanged, and accepted disconnect cannot cause reexecution.
 - Independent-client serial races: Database-independent in-memory state matches a valid serial order, all affordable legal operations apply, and retries do not reserve or double-use resources.
-- View authority: Only actual writer mutations alter View state/revision; no GET derives RNG or game progression and no response total can be used to write state.
+- View authority: Only actual writer mutations alter View state/revision; Amount strings and bounded counters survive losslessly, no GET derives RNG or game progression, and no response total can be used to write state.
 
 **Risk and review.** `core_simulation`, `concurrency_persistence_recovery`, `security_data_main`; `two_independent_reviewers_including_one_adversarial`. These are planned gates, not approvals recorded here.
 
@@ -242,9 +242,9 @@ The single final assembly is `M1-PLAYABLE-INTEGRATION`; there is no separate dup
 - [requirements/testing.md](./testing.md) — `4. Concurrency and Persistence Focus — CONFIRMED / PROPOSED`
 
 **Scope.**
-- Define snapshot_version and serialize the complete currently implemented default state, revision, all M1 timers/accumulators/RNG/progression and persistent meta-state; exclude process retry records/subscriptions and generate a new run_id at each startup.
+- Define snapshot_version 1 with canonical Amount strings, safe bounded JSON integers and fixed-width lowercase-hex RNG in deterministic payload JSON TEXT; serialize the complete currently implemented default state, revision, all M1 logical timers/phase/remainder accumulators/RNG/progression and persistent meta-state; exclude process retry records/subscriptions/lag debt and generate a new run_id at each startup.
 - Capture immutable envelopes in writer order and use one coalescing asynchronous SQLite worker outside the writer; implement the proposed metadata/default-row schema, checksum, WAL/synchronous settings, and atomic transaction replacement.
-- Implement fresh-empty initialization, strict valid-row restore, explicit schema/version migrations for later changes, no offline backfill, and fail-closed behavior for corrupt/unsupported/unreadable existing state.
+- Implement fresh-empty initialization, strict valid-row restore, explicit versioned migrations for later added fields with retained-progress proof, no offline backfill, and fail-closed behavior for unsupported versions, checksum/I/O errors, malformed/missing/unknown/duplicate fields, wrong primitives, non-canonical numbers, and cross-field invariant violations.
 - Add sanitized live/ready health reporting and bounded retry/backoff for post-start save errors; mark degraded persistence without resetting live state or hiding an enlarged loss window.
 - Update snapshot coverage in the same PR whenever another M1 feature adds continuation state before milestone assembly.
 
@@ -258,22 +258,22 @@ The single final assembly is `M1-PLAYABLE-INTEGRATION`; there is no separate dup
 - `M1-RUNTIME-CORE`: Authoritative state, single-writer execution, legal internal conversion, and continuous fake-testable time are shared prerequisites.
 
 **Acceptance criteria and scenarios.**
-- **AC1:** A valid snapshot restores every implemented M1 field needed for continuation and starts a new run_id with no offline resource, timer, sales, production, or RNG advancement. Scenarios: `PERSIST-SNAPSHOT-ATOMIC-COMPLETE`, `PERSIST-CRASH-LOSS-NO-BACKFILL`.
+- **AC1:** A valid snapshot restores every implemented M1 field needed for continuation, including exact large/tiny Amount values, logical accumulators and RNG, starts a new run_id with zero lag debt, and permits no offline resource, timer, sales, production, or RNG advancement. Scenarios: `PERSIST-SNAPSHOT-ATOMIC-COMPLETE`, `PERSIST-CRASH-LOSS-NO-BACKFILL`.
 - **AC2:** State after the saved point may roll back after a simulated crash; the old committed snapshot remains loadable after interrupted/failed replacement, and repeated startup is coherent. Scenarios: `PERSIST-SNAPSHOT-ATOMIC-COMPLETE`, `PERSIST-CRASH-LOSS-NO-BACKFILL`.
 - **AC3:** Ticks and Commands continue while an artificial SQLite write is blocked, pending saves coalesce, capture revisions are ordered, and no partial cross-resource state is serialized. Scenarios: `PERSIST-SNAPSHOT-30S-NONBLOCK`.
-- **AC4:** Corrupt checksum, invalid state, unsupported version, and open/migration failure follow the explicit failure matrix; none silently creates or overwrites a new game. Scenarios: `PERSIST-SNAPSHOT-ATOMIC-COMPLETE`, `PERSIST-CRASH-LOSS-NO-BACKFILL`.
+- **AC4:** Corrupt checksum, unknown/unsupported version, missing/unknown/duplicate fields, wrong primitive, non-canonical or out-of-domain value, cross-field invariant violation, and open/migration failure follow the explicit failure matrix; none silently creates, deletes, or overwrites a game or its last good row. Scenarios: `PERSIST-SNAPSHOT-ATOMIC-COMPLETE`, `PERSIST-CRASH-LOSS-NO-BACKFILL`.
 - **AC5:** Readiness exposes post-start persistence degradation while the live authoritative world continues; normal-shutdown best effort is documented as outside crash zero-loss guarantees. Scenarios: `PERSIST-SNAPSHOT-30S-NONBLOCK`, `PERSIST-SNAPSHOT-ATOMIC-COMPLETE`.
 
 **Required tests.**
-- Layers `persistence`, `state_sequence`; acceptance `AC1`; scenarios `PERSIST-SNAPSHOT-ATOMIC-COMPLETE`. Snapshot completeness and round trip: Populate every currently implemented M1 state family including non-obvious fractional timers/RNG and persistent meta-state, capture, restore, and compare the complete continuation state rather than only visible numbers.
-- Layers `persistence`, `state_sequence`; acceptance `AC2`, `AC4`; scenarios `PERSIST-SNAPSHOT-ATOMIC-COMPLETE`. Atomic failure matrix: Use temporary fake databases to interrupt before/during/after transaction operations and inject malformed JSON, wrong checksum, missing fields, unsupported version, invalid numbers, and I/O errors.
+- Layers `persistence`, `state_sequence`; acceptance `AC1`; scenarios `PERSIST-SNAPSHOT-ATOMIC-COMPLETE`. Snapshot completeness and round trip: Populate every currently implemented M1 state family including 0, 10^-18, 2^53+1, 3e55+1, negative signed values where legal, non-obvious fractional phase/remainder timers and fixed-width hex RNG, capture, restore, and compare complete deterministic continuation state rather than only visible numbers; prove no lag debt is persisted.
+- Layers `persistence`, `state_sequence`; acceptance `AC2`, `AC4`; scenarios `PERSIST-SNAPSHOT-ATOMIC-COMPLETE`. Atomic failure matrix: Use temporary fake databases to interrupt before/during/after transaction operations and inject malformed JSON, wrong checksum, unsupported version, missing/unknown/duplicate fields, wrong primitives, non-canonical Amount strings, out-of-range integers, non-finite substitutes, cross-field violations, and I/O errors; each leaves the previous committed row intact.
 - Layers `persistence`, `state_sequence`, `api_contract`; acceptance `AC1`, `AC2`; scenarios `PERSIST-CRASH-LOSS-NO-BACKFILL`, `PERSIST-REPEATED-STARTUP`. Crash and no-backfill scenarios: Save, execute controlled ticks/Commands, simulate process loss before the next save, advance wall time, and restart twice with injected run IDs/clocks.
 - Layers `persistence`, `concurrency`, `state_sequence`; acceptance `AC3`; scenarios `PERSIST-SNAPSHOT-30S-NONBLOCK`. Async liveness and coherence: Block the SQLite worker while running fake-time ticks and concurrent Commands/save opportunities; complete writes later and verify capture/commit ordering and queue size.
 - Layers `persistence`, `api_contract`; acceptance `AC4`, `AC5`; scenarios `PERSIST-SNAPSHOT-ATOMIC-COMPLETE`. Health behavior: Exercise healthy initialization, corruption at startup, save failure/recovery after startup, and long snapshot lag with sanitized response/log capture.
 
 **Evidence required by the future implementation PR.**
-- Snapshot completeness and round trip: Restored pure-engine continuation from snapshot equals uninterrupted continuation for the same controlled Commands/ticks/RNG, excluding process identity and retry metadata.
-- Atomic failure matrix: Only old or new fully committed rows load, never a partial row; existing invalid state fails safely without overwrite/delete.
+- Snapshot completeness and round trip: Restored pure-engine continuation from deterministic TEXT snapshot equals uninterrupted continuation for the same controlled Commands/ticks/RNG, including exact Amount strings and logical accumulators but excluding process identity, retry metadata, and lag debt.
+- Atomic failure matrix: Only old or new fully committed rows load, never a partial row; every version/type/canonicality/invariant failure is explicit, and existing invalid state fails safely without overwrite/delete/reset.
 - Crash and no-backfill scenarios: Only the last committed state returns, each process run_id differs, no downtime progress appears, and clients are required to resynchronize.
 - Async liveness and coherence: Writer progress never awaits disk, at most one write plus one coalesced request exists, and committed snapshots are complete and ordered.
 - Health behavior: Startup failures are explicit, post-start degraded readiness does not reset state, and diagnostics contain no private path or payload.
@@ -297,7 +297,7 @@ The single final assembly is `M1-PLAYABLE-INTEGRATION`; there is no separate dup
 - [requirements/testing.md](./testing.md) — `4. Concurrency and Persistence Focus — CONFIRMED / PROPOSED`
 
 **Scope.**
-- Publish immutable full Views from writer changes with run_id/revision; emit the current full View immediately on every SSE connection and coalesce later notifications to the latest value.
+- Publish immutable full Views from writer changes with run_id/revision and statically typed canonical Amount strings plus safe bounded counters; emit the current full View immediately on every SSE connection and coalesce later notifications to the latest value without numeric re-encoding loss.
 - Bound per-connection delivery, use heartbeat comments if selected, and disconnect/reconnect lagging observers without backpressuring the writer or changing game time.
 - Define and expose native-client/Agent synchronization rules for same-run revisions, new-run full baselines, active connection generations, and invalidation of older GETs/streams.
 - Test restored snapshots with older revisions under a new run_id and document that Last-Event-ID is not a replay or exactly-once mechanism.
@@ -320,13 +320,13 @@ The single final assembly is `M1-PLAYABLE-INTEGRATION`; there is no separate dup
 - **AC5:** Many rapid writer changes yield either all intermediate full Views or a valid latest-coalesced sequence, never a partial View or unbounded connection queue. Scenarios: `SSE-DISCONNECT-RECONNECT`, `SSE-SAME-RUN-ORDERING`.
 
 **Required tests.**
-- Layers `sse`, `browser_e2e`; acceptance `AC1`, `AC5`; scenarios `SSE-DISCONNECT-RECONNECT`. SSE contract: Connect browser-like and structured-Agent clients, read initial/update frames, disconnect, reconnect with and without Last-Event-ID, and delay frame consumption.
+- Layers `sse`, `browser_e2e`; acceptance `AC1`, `AC5`; scenarios `SSE-DISCONNECT-RECONNECT`. SSE contract: Connect browser-like and structured-Agent clients, read initial/update frames containing 2^53+1, 3e55+1, 10^-18, exact zero and signed Amount strings, disconnect, reconnect with and without Last-Event-ID, and delay frame consumption; verify identical canonical values across full Views.
 - Layers `sse`, `browser_e2e`; acceptance `AC2`, `AC3`; scenarios `SSE-SAME-RUN-ORDERING`. Ordering model harness: Feed a reusable client synchronizer with lower/higher/equal revisions, run changes, GET responses, and old/new stream events in adversarial orders.
 - Layers `sse`, `persistence`, `browser_e2e`; acceptance `AC3`; scenarios `SSE-RECOVERED-RUN-RESYNC`. Recovery integration: Take a snapshot, emit newer pre-crash Views, restore to the older snapshot under a new run_id, and race old GET/SSE responses against the new initial View.
 - Layers `state_sequence`, `long_simulation`; acceptance `AC4`; scenarios `RT-NO-CLIENTS-CONTINUOUS`. Zero-client liveness: Use a bounded pure-engine fixture accumulator with legal inputs and no browser/SSE/Agent observers, then attach a stream and compare full state against the serial expectation. This proves disconnect-independent transport at the current stage; M1-G03 separately proves the real AutoClipper's no-client production without a production cheat endpoint.
 
 **Evidence required by the future implementation PR.**
-- SSE contract: Every resynchronization begins with a complete View, event JSON is valid, no replay gap creates an inconsistent state, and queues remain bounded.
+- SSE contract: Every resynchronization begins with a complete View, event JSON is valid and Amount/bounded-counter encodings remain exact through coalescing and reconnect, no replay gap creates an inconsistent state, and queues remain bounded.
 - Ordering model harness: Only the active generation and ordered full View can change client state; recovered state cannot be replaced by old-run cache.
 - Recovery integration: Clients accept the recovered authoritative full state and do not use pre-crash revision/result assumptions afterward.
 - Zero-client liveness: The world advanced off-client and the stream displays current server state rather than catching the server up.
@@ -353,7 +353,7 @@ The single final assembly is `M1-PLAYABLE-INTEGRATION`; there is no separate dup
 
 **Scope.**
 - Implement semantic static HTML/CSS/native JS modules for the classic top-level presentation and currently implemented M1 controls, including a genuine Make Paperclip path and shared View/command/stream code.
-- Render only server-derived values and domain feedback; show pending and actual applied/rule_rejected/conflict errors without locally adding resources or claiming success.
+- Render only server-derived values and domain feedback; parse Amount canonical strings with string/BigInt (or equivalent exact) helpers, never Number/parseFloat for authority, comparison or displayed values, keep visual-only bar projections separate, and show pending and actual applied/rule_rejected/conflict errors without locally adding resources or claiming success.
 - Apply full Views with the run/revision/connection-generation algorithm, reconnect on refresh, and support two independent pages plus non-browser Agent traffic.
 - Provide keyboard/focus/label/live-region behavior and best-effort minimalist classic hierarchy; coordinate additional M1 panels with their feature owners before final assembly.
 - Use a real-browser harness for semantic, networking, refresh, and two-page checks without introducing a frontend build tool.
@@ -375,13 +375,13 @@ The single final assembly is `M1-PLAYABLE-INTEGRATION`; there is no separate dup
 - **AC5:** Feature-owned M1 controls/panels are integrated before M1 assembly or remain absent rather than showing fake local functionality; the manual anchor alone is not advertised as the full selected M1. Scenarios: `UI-TWO-ANONYMOUS-PAGES`.
 
 **Required tests.**
-- Layers `browser_e2e`, `api_contract`; acceptance `AC1`, `AC2`; scenarios `UI-EARLY-SERVER-AUTHORITY`, `UI-TWO-ANONYMOUS-PAGES`. Real-browser network proof: Intercept browser requests in two independent pages while clicking legal controls and injecting server rejection; inspect resource readouts after applied Responses and Views.
+- Layers `browser_e2e`, `api_contract`; acceptance `AC1`, `AC2`; scenarios `UI-EARLY-SERVER-AUTHORITY`, `UI-TWO-ANONYMOUS-PAGES`. Real-browser network proof: Intercept browser requests in two independent pages while clicking legal controls and injecting server rejection; inspect digit-exact resource readouts for 2^53+1, 3e55+1, 10^-18, exact zero and signed Amount fixtures after applied Responses and Views, and unit-test string/BigInt parsing/comparison/ceiling with no Number/parseFloat authority path.
 - Layers `browser_e2e`, `sse`; acceptance `AC3`; scenarios `SSE-SAME-RUN-ORDERING`, `SSE-RECOVERED-RUN-RESYNC`. Refresh and stale-response E2E: Race delayed GETs and old streams with newer SSE events and a recovered run while refreshing/reconnecting the pages.
 - Layers `browser_e2e`; acceptance `AC4`; scenarios `UI-EARLY-SERVER-AUTHORITY`. Semantic/accessibility review: Run the selected automated semantic checks plus keyboard-only operation and inspect headings, button names, focus, contrast, error announcement, and live-region frequency.
 - Layers `browser_e2e`, `concurrency`, `api_contract`; acceptance `AC2`, `AC5`; scenarios `UI-TWO-ANONYMOUS-PAGES`, `API-COMMAND-ID-CONFLICT`. Agent/browser coexistence: Send legal and conflicting Commands from a structured Agent while two pages issue retries/new intents and observe SSE.
 
 **Evidence required by the future implementation PR.**
-- Real-browser network proof: Clicks produce only allowed envelopes, no pre-response resource addition occurs, disabled/enabled races remain server-decided, and both pages converge to the same View.
+- Real-browser network proof: Clicks produce only allowed envelopes, no pre-response resource addition occurs, disabled/enabled races remain server-decided, both pages converge to the same View, and Amount strings render digit-exactly without binary64 conversion; visual-only approximations never feed state or numeric text.
 - Refresh and stale-response E2E: The DOM contains only the active generation's latest full state and the old run cannot reappear.
 - Semantic/accessibility review: Recorded results satisfy the M1 accessible interaction path; screenshots support best-effort style only and are not pixel gates.
 - Agent/browser coexistence: No actor distinction or UI lock exists; all views converge and every state outcome follows the shared writer/retry rules.
@@ -422,12 +422,12 @@ The single final assembly is `M1-PLAYABLE-INTEGRATION`; there is no separate dup
 - **AC4:** UI displays only server-derived results and remains connected to the one default game Scenarios: `UI-EARLY-SERVER-AUTHORITY`, `UI-TWO-ANONYMOUS-PAGES`.
 
 **Required tests.**
-- Layers `rule_unit`, `property`; acceptance `AC1`, `AC2`, `AC3`; scenarios `ENG-WIRE-MANUAL-FLOOR`, `ENG-WIRE-AUTOMATIC-FLOOR-CAP`. Rule table for initial state, zero/fractional/full Wire, cap and ledger identity
+- Layers `rule_unit`, `property`; acceptance `AC1`, `AC2`, `AC3`; scenarios `ENG-WIRE-MANUAL-FLOOR`, `ENG-WIRE-AUTOMATIC-FLOOR-CAP`. Rule table for initial state, zero/fractional/full Wire, 10^-18 positive stock, exact capped exhaustion, 2^53+1 and 3e55+1 ledger increments, cap and equal-ledger conservation with zero tolerance
 - Layers `state_sequence`, `concurrency`, `api_contract`; acceptance `AC2`, `AC3`; scenarios `CONC-COMMANDS-ONE-STOCK`, `ENG-TICK-COMMAND-SERIALIZATION`, `API-COMMAND-ID-TERMINAL-SUCCESS`. Same-resource contention, tick-versus-command ordering and legal retry tests
 - Layers `browser_e2e`, `api_contract`; acceptance `AC4`; scenarios `UI-EARLY-SERVER-AUTHORITY`, `UI-TWO-ANONYMOUS-PAGES`. Browser click test proving no local resource award or independent world
 
 **Evidence required by the future implementation PR.**
-- Current-HEAD results for: Rule table for initial state, zero/fractional/full Wire, cap and ledger identity
+- Current-HEAD results for: Exact rule table for initial state, zero/fractional/full Wire, tiny positive stock, huge ledger increments, cap and equal-ledger conservation without epsilon
 - Current-HEAD results for: Same-resource contention, tick-versus-command ordering and legal retry tests
 - Current-HEAD results for: Browser click test proving no local resource award or independent world
 - A criteria-to-feature evidence ledger showing each task-owned M1 feature without claiming ownership of shared technical primitives.
@@ -451,7 +451,7 @@ The single final assembly is `M1-PLAYABLE-INTEGRATION`; there is no separate dup
 **Scope.**
 - $0.01 price controls and $0.01 lower bound
 - Marketing level/cost/demand multiplier
-- Wire spool purchase/base price/purchase decay/stochastic repricing
+- Wire spool purchase/base price/purchase decay/stochastic repricing; for the first demand-power and Wire-sine consumers, select and lock one deterministic platform-independent binary64 evaluator only after real API/license/MSRV/determinism/accuracy checks and per-formula high-precision reference tables
 - Ten normalized sales opportunities per second with stock-capped stochastic transactions and revenue accounting
 - Add only legal Wire/Price/Marketing typed command variants and the complete Business/Wire public View/native panel through the existing API and SSE contracts
 - Extend snapshot_version and all sales, revenue, Wire quote/purchase, inactivity, demand, and RNG/accumulator continuation state in this same PR
@@ -465,23 +465,23 @@ The single final assembly is `M1-PLAYABLE-INTEGRATION`; there is no separate dup
 - `M1-G01`: The four initial/manual feature owners receive final integrated acceptance only after the real manual engine/API/UI anchors exist.
 
 **Acceptance criteria and scenarios.**
-- **AC1:** Sales reduce Unsold only and add correct Funds; stockouts create no revenue Scenarios: `E2E-M1-DECLARED-PLAYABLE-EXIT`, `CONC-COMMANDS-ONE-STOCK`.
+- **AC1:** Sales reduce Unsold only and add Funds using exact source mill/cent floors at the correct stage; stockouts create no revenue and binary64 cent/mill loss is not copied as authoritative arithmetic Scenarios: `E2E-M1-DECLARED-PLAYABLE-EXIT`, `CONC-COMMANDS-ONE-STOCK`.
 - **AC2:** Price/Marketing change derived demand immediately while purchase costs remain authoritative at execution; every Business control and feedback field uses the real typed API, server-derived View, and native panel Scenarios: `E2E-M1-DECLARED-PLAYABLE-EXIT`.
 - **AC3:** Wire purchase charges current quote, adds current supply, raises base by $0.05 and resets inactivity Scenarios: `E2E-M1-DECLARED-PLAYABLE-EXIT`.
-- **AC4:** Controlled RNG preserves the specified sale/reprice probabilities and opportunities without browser-sequence parity, and snapshots restore every sales, revenue, quote, inactivity, and RNG/accumulator continuation field without offline gains Scenarios: `E2E-M1-DECLARED-PLAYABLE-EXIT`, `PERSIST-SNAPSHOT-ATOMIC-COMPLETE`.
+- **AC4:** Controlled RNG preserves the specified sale/reprice probabilities and opportunities without browser-sequence parity, the selected deterministic evaluator meets documented demand-power and Wire-sine domain/error/rounding budgets, and snapshots restore every sales, revenue, quote, inactivity, and RNG/accumulator continuation field without offline gains Scenarios: `E2E-M1-DECLARED-PLAYABLE-EXIT`, `PERSIST-SNAPSHOT-ATOMIC-COMPLETE`.
 
 **Required tests.**
-- Layers `rule_unit`, `api_contract`; acceptance `AC2`; scenarios `E2E-M1-DECLARED-PLAYABLE-EXIT`. Demand formula and price-bound unit tests
-- Layers `rule_unit`, `property`, `state_sequence`; acceptance `AC1`, `AC3`, `AC4`; scenarios `E2E-M1-DECLARED-PLAYABLE-EXIT`. Stock-limited controlled-RNG sales and repricing/inactivity tests
+- Layers `rule_unit`, `api_contract`; acceptance `AC2`; scenarios `E2E-M1-DECLARED-PLAYABLE-EXIT`. Demand formula and price-bound unit tests, including exact rational demand cases and high-precision demand^1.15 references with relative/absolute domain budgets and integer-floor near-boundary analysis
+- Layers `rule_unit`, `property`, `state_sequence`; acceptance `AC1`, `AC3`, `AC4`; scenarios `E2E-M1-DECLARED-PLAYABLE-EXIT`. Stock-limited controlled-RNG sales and repricing/inactivity tests, including exact mill/cent floors, the locked deterministic evaluator on supported platforms, Wire-sine absolute error near zero, source ceil semantics, and rejection of non-finite inputs/results
 - Layers `concurrency`, `persistence`, `state_sequence`; acceptance `AC1`, `AC2`, `AC3`, `AC4`; scenarios `CONC-COMMANDS-ONE-STOCK`, `CONC-COMMANDS-BOTH-LEGAL`, `PERSIST-SNAPSHOT-ATOMIC-COMPLETE`. Two simultaneous purchases against one Funds balance, legal concurrent commands, retries, and snapshot/recovery around stochastic counters
 
-- Layers `api_contract`, `browser_e2e`, `sse`, `persistence`; acceptance `AC1`, `AC2`, `AC3`, `AC4`; scenarios `E2E-M1-DECLARED-PLAYABLE-EXIT`, `UI-TWO-ANONYMOUS-PAGES`, `PERSIST-SNAPSHOT-ATOMIC-COMPLETE`. Public Business contract closure: issue only legal Wire/Price/Marketing commands through the API and two native pages, then round-trip every added sales, revenue, Wire quote/purchase, inactivity, demand, and RNG/accumulator field through snapshot recovery without offline gains
+- Layers `api_contract`, `browser_e2e`, `sse`, `persistence`; acceptance `AC1`, `AC2`, `AC3`, `AC4`; scenarios `E2E-M1-DECLARED-PLAYABLE-EXIT`, `UI-TWO-ANONYMOUS-PAGES`, `PERSIST-SNAPSHOT-ATOMIC-COMPLETE`. Public Business contract closure: issue only legal Wire/Price/Marketing commands through the API and two native pages, verify canonical Amount strings and digit-exact display for huge/tiny values, then round-trip every added sales, revenue, Wire quote/purchase, inactivity, demand, evaluator-affected and RNG/accumulator field through snapshot recovery without offline gains
 
 **Evidence required by the future implementation PR.**
-- Current-HEAD results for: Demand formula and price-bound unit tests
-- Current-HEAD results for: Stock-limited controlled-RNG sales and repricing/inactivity tests
+- Current-HEAD results for: Demand formula and price-bound unit tests with per-domain high-precision error/rounding evidence
+- Current-HEAD results for: Exact stock-limited controlled-RNG sales and deterministic repricing/inactivity tests, with selected crate/version/API/license/MSRV determinism evidence rather than metadata-only claims
 - Current-HEAD results for: Two simultaneous purchases against one Funds balance, legal concurrent commands, retries, and snapshot/recovery around stochastic counters
-- Current-HEAD public-contract evidence for every G02 typed command, View/native panel, and snapshot continuation field added in the same PR
+- Current-HEAD public-contract evidence for every G02 typed command, canonical View/native panel encoding, and snapshot continuation field added in the same PR
 - A criteria-to-feature evidence ledger showing each task-owned M1 feature without claiming ownership of shared technical primitives.
 
 **Risk and review.** `core_simulation`, `concurrency_persistence_recovery`; `two_independent_reviewers_including_one_adversarial`. These are planned gates, not approvals recorded here.
@@ -522,17 +522,17 @@ The single final assembly is `M1-PLAYABLE-INTEGRATION`; there is no separate dup
 **Acceptance criteria and scenarios.**
 - **AC1:** The actual first Funds>=5 reveal occurs before any successful Wire/Marketing purchase and is permanent after Funds later falls below $5. Threshold $5 charges exactly $5, producing count 1/next $6.10; a distinct later purchase charges $6.10, producing count 2/next $6.21. Below-current-price and stale-view-forgery attempts mutate no Funds/count/current cost/ledgers and never silently reprice. Scenarios: `E2E-M1-DECLARED-PLAYABLE-EXIT`.
 - **AC2:** The first and second purchased AutoClippers each generate capped baseline one-clip/s production during no-browser, no-SSE and Agent-inactive periods, without free production or caller-selected cost. Scenarios: `RT-NO-CLIENTS-CONTINUOUS`, `E2E-M1-DECLARED-PLAYABLE-EXIT`.
-- **AC3:** Refresh/two pages observe identical producers/count/current cost/reveal. Snapshots restore stored $5/$6.10/$6.21 states without level-zero recomputation or offline gain. Same-ID retry replays the first stored receipt with no second mutation; a distinct legal intent after replenishment can buy at the successor $6.10. Scenarios: `UI-TWO-ANONYMOUS-PAGES`, `PERSIST-CRASH-LOSS-NO-BACKFILL`, `SSE-RECOVERED-RUN-RESYNC`.
+- **AC3:** Refresh/two pages observe identical producers/count/current cost/reveal with canonical decimal strings and digit-exact display. Snapshots restore stored $5/$6.10/$6.21 states without level-zero recomputation or offline gain. Same-ID retry replays the first stored receipt with no second mutation; a distinct legal intent after replenishment can buy at the successor $6.10. Scenarios: `UI-TWO-ANONYMOUS-PAGES`, `PERSIST-CRASH-LOSS-NO-BACKFILL`, `SSE-RECOVERED-RUN-RESYNC`.
 
 **Required tests.**
-- Layers `rule_unit`, `api_contract`, `browser_e2e`, `state_sequence`; acceptance `AC1`; scenarios `E2E-M1-DECLARED-PLAYABLE-EXIT`. First-crossing and current-cost lifecycle: observe actual first $5 reveal before any Wire/Marketing buy; assert $5 -> 0/count 1/next $6.10, successor $6.10 -> count 2/next $6.21, below-price no-op, permanent latch and execute-time atomicity through rule/API/native-browser tests
-- Layers `state_sequence`, `long_simulation`, `persistence`; acceptance `AC2`; scenarios `RT-NO-CLIENTS-CONTINUOUS`, `PERSIST-SNAPSHOT-30S-NONBLOCK`. Continuous first/second producer output with zero clients and during atomic save; verify ordinary Wire-limited conversion and bounded fake-time behavior rather than long sleeps or free production
-- Layers `browser_e2e`, `sse`, `persistence`; acceptance `AC3`; scenarios `UI-TWO-ANONYMOUS-PAGES`, `SSE-RECOVERED-RUN-RESYNC`, `PERSIST-CRASH-LOSS-NO-BACKFILL`. Refresh/reconnect/two-page E2E plus exact stored producer-count/current-cost/reveal recovery, first-terminal same-ID receipt replay without mutation, distinct successor purchase, and no offline backfill or level-zero cost reconstruction
+- Layers `rule_unit`, `api_contract`, `browser_e2e`, `state_sequence`; acceptance `AC1`; scenarios `E2E-M1-DECLARED-PLAYABLE-EXIT`. First-crossing and current-cost lifecycle: observe actual first $5 reveal before any Wire/Marketing buy; assert exact canonical $5 -> 0/count 1/next $6.10, successor $6.10 -> count 2/next $6.21, below-price no-op, equal-cost affordability, permanent latch and execute-time atomicity through rule/API/native-browser tests without JSON-number Amount transport
+- Layers `state_sequence`, `long_simulation`, `persistence`; acceptance `AC2`; scenarios `RT-NO-CLIENTS-CONTINUOUS`, `PERSIST-SNAPSHOT-30S-NONBLOCK`. Continuous first/second producer output with zero clients and during atomic save; verify ordinary Wire-limited exact-conservation conversion, positive final partial production, and bounded fake-time behavior rather than long sleeps or free production
+- Layers `browser_e2e`, `sse`, `persistence`; acceptance `AC3`; scenarios `UI-TWO-ANONYMOUS-PAGES`, `SSE-RECOVERED-RUN-RESYNC`, `PERSIST-CRASH-LOSS-NO-BACKFILL`. Refresh/reconnect/two-page E2E plus exact canonical stored producer-count/current-cost/reveal recovery, first-terminal same-ID receipt replay without mutation, distinct successor purchase, and no offline backfill, JSON-number Amount substitution, or level-zero cost reconstruction
 
 **Evidence required by the future implementation PR.**
 - Current-HEAD first-crossing and exact receipt evidence for $5 -> $6.10 -> $6.21, below-cost rejection, permanent latch, and zero Wire/Marketing purchases before first reveal
 - Current-HEAD results for: Continuous production with zero clients and during atomic save; bounded integration timing rather than long sleep-based full simulation
-- Current-HEAD snapshot/retry evidence preserving exact stored producer count/current cost/reveal, duplicate terminal result and successor state, with no offline catch-up or level-zero recomputation
+- Current-HEAD snapshot/retry evidence preserving exact stored producer count/current cost/reveal as canonical values, duplicate terminal result and successor state, with no offline catch-up, float substitution, or level-zero recomputation
 - A criteria-to-feature evidence ledger showing each task-owned M1 feature without claiming ownership of shared technical primitives.
 
 **Risk and review.** `core_simulation`, `concurrency_persistence_recovery`; `two_independent_reviewers_including_one_adversarial`. These are planned gates, not approvals recorded here.
@@ -616,7 +616,7 @@ The single final assembly is `M1-PLAYABLE-INTEGRATION`; there is no separate dup
 
 ## 3. M2 coarse packages and M3-M15 supporting outlines
 
-No future GitHub Issue number is assigned. Only M2 may remain coarse as the next milestone. M3-M15 outlines are stable planning identities to refine only when their stage becomes current. M2-C01/C03 independently validate lawful allocation, Ops and the exact nonlinear Creativity curve through `ENG-TRUST-OPS-CREATIVITY`, without requiring an offered or purchased Xavier. M3-C01 alone owns the actual `E2E-XAVIER-ALLOCATION-RESET` Human purchase at 100000 Creativity, its allocation-only reset and valid repetition; `PRJ-096` ownership and all DAG edges are unchanged.
+No future GitHub Issue number is assigned. Only M2 may remain coarse as the next milestone. M3-M15 outlines are stable planning identities to refine only when their stage becomes current. M2-C01/C03 independently validate lawful allocation, exact grid Ops and the source nonlinear Creativity curve under exact-point and approximation-budget rules through `ENG-TRUST-OPS-CREATIVITY`, without requiring an offered or purchased Xavier. M3-C01 alone owns the actual `E2E-XAVIER-ALLOCATION-RESET` Human purchase at 100000 Creativity, its allocation-only reset and valid repetition; `PRJ-096` ownership and all DAG edges are unchanged.
 
 | Task | Milestone | Objective | Direct predecessors | Scenario links |
 |---|---|---|---|---|
@@ -727,12 +727,12 @@ Every milestone is a vertical increment of the same default game. Earlier legal 
 
 **Accepted scenarios (source behavior).**
 - At 2000 lifetime clips, Computing/Projects unlock without requiring deadlock. Independently, an early no-stock/no-Wire/insufficient-Funds state unlocks them before 2000; portfolio and liquid-Funds conditions for Beg for More Wire remain distinct.
-- Initial Processor+Memory consume the initial Trust-2 capacity. Adding either requires unspent capacity without decrementing Trust. Memory adds 1000 max Ops; Processors regenerate 10 Ops/s each and recompute the exact nonlinear Creativity curve.
+- Initial Processor+Memory consume the initial Trust-2 capacity. Adding either requires unspent capacity without decrementing Trust. Memory adds 1000 max Ops; Processors regenerate 10 Ops/s each and recompute the source nonlinear Creativity formula with exact special points and a documented approximation budget.
 - Fresh Creativity speed remains 1 although evaluating the recomputation formula at P=1 yields zero. While Ops are held at cap after project3, Creativity accrues; spending below cap pauses it.
 - PRJ-001/004/005 add +0.25/+0.50/+0.75 to one multiplier and PRJ-018 adds +5, never compounding those additions. PRJ-007..010 follow supply thresholds; PRJ-011 project10b uses the stochastic Wire quote and multiplies current supply by 11.
 - A displayed offer remains eligible after its entry trigger ceases, until consumed or explicitly cancelled, but an unaffordable purchase is rejected at execution. Repeatable PRJ-002 requires its crisis trigger for each new offer; a purchase allowed at Trust -100 leaves -101 and no further affordable bailout.
 - PRJ-039 RevTracker uses analytic demand estimates when stock suffices and rolling realized revenue when stock-limited; it does not itself sell clips or alter demand.
-- ENG-TRUST-OPS-CREATIVITY independently validates M2 allocation and exact speed arithmetic without requiring offered or purchased Xavier: fresh speed 1 versus P=1 recomputation zero, P=2 positive and 20 Ops/s, legal capacity, full-cap Creativity and complete snapshots without offline gains.
+- ENG-TRUST-OPS-CREATIVITY independently validates M2 allocation, exact special points and approximation-budgeted nonlinear speed arithmetic without requiring offered or purchased Xavier: fresh speed 1 versus P=1 recomputation zero, P=2 positive at approximately 1.645271921560140886 and 20 Ops/s, legal capacity, a guarded zero-speed countdown, full-cap Creativity and complete snapshots without offline gains.
 
 **Catalog scenario links.** `ENG-PROJECT-OFFER-LATCH`, `ENG-TRUST-OPS-CREATIVITY`, `E2E-FULL-PHASE-ENGINE-TRACE`
 
@@ -784,13 +784,13 @@ Every milestone is a vertical increment of the same default game. Earlier legal 
 - WireBuyer is offered after 15 purchases, starts internally ON, toggles without price, invokes the ordinary affordable purchase only at Wire <=1 in Human play, and never discounts or bypasses Funds.
 - Quantum Computing requires five Processors before PRJ-046. Compute without an active chip says Need Photonic Chips. PRJ-047 buys exactly ten chips at 10000 then +5000 Ops each, with deterministic signed sinusoidal values rather than loot RNG.
 - Overflow uses raw Q=ceil(360*sum), free capacity B and D=tempOps/100+5; if Q>B the actual immediate positive credit is based on ceil(Q/D), while feedback still reports raw Q. Negative qOps can expose PRJ-094 at Operations <=-10000.
-- Each Human-stage PRJ-096 purchase costs 100000 Creativity and sets Processors/Memory/speed to zero, leaving Trust available and other ordinary run/prestige state intact. The first re-added Processor still has zero speed; the exact P=2 curve is positive. A second sufficiently funded distinct purchase charges another 100000 Creativity without a full-run/prestige reset.
+- Each Human-stage PRJ-096 purchase costs 100000 Creativity and sets Processors/Memory/speed to zero, leaving Trust available and other ordinary run/prestige state intact. The first re-added Processor still has zero speed; the P=2 curve evaluates to a positive value within its documented approximation budget. A second sufficiently funded distinct purchase charges another 100000 Creativity without a full-run/prestige reset.
 - Confirming PRJ-094 adds 10000 standard Ops before full current-run reset, grants no prestige, clears project/strategy state, and retains separately stored U/S. Cancelling does not consume the offer.
 
 **Catalog scenario links.** `PERSIST-SNAPSHOT-ATOMIC-COMPLETE`, `E2E-PRESTIGE-NEXT-DOOR`, `E2E-PRESTIGE-WITHIN`, `E2E-TEMPORAL-RESET`, `E2E-XAVIER-ALLOCATION-RESET`, `E2E-FULL-PHASE-ENGINE-TRACE`, `RESET-INPROCESS-RETRY-RETENTION`
 
 **Test layers and required evidence.** Layers: `api_contract`, `browser_e2e`, `concurrency`, `gameplay_scenario`, `long_simulation`, `persistence`, `property`, `rule_unit`, `sse`, `state_sequence`
-- Rule/sequence tests cover baseline and boosted Mega rates, all boost combinations, WireBuyer at empty/low Funds and ON/OFF, ten-chip limit/cost, signed sums, overflow fade/merge, negative trigger, the exact nonlinear curve, two real 100000-Creativity Xavier purchases and first/second-Processor recovery.
+- Rule/sequence tests cover baseline and boosted Mega rates, all boost combinations, WireBuyer at empty/low Funds and ON/OFF, ten-chip limit/cost, signed sums, overflow fade/merge, negative trigger, the source nonlinear curve and its approximation budget, two real 100000-Creativity Xavier purchases and first/second-Processor recovery.
 - Reset/persistence tests distinguish full run reset from last-snapshot crash recovery and prove no ordinary project, strategy, timer, or resource carryover after Temporal Reversion, while existing U/S survive unchanged.
 - No arbitrary negative Compute input or debug reset is exposed. Controlled engine time/RNG is used for tests, never a public clock or resource-write API.
 
@@ -1045,7 +1045,7 @@ Every milestone is a vertical increment of the same default game. Earlier legal 
 **Catalog scenario links.** `ENG-GIFT-ACTIVE-RESET`, `ENG-GIFT-INACTIVE-HEALTH-GATES`, `E2E-FULL-PHASE-ENGINE-TRACE`
 
 **Test layers and required evidence.** Layers: `api_contract`, `browser_e2e`, `gameplay_scenario`, `long_simulation`, `property`, `rule_unit`, `state_sequence`
-- Exact gift arithmetic tests distinguish ln bit accumulation from log10 gift size, Active-only gating, the 125000 threshold, minimum/rounded award and zero reset. Zero/one/two-drone and partial/full-zero Power cases are separated.
+- Gift arithmetic tests use documented exact points and approximation budgets to distinguish ln bit accumulation from log10 gift size, Active-only gating, the 125000 threshold, minimum/half-up award and zero reset; zero-rate views do not reset valid state. Zero/one/two-drone and partial/full-zero Power cases are separated.
 - State-sequence tests cover pre-unlock health accumulation, Bored/Disorganized latching and precedence, Work/Think production extremes, and current-cost recovery commands under concurrent ticks.
 - Three exclusion review records are linked to UI-SWARM acceptance; E2E shows only functional Bored/Disorganized recovery and non-functional legacy controls are not advertised as gameplay.
 
@@ -1439,20 +1439,20 @@ The following are **PROPOSED M1 technical choices**, not official-source facts:
 
 | Choice | Recommended default | Reason and required proof |
 |---|---|---|
-| Simulation quantum | 10 ms, advanced by a monotonic clock | Directly supports normalized source rates without copying JavaScript timer behavior. Pure-engine tests compare economic outcomes over equivalent time, not wall-clock sleeps or exact source tick traces. |
-| Online lag handling | Preserve fixed-step lag debt; process at most ten ticks in one writer turn, then fairly service queued Commands. Never discard debt. Reset the wall-clock baseline at process startup. | Avoids an unbounded writer-blocking burst and starvation while avoiding an offline-catchup path. Tests use a fake clock for debt, fairness, and startup separation. Severe sustained lag is reported as degraded health rather than silently changing game time. |
+| Simulation quantum | Fixed semantic 10 ms update, advanced by a monotonic clock; integer update/phase/remainder state | Automatic-request gates, partial-stock rules, accumulators, and thresholds make the quantum semantic rather than cosmetic. Pure-engine fake-clock tests compare equivalent-time outcomes, not sleeps or source interval traces. |
+| Online lag handling | Preserve ordinary integer-nanosecond lag debt; at most ten ticks per writer turn followed by fair Command service. Runtime #8 chooses a fixed host-discontinuity bound: larger gaps reset baseline without catch-up and record degraded health. Debt is never persisted. | Prevents writer starvation and platform-dependent host-suspend backfill. Fake-clock tests cover retained ordinary debt, fairness, startup zero debt, and both sides of the selected bound. A 60-second candidate is PROPOSED input for #8, not an approved constant here. |
 | Observation delivery | Full `GameView` values, latest-value coalescing for SSE | Avoids an event log or patch framework. A slow observer may miss intermediate presentations, never authoritative simulation steps. |
-| Revision | `u64`, incremented once after each state-mutating writer operation | Provides total order within a process run. Rejections, retries, conflicts, reads, snapshot capture, and SSE delivery do not increment it. |
+| Revision | Checked counter bounded to `2^53-1`, incremented once after each state-mutating writer operation and transported as a JSON integer | Provides total order within a process run without unsafe browser integers or SQLite conversion overflow. Rejections, retries, conflicts, reads, snapshot capture, and SSE delivery do not increment it; overflow is an invariant failure, never wrap or saturation. |
 | Process identity | A fresh opaque UUID-shaped `run_id` for each process run | Distinguishes recovery from ordinary revision rollback. It is not compared numerically and is not authentication. An in-process game reset does not create a process `run_id`. |
-| Gameplay numeric model | Finite `f64` for continuous economic quantities; integer types for discrete levels, allocations, revisions, and one-shot counters | Matches the source's broad numeric domain, including very large magnitudes and fractional rates, without making binary tails contractual. Domain rules still apply exact floor/ceil/round/cap operations where specified. Exact-zero gates use explicit capped assignment, not an epsilon. Tests must prove meaningful outcomes and finite round trips. A later representation change requires outcome evidence, not silent substitution. |
-| JSON state encoding | Serde JSON with finite-number validation and exact `f64` round trips; typed integer fields for discrete values | Keeps snapshots inspectable and the public View directly consumable. Browser formatting may be approximate; browsers never calculate authoritative state. NaN and infinity are never valid state or protocol values. |
+| Gameplay numeric model | Exact signed `Amount` fixed-point `m * 10^-18` with an arbitrary-precision mantissa for stocks, currency, prices/costs/bills, populations/fractional levels, accumulators, and stored derived values; checked bounded integers for proved discrete fields; exact transient rationals where required; one deterministic binary64 evaluator only for irrational functions | Exact operations apply on the selected grid at every magnitude including `3e55+1`; there is no epsilon or magnitude clamp. Operation-local rounding requires reachable-domain proof, and unproved Power/tiny-growth factors retain exact rationals or ordered computation. The evaluator has per-formula nonzero/relative and near-zero/absolute budgets. M10 combat geometry is outcome-coupled, not categorically render-only, and needs bit-exact snapshots plus verified outcome/error boundaries. |
+| JSON state encoding | Canonical decimal strings for `Amount` in View/SSE/snapshots; JSON integers bounded to `2^53-1`; fixed-width lowercase hex RNG; deterministic canonical JSON payload stored as SQLite TEXT with strict fail-closed decoding | Lossless browser/Agent transport avoids JSON-number widening and non-finite nulls. Snapshot version 1 has no f64 ledger era; later added fields use explicit retained-progress migrations. Wrong types, unknown/missing/duplicate fields, non-canonical values, checksum/version failures, and cross-field violations preserve the last good committed row. |
 | Command body limit | 16 KiB; `command_id` is 1-128 UTF-8 bytes | Bounds small intent envelopes without imposing economic limits. This does not supersede action-specific argument validation. |
 | Runtime queues | Bounded HTTP/dispatcher and persistence queues with backpressure; coalesce pending save requests and latest Views | Prevents disconnected clients or slow disks from producing unbounded queues. No fixed command timeout changes gameplay outcomes. |
 | SQLite | One serialized `rusqlite` blocking worker, WAL, `synchronous=FULL`, transactional UPSERT of the `default` row | Keeps blocking I/O outside the game writer and preserves the last committed snapshot on a failed replacement. The concrete crate is an implementation proposal under the confirmed SQLite requirement. |
 | Deployment configuration | `127.0.0.1:3000` listener and repo-relative `data/paperclip.sqlite3` database defaults, overridable by explicit process settings | Keeps local startup deterministic and avoids absolute/private paths and secret-bearing configuration. Tests cover valid overrides and invalid values; no setting enables game cheats, pause/step, offline catchup, or instance selection. |
 | Health | Separate liveness and readiness; failed recovery is fatal, while later save failure leaves the live game intact but marks readiness degraded | Prevents silent data loss/reset and does not pretend persistence is healthy. No error body includes a host path or snapshot contents. |
 
-The M1 core and persistence tasks may adjust these implementation constants after measurements, but must record the selected values and tests in the Issue/PR. They may not weaken continuous simulation, execution-time validation, bounded crash loss, or gameplay rates.
+The M1 core and persistence tasks may measure and select infrastructure constants within these PROPOSED contracts, including the concrete discontinuity bound, and must record the selected values and tests in the Issue/PR. They may not silently replace Amount/string semantics, skip quantization/approximation evidence, or weaken continuous simulation, execution-time validation, bounded crash loss, or gameplay rates.
 
 #### 3. `GameRuntime` ownership, ordering, and the legal-intent boundary
 
@@ -1595,15 +1595,15 @@ The full View is derived and read-only. Recommended transport metadata:
   "run_id": "current-process-id",
   "revision": 42,
   "game": {
-    "lifetime_clips": 0.0,
-    "unsold_clips": 0.0,
-    "unused_clips": 0.0,
-    "wire": 1000.0
+    "lifetime_clips": "0",
+    "unsold_clips": "0",
+    "unused_clips": "0",
+    "wire": "1000"
   }
 }
 ```
 
-The `game` fragment is only the source-grounded manual-conversion anchor, not a claim that these four fields complete M1. The final M1 View adds the selected Business/Manufacturing controls, prices/costs, demand/sales, production-rate feedback, console messages, and applicable project/computation surfaces through their feature tasks. Internal RNG state, private scheduler details, retry records, and storage credentials are not View fields. Useful public timers/countdowns and progression are included when owned by gameplay requirements.
+The `game` fragment uses canonical decimal strings for `Amount`, not JSON floats; bounded structural counters remain safe JSON integers. It is only the source-grounded manual-conversion anchor, not a claim that these four fields complete M1. The final M1 View adds the selected Business/Manufacturing controls, prices/costs, demand/sales, production-rate feedback, console messages, and applicable project/computation surfaces through their feature tasks. Internal RNG state, private scheduler details, retry records, and storage credentials are not View fields. Useful public timers/countdowns and progression are included when owned by gameplay requirements.
 
 Views are pure derivations. They never latch a project, consume RNG, advance a timer, or request a snapshot. The engine evaluates real-time predicates even if no View is being derived. Domain-provided control availability is useful UI advice but never execution authority.
 
@@ -1701,7 +1701,7 @@ M1 uses static semantic HTML, CSS, and native JavaScript modules served by Axum;
 Responsibilities are deliberately narrow:
 
 - `index.html` owns semantic regions and real buttons/forms, headed by an accessible page title and main landmark.
-- `view-model.js` applies only full server Views using revision/run_id plus connection generations. It formats values but does not calculate demand, prices, costs, production, damage, or affordability authority.
+- `view-model.js` applies only full server Views using revision/run_id plus connection generations. It parses canonical `Amount` strings with string/`BigInt` arithmetic and never uses `Number`/`parseFloat` for authority, comparison, or displayed values; only separately identified visual projections may be approximate. It does not calculate demand, prices, costs, production, damage, or affordability authority.
 - `commands.js` constructs typed envelopes and fresh IDs for new intents, sends POSTs, and exposes actual applied/rule-rejected/conflict feedback. It never adds resources or marks local success before the server result.
 - `stream.js` performs full-view GET/SSE synchronization and reconnects; invalid old generations cannot write to the DOM.
 - CSS provides best-effort classic black-and-white hierarchy, not pixel equality or original DOM/tool defects.
@@ -1717,11 +1717,11 @@ The final M1 browser E2E must include both pages, an independent structured Agen
 
 | Capability | Dependency | Supporting boundaries | Required proof |
 |---|---|---|---|
-| Computation and projects | M1 writer/API/snapshot contracts | typed official-project purchase and Processor/Memory controls; offer/Trust/Ops/Creativity/milestone state plus snapshot migration; Computation/Trust/Projects/Revenue native views | One-shot/repeat purchase execution order, offer latch persistence, exact Ops/Creativity fractions and independent flags. |
+| Computation and projects | M1 writer/API/snapshot contracts | typed official-project purchase and Processor/Memory controls; offer/Trust/Ops/Creativity/milestone state plus snapshot migration; Computation/Trust/Projects/Revenue native views | One-shot/repeat purchase execution order, offer latch persistence, grid-exact Ops state, explicitly quantized/budgeted Creativity increments and independent flags. |
 | Investments, tournaments, and quantum | computation/projects and RNG/timer snapshot foundation | market/tournament/RANDOM/grid states and all controls; chip waves/temp Ops and AutoTourney scheduler; native Investments/Strategy/Quantum views | Self-pairs and placeholder behavior, bounded stochastic distributions, complete saved in-progress state, no duplicate automation. |
 | Release, autonomous industry, power, and swarm | required Human release route and typed project transitions | atomic release and construction/refund/matter/Power state; Work/Think/Gifts/health timers and controls; Creation/terrestrial Wire/Power/Swarm native panels | Confirmed partial-battery boundaries, tracked refunds, gift reset without excess, independent health/status precedence, snapshot continuation. |
 | Space and probes | autonomous industry/Power and all Space prerequisites | atomic Space transition/refunds/full production power; fractional population/matter/construction/hazards/drift state; Space/Probe Design views and legal launch/allocation commands | Shared eight-point budget, actual fractional costs/populations, fixed Space production power, full RNG/accumulator recovery, optional Driftwar. |
-| Live Combat and Drifters | Space probes and RNG/continuous scheduler | one complete active battle including ships/grid/movement/result clocks; global casualty/Honor/name/Glory state; read/render-only native canvas and gated results; no tactical Commands | Linear Combat offense, OODA Speed defense, linked casualties, one outcome/Honor grant, timeout distinction, coherent active-battle recovery. |
+| Live Combat and Drifters | Space probes and RNG/continuous scheduler | one complete active battle including ships/grid/movement/result clocks; global casualty/Honor/name/Glory state; read-only native canvas and gated results; no tactical Commands | Linear Combat offense, OODA Speed defense, linked casualties, one outcome/Honor grant, timeout distinction, outcome-coupled geometry error-boundary verification, and bit-exact active-battle recovery. |
 | Universal achievement, Emperor, Reject, and credits | Space completion predicates and full project system; Combat only for its own features, never as completion gate | independent achievement/track/dialog/branch/dismantle/final-credit state; ordinary typed narrative and dismantle projects; ending UI and final manual path | Both OR completion routes, mutually exclusive branches, automatic-production shutdown, one-count-per-accepted-final-click, positive fraction exact exhaustion, exact-zero credits. |
 | Prestige, temporal reset, and Xavier | owning gameplay milestone for each actual project; snapshots include run and meta-state | atomic full-run reset versus retained U/S; process-lifetime retry retention and fresh-run full View; Human-only allocation reset separate from run reset | No repeated prestige from retries, no old-run command application after reset, coherent run+prestige snapshots, no bare reset/debug affordance, Xavier retains Trust but resets allocation/speed. |
 
@@ -1928,6 +1928,8 @@ The required ordered flow is:
 | Rejected below current cost | 4.99 | 5.00 | 0 | Charge 0; no producer/cost/ledger mutation | 4.99 | 0 | 5.00 | Latched |
 
 Duplicate-ID replay of the first threshold has receipt charge 5/count 1/next cost 6.10 but zero additional charge or producer; after the second intent the current world remains count 2/current cost 6.21. Snapshot cases preserve count 1/cost 6.10 and count 2/cost 6.21 with reveal true and zero offline progress. The final assembly checks all 19 M1 feature owners through engine/API/UI/snapshot evidence, never a debug/state-write endpoint, local fake counter, or post-reveal cost amnesia.
+
+Within the structured E2E-M1 fixture, numeric literals such as `5.0`, `6.1`, `6.21`, `13.9`, and `4.99` are design-fixture notation for those exact decimal values; they are not binary64 semantics or the runtime wire format. Authoritative `Amount` values on View, SSE, and snapshot transport remain canonical decimal strings as defined in `clients.md`.
 
 ## 8. Representative source-grounded execution traces
 
