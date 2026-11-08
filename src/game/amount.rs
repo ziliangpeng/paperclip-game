@@ -482,7 +482,7 @@ mod tests {
     }
 
     #[test]
-    fn malformed_canonical_strings_and_wrong_json_primitives_fail() {
+    fn negative_table_rejects_malformed_canonical_strings_and_wrong_json_primitives() {
         for invalid in [
             "",
             "-0",
@@ -505,13 +505,21 @@ mod tests {
             "1.230",
             "1.2.3",
         ] {
-            assert!(Amount::parse(invalid).is_err(), "accepted {invalid:?}");
+            assert_eq!(
+                Amount::parse(invalid),
+                Err(AmountParseError::InvalidCanonical),
+                "wrong category for {invalid:?}"
+            );
+            eprintln!("negative Amount canonical case {invalid:?}: InvalidCanonical");
         }
         for json in ["1", "1.0", "true", "null", "[]", "{}"] {
+            let error = serde_json::from_str::<Amount>(json).unwrap_err();
+            assert_eq!(error.classify(), serde_json::error::Category::Data);
             assert!(
-                serde_json::from_str::<Amount>(json).is_err(),
-                "accepted {json}"
+                error.to_string().starts_with("invalid type:"),
+                "wrong Serde category for {json}: {error}"
             );
+            eprintln!("negative Amount JSON case {json}: Data/invalid type");
         }
     }
 
@@ -522,9 +530,16 @@ mod tests {
     }
 
     #[test]
-    fn typed_decoding_rejects_unknown_and_duplicate_keys() {
-        assert!(serde_json::from_str::<TypedAmount>(r#"{"amount":"1","extra":"0"}"#).is_err());
-        assert!(serde_json::from_str::<TypedAmount>(r#"{"amount":"1","amount":"2"}"#).is_err());
+    fn negative_table_rejects_unknown_and_duplicate_typed_keys() {
+        for (json, expected_prefix) in [
+            (r#"{"amount":"1","extra":"0"}"#, "unknown field `extra`"),
+            (r#"{"amount":"1","amount":"2"}"#, "duplicate field `amount`"),
+        ] {
+            let error = serde_json::from_str::<TypedAmount>(json).unwrap_err();
+            assert_eq!(error.classify(), serde_json::error::Category::Data);
+            assert!(error.to_string().starts_with(expected_prefix), "{error}");
+            eprintln!("negative typed Amount case {json}: {expected_prefix}");
+        }
         assert_eq!(
             serde_json::from_str::<TypedAmount>(r#"{"amount":"1"}"#)
                 .unwrap()
@@ -534,7 +549,7 @@ mod tests {
     }
 
     #[test]
-    fn resource_guard_is_explicit_not_a_game_value_cap() {
+    fn negative_table_resource_guard_is_explicit_not_a_game_value_cap() {
         let accepted = format!("1{}", "2".repeat(MAX_CANONICAL_BYTES - 1));
         assert_eq!(
             Amount::parse(&accepted).unwrap().to_canonical_string(),
@@ -570,7 +585,7 @@ mod tests {
     }
 
     #[test]
-    fn semantic_domains_reject_negative_and_fractional_values() {
+    fn negative_table_rejects_negative_and_fractional_semantic_domains() {
         assert_eq!(
             Amount::from_i128(-1).nonnegative(),
             Err(AmountDomainError::Negative)
@@ -579,11 +594,28 @@ mod tests {
             Amount::parse("1.000000000000000001").unwrap().integral(),
             Err(AmountDomainError::Fractional)
         );
-        assert!(serde_json::from_str::<NonNegativeAmount>("\"-1\"").is_err());
-        assert!(serde_json::from_str::<IntegralAmount>("\"0.000000000000000001\"").is_err());
+        let negative_json = serde_json::from_str::<NonNegativeAmount>("\"-1\"").unwrap_err();
+        assert_eq!(negative_json.classify(), serde_json::error::Category::Data);
+        assert!(
+            negative_json
+                .to_string()
+                .starts_with("Amount must be nonnegative")
+        );
+        eprintln!("negative nonnegative JSON case: AmountDomainError::Negative");
+        let fractional_json =
+            serde_json::from_str::<IntegralAmount>("\"0.000000000000000001\"").unwrap_err();
+        assert_eq!(
+            fractional_json.classify(),
+            serde_json::error::Category::Data
+        );
+        assert!(
+            fractional_json
+                .to_string()
+                .starts_with("Amount must be integral")
+        );
+        eprintln!("fractional integral JSON case: AmountDomainError::Fractional");
         assert_eq!(IntegralAmount::from_i128(-4).to_string(), "-4");
     }
-
     #[test]
     fn directed_ratio_quantization_is_toward_zero() {
         let positive = Amount::quantize_ratio(&BigInt::from(2), &BigInt::from(3)).unwrap();
@@ -677,39 +709,59 @@ mod tests {
     }
 
     #[test]
-    fn bounded_json_integers_are_checked() {
+    fn negative_table_rejects_invalid_bounded_json_integers() {
         assert_eq!(
             SafeU64::new(MAX_SAFE_JSON_INTEGER).unwrap().get(),
             MAX_SAFE_JSON_INTEGER
         );
-        assert_eq!(
-            SafeU64::new(MAX_SAFE_JSON_INTEGER + 1),
-            Err(BoundedIntegerError::AboveJsonSafeRange)
-        );
+        for input in [MAX_SAFE_JSON_INTEGER + 1, u64::MAX] {
+            assert_eq!(
+                SafeU64::new(input),
+                Err(BoundedIntegerError::AboveJsonSafeRange)
+            );
+            eprintln!("unsafe JSON integer {input}: AboveJsonSafeRange");
+        }
         assert_eq!(SafeU64::new(5).unwrap().checked_add(7).unwrap().get(), 12);
-        assert!(
-            SafeU64::new(MAX_SAFE_JSON_INTEGER)
-                .unwrap()
-                .checked_add(1)
-                .is_err()
-        );
-        assert_eq!(
-            SafeU64::new(MAX_SAFE_JSON_INTEGER)
-                .unwrap()
-                .checked_add(u64::MAX),
-            Err(BoundedIntegerError::Overflow)
-        );
+        for increment in [1, u64::MAX] {
+            let expected = if increment == 1 {
+                BoundedIntegerError::AboveJsonSafeRange
+            } else {
+                BoundedIntegerError::Overflow
+            };
+            assert_eq!(
+                SafeU64::new(MAX_SAFE_JSON_INTEGER)
+                    .unwrap()
+                    .checked_add(increment),
+                Err(expected)
+            );
+            eprintln!("illegal SafeU64 increment {increment}: {expected:?}");
+        }
         let encoded = serde_json::to_string(&SafeU64::new(MAX_SAFE_JSON_INTEGER).unwrap()).unwrap();
         assert_eq!(encoded, MAX_SAFE_JSON_INTEGER.to_string());
         assert_eq!(
             serde_json::from_str::<SafeU64>(&encoded).unwrap().get(),
             MAX_SAFE_JSON_INTEGER
         );
-        for invalid in ["1.0", "1e0", "\"1\"", "true", "9007199254740992", "-1"] {
-            assert!(
-                serde_json::from_str::<SafeU64>(invalid).is_err(),
-                "accepted {invalid}"
-            );
+        for invalid in ["1.0", "1e0", "\"1\"", "true"] {
+            let error = serde_json::from_str::<SafeU64>(invalid).unwrap_err();
+            assert_eq!(error.classify(), serde_json::error::Category::Data);
+            assert!(error.to_string().starts_with("invalid type:"), "{error}");
+            eprintln!("invalid SafeU64 type {invalid}: Data/invalid type");
         }
+        let negative = serde_json::from_str::<SafeU64>("-1").unwrap_err();
+        assert_eq!(negative.classify(), serde_json::error::Category::Data);
+        assert!(
+            negative.to_string().starts_with("invalid value:"),
+            "{negative}"
+        );
+        eprintln!("negative SafeU64: Data/invalid value");
+        let unsafe_range = serde_json::from_str::<SafeU64>("9007199254740992").unwrap_err();
+        assert_eq!(unsafe_range.classify(), serde_json::error::Category::Data);
+        assert!(
+            unsafe_range
+                .to_string()
+                .starts_with("integer exceeds the JSON-safe range")
+        );
+        eprintln!("out-of-range SafeU64: AboveJsonSafeRange");
     }
 }

@@ -50,6 +50,19 @@ async fn real_clock_advances_without_clients_and_manual_intent_stays_closed() {
     runtime.shutdown().await.expect("clean writer shutdown");
 }
 
+#[test]
+fn negative_table_rejects_unsafe_public_command_ids() {
+    use paperclip_game::game::amount::BoundedIntegerError;
+
+    for value in [9_007_199_254_740_992, u64::MAX] {
+        assert_eq!(
+            CommandId::new(value).err(),
+            Some(BoundedIntegerError::AboveJsonSafeRange)
+        );
+        eprintln!("unsafe public command ID {value}: AboveJsonSafeRange");
+    }
+}
+
 fn assert_fresh_state(view: &paperclip_game::runtime::RuntimeView) {
     let state = &view.game.pro;
     assert_eq!(state.lifetime_clips.to_string(), "0");

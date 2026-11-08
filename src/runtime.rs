@@ -621,7 +621,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn manual_command_is_conserved_and_below_one_rejection_is_atomic() {
+    async fn negative_table_manual_command_and_below_one_rejection_are_atomic() {
         let (runtime, handle, _clock) = test_runtime();
         let initial = handle.view();
         assert_eq!(initial.process.lag_debt_nanos, 0);
@@ -644,7 +644,7 @@ mod tests {
         runtime.shutdown().await.unwrap();
 
         let (runtime, handle, _clock) = test_runtime_with_wire("0.5");
-        let before = handle.view().game.pro.clone();
+        let before = handle.view().game.clone();
         let receipt = handle.execute(command(2)).await.unwrap();
         assert_eq!(receipt.revision, 0);
         assert_eq!(
@@ -653,8 +653,11 @@ mod tests {
                 ConversionError::InsufficientWire
             ))
         );
-        assert_eq!(handle.view().game.pro, before);
+        assert_eq!(handle.view().game.pro, before.pro);
+        assert_eq!(handle.view().game.clock, before.clock);
+        assert_eq!(handle.view().game.rng_state_hex(), before.rng_state_hex());
         assert_eq!(handle.view().revision, 0);
+        eprintln!("below-one Wire: InsufficientWire; full game state and revision unchanged");
         runtime.shutdown().await.unwrap();
     }
 
@@ -695,8 +698,20 @@ mod tests {
         assert_eq!(view.game.pro.unsold_clips.to_string(), "1");
         assert_eq!(view.game.pro.unused_clips.to_string(), "1");
         assert_eq!(view.revision, 1);
+        let before_rejected = handle.view().game.clone();
         let rejected = handle.execute(command(5)).await.unwrap();
-        assert!(rejected.result.is_err());
+        assert_eq!(
+            rejected.result,
+            Err(CommandRejection::Conversion(
+                ConversionError::InsufficientWire
+            ))
+        );
+        assert_eq!(handle.view().game.pro, before_rejected.pro);
+        assert_eq!(handle.view().game.clock, before_rejected.clock);
+        assert_eq!(
+            handle.view().game.rng_state_hex(),
+            before_rejected.rng_state_hex()
+        );
         assert_eq!(handle.view().revision, 1);
         runtime.shutdown().await.unwrap();
     }
@@ -719,8 +734,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bounded_queue_and_cancellation_have_explicit_results() {
+    async fn negative_table_bounded_queue_and_cancellation_have_explicit_results() {
         let (runtime, handle, _clock) = test_runtime();
+        let before = handle.view().game.clone();
         let mut pending = Vec::new();
         for id in 0..COMMAND_QUEUE_CAPACITY {
             pending.push(handle.try_submit(command(id as u64)).unwrap());
@@ -738,7 +754,12 @@ mod tests {
             Err(SubmitError::RuntimeClosed)
         );
         assert_eq!(handle.view().revision, 0);
-        assert_eq!(handle.view().game.pro.wire.to_string(), "1000");
+        assert_eq!(handle.view().game.pro, before.pro);
+        assert_eq!(handle.view().game.clock, before.clock);
+        assert_eq!(handle.view().game.rng_state_hex(), before.rng_state_hex());
+        eprintln!(
+            "full queue/closed runtime: explicit transport errors; state and revision unchanged"
+        );
     }
 
     #[tokio::test]

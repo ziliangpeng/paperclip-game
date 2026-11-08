@@ -205,29 +205,46 @@ mod tests {
     }
 
     #[test]
-    fn state_decoder_rejects_ambiguous_or_unsupported_encodings() {
+    fn negative_table_rejects_ambiguous_or_unsupported_rng_state() {
         let state = GameRng::from_test_seed([0xabu8; 32]).export_hex();
-        assert!(matches!(
-            GameRng::import_hex(&state.to_uppercase()),
-            Err(RngStateError::InvalidEncoding)
-        ));
-        for malformed in ["", "00", "xyz", "01"] {
-            assert!(GameRng::import_hex(malformed).is_err());
-        }
         let mut version = state.clone();
         version.replace_range(0..2, "02");
-        assert!(matches!(
-            GameRng::import_hex(&version),
-            Err(RngStateError::UnsupportedVersion)
-        ));
-
         let mut bytes = [0u8; STATE_BYTES];
         bytes[0] = STATE_VERSION;
         bytes[41..57].copy_from_slice(&(1u128 << MEANINGFUL_WORD_BITS).to_be_bytes());
-        assert!(matches!(
-            GameRng::import_hex(&encode_hex(&bytes)),
-            Err(RngStateError::InvalidWordPosition)
-        ));
+        let bad_position = encode_hex(&bytes);
+        for (label, input, expected) in [
+            (
+                "uppercase",
+                state.to_uppercase(),
+                RngStateError::InvalidEncoding,
+            ),
+            ("empty", String::new(), RngStateError::InvalidEncoding),
+            ("short", "00".to_string(), RngStateError::InvalidEncoding),
+            ("nonhex", "xyz".to_string(), RngStateError::InvalidEncoding),
+            (
+                "version only",
+                "01".to_string(),
+                RngStateError::InvalidEncoding,
+            ),
+            (
+                "unknown version",
+                version,
+                RngStateError::UnsupportedVersion,
+            ),
+            (
+                "68-bit overflow",
+                bad_position,
+                RngStateError::InvalidWordPosition,
+            ),
+        ] {
+            let error = match GameRng::import_hex(&input) {
+                Ok(_) => panic!("accepted bad RNG state: {label}"),
+                Err(error) => error,
+            };
+            assert_eq!(error, expected, "wrong category for {label}");
+            eprintln!("negative RNG state case {label}: {expected:?}");
+        }
     }
 
     #[test]

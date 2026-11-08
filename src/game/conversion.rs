@@ -113,7 +113,7 @@ mod tests {
     }
 
     #[test]
-    fn below_one_wire_rejects_before_request_evaluation_without_mutation() {
+    fn negative_table_below_one_wire_rejects_before_request_evaluation_without_mutation() {
         for (wire, numerator, denominator) in [
             ("0.5", 1, 5),
             ("0.999", 1, 0),
@@ -130,7 +130,7 @@ mod tests {
     }
 
     #[test]
-    fn invalid_requests_never_clamp_to_a_grant() {
+    fn negative_table_invalid_requests_never_clamp_to_a_grant() {
         for (numerator, denominator, expected) in [
             (0, 1, ConversionError::InvalidRequest),
             (-1, 1, ConversionError::InvalidRequest),
