@@ -1,0 +1,66 @@
+name: Rust and public validation
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    name: Stable Rust, public hygiene, and planning guards
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+      CARGO_TERM_COLOR: never
+    steps:
+      - name: Check out the triggering revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Select stable Python 3.14
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.14"
+          check-latest: false
+
+      - name: Install stable Rust components
+        run: rustup toolchain install stable --profile minimal --component rustfmt,clippy
+
+      - name: Record actual tool versions
+        run: |
+          rustup show active-toolchain
+          rustc --version
+          cargo --version
+          python3 --version
+
+      - name: Check Rust formatting
+        run: cargo fmt --check
+
+      - name: Lint all Rust targets
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Test all Rust targets
+        run: cargo test --all-targets
+
+      - name: Build locked library and binary
+        run: cargo build --locked
+
+      - name: Validate public repository hygiene
+        run: python3 -B scripts/check_public_hygiene.py
+
+      - name: Validate canonical inventory without private captures
+        run: python3 -B scripts/validate_inventory.py requirements/data/gameplay-inventory.json
+
+      - name: Validate the complete execution plan
+        run: python3 -B scripts/validate_execution_plan.py requirements/data/execution-plan.json
+
+      - name: Prove that plan guard mutations fail
+        run: python3 -B scripts/validate_execution_plan.py requirements/data/execution-plan.json --self-test

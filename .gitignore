@@ -1,0 +1,8 @@
+/target/
+/data/paperclip.sqlite3
+/data/paperclip.sqlite3-journal
+/data/paperclip.sqlite3-shm
+/data/paperclip.sqlite3-wal
+__pycache__/
+*.py[cod]
+.DS_Store
