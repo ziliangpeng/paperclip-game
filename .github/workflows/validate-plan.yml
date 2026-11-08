@@ -1,0 +1,53 @@
+name: Validate planning data
+
+on:
+  pull_request:
+    paths:
+      - "requirements/**"
+      - "scripts/validate_inventory.py"
+      - "scripts/validate_execution_plan.py"
+      - ".github/workflows/validate-plan.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "requirements/**"
+      - "scripts/validate_inventory.py"
+      - "scripts/validate_execution_plan.py"
+      - ".github/workflows/validate-plan.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  planning:
+    name: Inventory, execution plan, and negative guards
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - name: Check out the triggering revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Select stable Python 3.14
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.14"
+          check-latest: false
+
+      - name: Record the actual interpreter
+        run: python3 --version
+
+      - name: Validate canonical inventory without private captures
+        run: python3 -B scripts/validate_inventory.py requirements/data/gameplay-inventory.json
+
+      - name: Validate the complete execution plan
+        run: python3 -B scripts/validate_execution_plan.py requirements/data/execution-plan.json
+
+      - name: Prove that plan guard mutations fail
+        run: python3 -B scripts/validate_execution_plan.py requirements/data/execution-plan.json --self-test
