@@ -250,13 +250,40 @@ def _check_actions(steps: list[Step]) -> list[Finding]:
 PROCESS_CANARY = "do-not-echo-this-ci-value"
 
 
+def _shell_code_prefix(line: str) -> str:
+    """Strip only an unquoted shell comment that starts at a word boundary.
+
+    This is a bounded quote-aware prefix operation, not a general shell parser.
+    Attached and quoted hash characters remain code/data for shlex to evaluate.
+    """
+    single_quoted = False
+    double_quoted = False
+    escaped = False
+    for index, character in enumerate(line):
+        if escaped:
+            escaped = False
+            continue
+        if character == "\\" and not single_quoted:
+            escaped = True
+            continue
+        if character == "'" and not double_quoted:
+            single_quoted = not single_quoted
+        elif character == '"' and not single_quoted:
+            double_quoted = not double_quoted
+        elif character == "#" and not single_quoted and not double_quoted:
+            if index == 0 or line[index - 1].isspace() or line[index - 1] in ";|&()":
+                return line[:index]
+    return line
+
+
 def _logical_line_has_canary(line: str) -> bool:
     """Check raw text and tokens reconstructed by the bounded shlex model."""
+    code = _shell_code_prefix(line)
     try:
-        tokens = shlex.split(line, comments=True, posix=True)
+        tokens = shlex.split(code, comments=False, posix=True)
     except ValueError:
-        return PROCESS_CANARY in line
-    return PROCESS_CANARY in line or any(PROCESS_CANARY in token for token in tokens)
+        return PROCESS_CANARY in code
+    return PROCESS_CANARY in code or any(PROCESS_CANARY in token for token in tokens)
 
 
 def _canary_line_allowed(line: str) -> bool:
@@ -265,11 +292,12 @@ def _canary_line_allowed(line: str) -> bool:
     This is a line-oriented literal-token check, not shell evaluation or a general
     shell parser. Every other executable occurrence is rejected conservatively.
     """
+    code = _shell_code_prefix(line)
     try:
-        tokens = shlex.split(line, comments=True, posix=True)
+        tokens = shlex.split(code, comments=False, posix=True)
     except ValueError:
-        return PROCESS_CANARY not in line
-    has_canary = PROCESS_CANARY in line or any(PROCESS_CANARY in token for token in tokens)
+        return PROCESS_CANARY not in code
+    has_canary = PROCESS_CANARY in code or any(PROCESS_CANARY in token for token in tokens)
     if not has_canary:
         return True
     if not tokens:
@@ -534,6 +562,24 @@ def _mutations(healthy: str) -> list[tuple[str, str, str]]:
         "workflow-process-contract",
     )
     add(
+        "canary-midword-comment-test-then-echo",
+        "          capture_process --listen-addr do-not-echo-this-ci-value",
+        "          test 'do-not-echo-this-ci-value' != do-not-echo-this-ci-value#; echo 'do-not-echo-this-ci-value'\n          capture_process --listen-addr do-not-echo-this-ci-value",
+        "workflow-process-contract",
+    )
+    add(
+        "canary-midword-comment-capture-then-printf",
+        "          capture_process --listen-addr do-not-echo-this-ci-value",
+        "          capture_process --listen-addr do-not-echo-this-ci-value#; printf '%s\\n' 'do-not-echo-this-ci-value'\n          capture_process --listen-addr do-not-echo-this-ci-value",
+        "workflow-process-contract",
+    )
+    add(
+        "canary-quoted-hash-then-printf",
+        "          capture_process --listen-addr do-not-echo-this-ci-value",
+        "          test 'do-not-echo-this-ci-value' != 'do-not-echo-this-ci-value#'; printf '%s\\n' 'do-not-echo-this-ci-value'\n          capture_process --listen-addr do-not-echo-this-ci-value",
+        "workflow-process-contract",
+    )
+    add(
         "manifest-skip",
         "      - name: Test all Rust targets against the committed lockfile\n        run:",
         "      - name: Test all Rust targets against the committed lockfile\n        if: hashFiles('Cargo.toml') != ''\n        run:",
@@ -610,6 +656,9 @@ def self_test(script: Path, workflow: Path) -> int:
                 "canary-continuation-split-literal": "invalid-listener canary must not be printed",
                 "canary-adjacent-quoted-printf": "invalid-listener canary must not be printed",
                 "canary-adjacent-quoted-command-echo": "invalid-listener canary must not be printed",
+                "canary-midword-comment-test-then-echo": "invalid-listener canary must not be printed",
+                "canary-midword-comment-capture-then-printf": "invalid-listener canary must not be printed",
+                "canary-quoted-hash-then-printf": "invalid-listener canary must not be printed",
                 "malformed-extra-cargo": "unparseable Cargo shell",
                 "cargo-output-suppression": "Cargo output/status suppression",
             }
