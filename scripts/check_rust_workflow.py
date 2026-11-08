@@ -33,6 +33,10 @@ EXPECTED_CARGO = [
 ]
 
 
+STEP_METADATA_KEYS = {"name", "run", "uses", "with", "if", "continue-on-error"}
+STEP_WITH_KEYS = {"fetch-depth", "persist-credentials", "python-version", "check-latest"}
+
+
 @dataclass
 class Step:
     job: str
@@ -42,12 +46,29 @@ class Step:
     condition: str | None = None
     continue_on_error: str | None = None
     with_values: dict[str, str] = field(default_factory=dict)
+    unsupported_metadata: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
 class Finding:
     code: str
     message: str
+
+
+def _metadata_parts(token: str) -> tuple[str, str] | None:
+    """Read one plain or quoted step key and its raw scalar value."""
+    token = token.strip()
+    if len(token) >= 2 and token[0] in {'"', "'"}:
+        quote = token[0]
+        end = token.find(quote, 1)
+        if end <= 1 or end + 1 >= len(token) or token[end + 1] != ":":
+            return None
+        candidate = token[1:end]
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", candidate):
+            return None
+        return candidate, token[end + 2:].lstrip()
+    match = re.fullmatch(r"(<<|[A-Za-z_][A-Za-z0-9_-]*):(?:\s*(.*))?", token)
+    return (match.group(1), match.group(2) or "") if match else None
 
 
 def _indent(line: str) -> int:
@@ -72,7 +93,7 @@ def parse_steps(text: str) -> tuple[list[Step], list[Finding]]:
 
     jobs_end = next(
         (i for i in range(jobs_start + 1, len(lines))
-         if lines[i] and not lines[i].startswith(" ")),
+         if lines[i] and not lines[i].startswith((" ", "#"))),
         len(lines),
     )
     job_starts = [
@@ -100,23 +121,29 @@ def parse_steps(text: str) -> tuple[list[Step], list[Finding]]:
         for number, start in enumerate(starts):
             end = starts[number + 1] if number + 1 < len(starts) else job_end
             step = Step(job=job, line=start + 1)
-            first = lines[start].lstrip()[2:]
-            if first.startswith("if:"):
-                step.condition = _scalar(first[3:])
-            elif first.startswith("continue-on-error:"):
-                step.continue_on_error = _scalar(first[len("continue-on-error:"):])
-            field_lines = range(start + 1, end)
-            i = start + 1
+            i = start
             while i < end:
-                line = lines[i]
-                if _indent(line) != 8 or not line.strip() or line.lstrip().startswith("#"):
+                if i == start:
+                    token = lines[start].lstrip()[2:]
+                    line_number = start + 1
+                else:
+                    line = lines[i]
+                    if _indent(line) != 8 or not line.strip() or line.lstrip().startswith("#"):
+                        i += 1
+                        continue
+                    token = line.strip()
+                    line_number = i + 1
+                metadata = _metadata_parts(token)
+                if metadata is None:
+                    findings.append(Finding("workflow-step-contract", f"unsupported step metadata structure at line {line_number}"))
                     i += 1
                     continue
-                match = re.match(r" {8}([A-Za-z_][A-Za-z0-9_-]*):(?:\s*(.*))?$", line)
-                if not match:
+                key, raw_value = metadata
+                if key not in STEP_METADATA_KEYS:
+                    step.unsupported_metadata.append(key)
+                    findings.append(Finding("workflow-step-contract", f"unsupported step metadata {key} at line {line_number}"))
                     i += 1
                     continue
-                key, raw_value = match.group(1), match.group(2) or ""
                 if key == "run" and raw_value in {"|", "|-", "|+"}:
                     body: list[str] = []
                     i += 1
@@ -136,8 +163,13 @@ def parse_steps(text: str) -> tuple[list[Step], list[Finding]]:
                 elif key == "with":
                     i += 1
                     while i < end and (not lines[i].strip() or _indent(lines[i]) >= 10):
+                        if not lines[i].strip() or lines[i].lstrip().startswith("#"):
+                            i += 1
+                            continue
                         nested = re.match(r" {10}([A-Za-z0-9_-]+):\s*(.*)$", lines[i])
-                        if nested:
+                        if not nested or nested.group(1) not in STEP_WITH_KEYS:
+                            findings.append(Finding("workflow-step-contract", f"unsupported nested action input at line {i + 1}"))
+                        else:
                             step.with_values[nested.group(1)] = _scalar(nested.group(2))
                         i += 1
                     continue
@@ -156,7 +188,7 @@ def _permissions(text: str) -> dict[str, str] | None:
         return None
     result: dict[str, str] = {}
     for line in lines[start + 1:]:
-        if line and not line.startswith(" "):
+        if line and not line.startswith((" ", "#")):
             break
         match = re.match(r" {2}([A-Za-z0-9_-]+):\s*([^#\s]+)", line)
         if match:
@@ -196,10 +228,14 @@ def _check_cargo(steps: list[Step]) -> list[Finding]:
             if any(token in {";", "&&", "||", "|", "&"} for token in tokens):
                 findings.append(Finding("workflow-cargo-syntax", f"chained Cargo shell is not allowed at line {step.line}"))
                 continue
+            if tokens == ["cargo", "shell"]:
+                findings.append(Finding("workflow-cargo-contract", f"Cargo shell metadata is not allowed at line {step.line}"))
             if tokens != ["cargo", "--version"]:
                 commands.append(tokens)
         if native_in_step:
             nonempty = [line for line in step.run.splitlines() if line.strip() and not line.lstrip().startswith("#")]
+            if step.unsupported_metadata:
+                findings.append(Finding("workflow-cargo-contract", f"unsupported execution metadata cannot hide the Cargo command at line {step.line}"))
             if step.condition is not None:
                 findings.append(Finding("workflow-cargo-condition", f"Cargo step at line {step.line} has a condition"))
             if step.continue_on_error not in {None, "false"}:
@@ -231,6 +267,8 @@ def _check_actions(steps: list[Step]) -> list[Finding]:
         if not step.uses:
             continue
         match = re.fullmatch(r"([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)@([0-9a-f]{40})", step.uses)
+        if step.condition is not None or step.continue_on_error not in {None, "false"}:
+            findings.append(Finding("workflow-action-contract", f"action step at line {step.line} must be unconditional and propagate failure"))
         if not match:
             findings.append(Finding("workflow-action-pin", f"action at line {step.line} is not pinned to a full commit SHA"))
     checkouts = [step for step in steps if step.uses == CHECKOUT]
@@ -272,6 +310,7 @@ PUBLIC_SUFFIX = (
 EARLY_GUARDS = (
     "python3 -B scripts/check_rust_workflow.py --workflow .github/workflows/rust.yml",
     "python3 -B scripts/check_public_hygiene.py --self-test",
+    "python3 -B scripts/check_rust_workflow.py check-controls-workflow --workflow .github/workflows/workflow-controls.yml",
 )
 PHASE_LINE_ROLES = (
     "errexit initialization",
@@ -378,6 +417,8 @@ def _check_browser_contract(steps: list[Step]) -> list[Finding]:
         )]
     findings: list[Finding] = []
     step = matches[0]
+    if step.unsupported_metadata:
+        findings.append(Finding("workflow-browser-contract", f"custom interpreter, merge, or unknown metadata cannot hide the browser phase at line {step.line}"))
     if step.run.strip() != BROWSER_COMMAND:
         findings.append(Finding(
             "workflow-browser-contract",
@@ -419,7 +460,9 @@ def _check_public_validators(steps: list[Step]) -> list[Finding]:
     )
     for command in EARLY_GUARDS:
         matches = [index for index, step in enumerate(steps) if step.run and step.run.strip() == command]
-        if len(matches) != 1 or first_cargo is None or matches[0] >= first_cargo:
+        if (len(matches) != 1 or first_cargo is None or matches[0] >= first_cargo
+                or steps[matches[0]].condition is not None
+                or steps[matches[0]].continue_on_error not in {None, "false"}):
             findings.append(Finding(
                 "workflow-public-contract",
                 "workflow and hygiene self-tests must run before the native Cargo gates",
@@ -430,7 +473,7 @@ def _check_public_validators(steps: list[Step]) -> list[Finding]:
 REQUIRED_RUST_JOB_METADATA = {"name", "runs-on", "timeout-minutes", "env", "steps"}
 
 
-def _check_job_contract(text: str) -> list[Finding]:
+def _check_job_contract(text: str, job_id: str = "rust") -> list[Finding]:
     """Bound this issue's one unconditional Rust job and its root metadata.
 
     Only the dedicated rust job is a supported actor. Any if/needs, auxiliary
@@ -438,6 +481,8 @@ def _check_job_contract(text: str) -> list[Finding]:
     than evaluated as a GitHub expression. Comments and nested step content do
     not participate in root job metadata extraction.
     """
+    if job_id not in {"rust", "controls"}:
+        raise ValueError("unsupported required job identity")
     findings: list[Finding] = []
     lines = text.splitlines()
     try:
@@ -451,18 +496,20 @@ def _check_job_contract(text: str) -> list[Finding]:
     metadata_keys: set[str] = set()
     for number, line in enumerate(lines[jobs_start + 1:], start=jobs_start + 2):
         stripped = line.strip()
+        if stripped.startswith("#"):
+            continue
         if stripped and _indent(line) == 0:
             break
         if re.match(r" {2}\S.*:\s*$", line):
             job_count += 1
-            if line == "  rust:" or line.startswith("  rust: #"):
+            if line == f"  {job_id}:" or line.startswith(f"  {job_id}: #"):
                 if rust_seen:
-                    findings.append(Finding("workflow-job-contract", f"duplicate required rust job at line {number}"))
+                    findings.append(Finding("workflow-job-contract", f"duplicate required {job_id} job at line {number}"))
                 rust_seen = True
                 rust_job = True
                 metadata_keys = set()
             else:
-                find_detail = f"unexpected additional job in the single required Rust workflow at line {number}"
+                find_detail = f"unexpected additional job in the single required {job_id} workflow at line {number}"
                 findings.append(Finding("workflow-job-contract", find_detail))
                 rust_job = False
             continue
@@ -481,7 +528,7 @@ def _check_job_contract(text: str) -> list[Finding]:
         if key in {"if", "needs"}:
             findings.append(Finding(
                 "workflow-job-contract",
-                f"required Rust job cannot use conditional/dependent {key} at line {number}; the full required job must execute",
+                f"required {job_id} job cannot use conditional/dependent {key} at line {number}; the full required job must execute",
             ))
             continue
         if key not in REQUIRED_RUST_JOB_METADATA:
@@ -496,15 +543,166 @@ def _check_job_contract(text: str) -> list[Finding]:
     if not rust_seen or job_count != 1:
         findings.append(Finding(
             "workflow-job-contract",
-            "workflow must contain exactly one unique unconditional rust job; conditional prerequisites and helper-job escapes are not supported",
+            f"workflow must contain exactly one unique unconditional {job_id} job; conditional prerequisites and helper-job escapes are not supported",
         ))
     missing = REQUIRED_RUST_JOB_METADATA - metadata_keys
     if rust_seen and missing:
         findings.append(Finding(
             "workflow-job-contract",
-            "required root metadata is incomplete for the dedicated Rust job: " + ", ".join(sorted(missing)),
+            f"required root metadata is incomplete for the dedicated {job_id} job: " + ", ".join(sorted(missing)),
         ))
     return findings
+
+
+CONTROL_PATHS = (
+    ".github/workflows/rust.yml",
+    ".github/workflows/workflow-controls.yml",
+    "scripts/check_rust_workflow.py",
+    "scripts/check_public_hygiene.py",
+)
+CONTROLS_COMMANDS = (
+    "python3 --version",
+    "python3 -B scripts/check_rust_workflow.py --workflow .github/workflows/rust.yml",
+    "python3 -B scripts/check_rust_workflow.py --self-test",
+    "python3 -B scripts/check_public_hygiene.py",
+    "python3 -B scripts/check_public_hygiene.py --self-test",
+    "python3 -B scripts/check_rust_workflow.py check-controls-workflow --workflow .github/workflows/workflow-controls.yml",
+)
+CONTROLS_WORKFLOW_CHECK = "python3 -B scripts/check_rust_workflow.py check-controls-workflow --workflow .github/workflows/workflow-controls.yml"
+
+
+def _trigger_lines(text: str) -> list[str] | None:
+    """Return the sole top-level on block, excluding its declaration."""
+    lines = text.splitlines()
+    starts = [index for index, line in enumerate(lines) if line == "on:"]
+    if len(starts) != 1:
+        return None
+    start = starts[0]
+    end = next(
+        (index for index in range(start + 1, len(lines))
+         if lines[index] and not lines[index].startswith((" ", "#"))),
+        len(lines),
+    )
+    return lines[start + 1:end]
+
+
+def _trigger_list_value(text: str, parent: str, key: str) -> list[str] | None:
+    """Read one bounded list from on.pull_request/push, never from job steps."""
+    lines = _trigger_lines(text)
+    if lines is None:
+        return None
+    in_parent = False
+    in_key = False
+    values: list[str] = []
+    found_parent = False
+    found_key = False
+    for line in lines:
+        if line == f"  {parent}:":
+            if found_parent:
+                return None
+            found_parent = True
+            in_parent = True
+            in_key = False
+            continue
+        indentation = _indent(line)
+        stripped = line.strip()
+        if indentation == 2 and re.match(r"  [A-Za-z0-9_-]+:", line):
+            in_parent = False
+            in_key = False
+            continue
+        if not in_parent or not stripped or stripped.startswith("#"):
+            continue
+        if indentation == 4 and re.match(r" {4}[A-Za-z0-9_-]+:", line):
+            if stripped == f"{key}:":
+                if found_key:
+                    return None
+                found_key = True
+                in_key = True
+                values = []
+            else:
+                in_key = False
+            continue
+        if in_key and stripped.startswith("- "):
+            if indentation != 6 or not line.startswith("      - "):
+                return None
+            values.append(_scalar(stripped[2:]))
+            continue
+        if in_key and indentation < 6:
+            break
+    return values if found_parent and found_key else None
+
+
+def _check_controls_document(text: str) -> list[Finding]:
+    findings = _check_job_contract(text, job_id="controls")
+    trigger_lines = _trigger_lines(text)
+    if trigger_lines is None:
+        findings.append(Finding("workflow-controls-contract", "controls document must contain exactly one top-level on block"))
+    else:
+        current_trigger: str | None = None
+        trigger_names: list[str] = []
+        allowed_nested = {
+            "pull_request": {"paths"},
+            "push": {"paths", "branches"},
+            "workflow_dispatch": set(),
+        }
+        for line in trigger_lines:
+            if not line.strip() or line.lstrip().startswith("#"):
+                continue
+            root = re.fullmatch(r"  ([A-Za-z0-9_-]+):", line)
+            if root:
+                current_trigger = root.group(1)
+                trigger_names.append(current_trigger)
+                continue
+            nested = re.fullmatch(r"    ([A-Za-z0-9_-]+):", line)
+            if nested:
+                if current_trigger not in allowed_nested or nested.group(1) not in allowed_nested[current_trigger]:
+                    findings.append(Finding("workflow-controls-contract", f"unsupported controls trigger metadata {nested.group(1)}"))
+                continue
+            if re.fullmatch(r"      - .+", line) and current_trigger != "workflow_dispatch":
+                continue
+            findings.append(Finding("workflow-controls-contract", "unsupported controls trigger structure"))
+        if trigger_names != ["pull_request", "push", "workflow_dispatch"]:
+            findings.append(Finding("workflow-controls-contract", "controls triggers must be exactly pull_request, push, and workflow_dispatch"))
+        if _trigger_list_value(text, "pull_request", "paths") != list(CONTROL_PATHS):
+            findings.append(Finding("workflow-controls-contract", "pull_request must have exactly the four required control paths"))
+        if _trigger_list_value(text, "push", "paths") != list(CONTROL_PATHS):
+            findings.append(Finding("workflow-controls-contract", "push on main must have exactly the four required control paths"))
+        if _trigger_list_value(text, "push", "branches") != ["main"]:
+            findings.append(Finding("workflow-controls-contract", "push must target exactly the main branch"))
+    permissions = _permissions(text)
+    if permissions is None or permissions.get("contents") != "read" or any(
+        value not in {"read", "none"} for value in permissions.values()
+    ):
+        findings.append(Finding("workflow-permissions", "controls permissions must be read-only with contents: read"))
+    steps, parse_findings = parse_steps(text)
+    findings.extend(parse_findings)
+    if steps:
+        findings.extend(_check_actions(steps))
+        commands = [step.run.strip() for step in steps if step.run is not None]
+        if commands != list(CONTROLS_COMMANDS):
+            findings.append(Finding("workflow-controls-contract", "controls command sequence or required self-check invocation is incorrect"))
+        for step in steps:
+            if step.condition is not None or step.continue_on_error not in {None, "false"}:
+                findings.append(Finding("workflow-controls-contract", f"controls step at line {step.line} must be unconditional and propagate failure"))
+    return findings
+
+
+def check_controls_path(path: Path) -> int:
+    try:
+        text = _read_workflow(path)
+    except (OSError, UnicodeError, ValueError) as error:
+        print(f"Controls workflow validation failed: [workflow-read] {type(error).__name__}", file=sys.stderr)
+        return 1
+    findings = _check_controls_document(text)
+    if findings:
+        print("Controls workflow validation failed:", file=sys.stderr)
+        for finding in findings:
+            print(f"- [{finding.code}] {finding.message}", file=sys.stderr)
+        print(f"{len(findings)} contract finding(s)", file=sys.stderr)
+        return 1
+    print("Controls workflow validation passed: one unconditional controls job, exact command and trigger contracts")
+    print("Limits: the dedicated controls document shape; no universal YAML or GitHub expression evaluator")
+    return 0
 
 
 def validate_document(text: str) -> list[Finding]:
@@ -678,6 +876,106 @@ def _base_mutations(healthy: str) -> list[tuple[str, str, str]]:
         "      - name: Additional malformed Cargo shell\n        run: cargo test --locked --all-targets \"\n\n      - name: Capture real API process contracts",
         "workflow-cargo-syntax",
     )
+    plan_guard = "        run: python3 -B scripts/validate_execution_plan.py requirements/data/execution-plan.json --self-test"
+    add(
+        "comment-job-if",
+        plan_guard,
+        plan_guard + "\n# comments do not end a YAML mapping\n    if: ${{ false }}",
+        "workflow-job-contract",
+    )
+    add(
+        "comment-job-needs-helper",
+        plan_guard,
+        plan_guard + "\n# comments do not end a YAML mapping\n    needs: disabled-prerequisite\n"
+        "  disabled-prerequisite:\n    runs-on: ubuntu-24.04\n    if: ${{ false }}\n    steps:\n      - run: \"true\"",
+        "workflow-job-contract",
+    )
+    add(
+        "comment-permissions-write",
+        "permissions:\n  contents: read",
+        "permissions:\n  contents: read\n# comments do not end a YAML mapping\n  actions: write",
+        "workflow-permissions",
+    )
+    add(
+        "comment-last-step-if",
+        plan_guard,
+        plan_guard + "\n# comments do not end a YAML mapping\n        if: ${{ false }}",
+        "workflow-public-contract",
+    )
+    cargo_test_header = "      - name: Test all Rust targets against the committed lockfile\n"
+    add(
+        "step-cargo-quoted-if",
+        cargo_test_header + "        run:",
+        cargo_test_header + "        \"if\": ${{ false }}\n        run:",
+        "workflow-cargo-condition",
+    )
+    add(
+        "step-cargo-inline-quoted-if",
+        cargo_test_header + "        run: cargo test --locked --all-targets",
+        "      - \"if\": ${{ false }}\n        name: Test all Rust targets against the committed lockfile\n        run: cargo test --locked --all-targets",
+        "workflow-cargo-condition",
+    )
+    browser_header = "      - name: Check real browser stream and recovery contracts\n"
+    add(
+        "step-browser-merge-if",
+        browser_header + "        run:",
+        browser_header + "        <<: {\"if\": false}\n        run:",
+        "workflow-browser-contract",
+    )
+    add(
+        "step-browser-quoted-continue",
+        browser_header + "        run:",
+        browser_header + "        \"continue-on-error\": true\n        run:",
+        "workflow-browser-contract",
+    )
+    add(
+        "step-browser-custom-noop-shell",
+        browser_header + "        run:",
+        browser_header + "        shell: bash -c 'exit 0' {0}\n        run:",
+        "workflow-browser-contract",
+    )
+    add(
+        "step-cargo-custom-noop-shell",
+        cargo_test_header + "        run:",
+        cargo_test_header + "        shell: bash -c 'exit 0' {0}\n        run:",
+        "workflow-cargo-contract",
+    )
+    add(
+        "step-unknown-field",
+        "      - name: Record actual tool versions\n        run: |",
+        "      - name: Record actual tool versions\n        timeout-minutes: 1\n        run: |",
+        "workflow-step-contract",
+    )
+    add(
+        "early-workflow-check-if-false",
+        "      - name: Check bootstrap workflow contract\n        run:",
+        "      - name: Check bootstrap workflow contract\n        if: ${{ false }}\n        run:",
+        "workflow-public-contract",
+    )
+    add(
+        "early-hygiene-selftest-continue",
+        "      - name: Prove public hygiene guard mutations fail\n        run:",
+        "      - name: Prove public hygiene guard mutations fail\n        continue-on-error: true\n        run:",
+        "workflow-public-contract",
+    )
+    add(
+        "early-controls-check-if-false",
+        "      - name: Check controls workflow document\n        run:",
+        "      - name: Check controls workflow document\n        if: ${{ false }}\n        run:",
+        "workflow-public-contract",
+    )
+    add(
+        "setup-python-if-false",
+        "      - name: Select stable Python 3.14\n        uses:",
+        "      - name: Select stable Python 3.14\n        if: ${{ false }}\n        uses:",
+        "workflow-action-contract",
+    )
+    add(
+        "checkout-continue-on-error",
+        "      - name: Check out the triggering revision\n        uses:",
+        "      - name: Check out the triggering revision\n        continue-on-error: true\n        uses:",
+        "workflow-action-contract",
+    )
     return cases
 
 
@@ -822,11 +1120,304 @@ def _case_result(name: str, expected: int, code: str | None, detail: str | None,
     return passed, record
 
 
+def _controls_fixtures(healthy: str) -> list[dict[str, object]]:
+    def case(name: str, document: str, code: str | None, detail: str | None) -> dict[str, object]:
+        return {
+            "name": name,
+            "document": document,
+            "expected_exit": 1 if code is not None else 0,
+            "expected_detail": detail,
+            "expected_code": code,
+        }
+
+    fixtures = [case("controls-healthy", healthy, None, None)]
+    healthy_comments = _replace_once(healthy, "jobs:\n", "jobs:\n  # helper:\n")
+    healthy_comments = _replace_once(
+        healthy_comments,
+        "  contents: read",
+        "  contents: read\n# a root comment does not end permissions or jobs",
+    )
+    healthy_comments = _replace_once(
+        healthy_comments,
+        "  push:\n",
+        "# a root comment does not end the on block\n  push:\n",
+    )
+    fixtures.append(case("controls-healthy-comments", healthy_comments, None, None))
+
+    def add(name: str, old: str, new: str, code: str, detail: str | None = None) -> None:
+        fixtures.append(case(name, _replace_once(healthy, old, new), code, detail))
+
+    add("controls-job-if-false", "  controls:\n", "  controls:\n    if: ${{ false }}\n", "workflow-job-contract", "conditional/dependent if")
+    add(
+        "controls-skipped-dependency",
+        "  controls:\n",
+        "  disabled-prerequisite:\n"
+        "    runs-on: ubuntu-24.04\n"
+        "    if: ${{ false }}\n"
+        "    steps:\n"
+        "      - run: \"true\"\n"
+        "  controls:\n"
+        "    needs: disabled-prerequisite\n",
+        "workflow-job-contract",
+        "conditional/dependent needs",
+    )
+    add(
+        "controls-quoted-job-if",
+        "    name: Workflow and public hygiene self-tests\n",
+        "    name: Workflow and public hygiene self-tests\n    \"if\": ${{ false }}\n",
+        "workflow-job-contract",
+        "quoted and merge forms",
+    )
+    add(
+        "controls-custom-noop-shell",
+        "      - name: Prove public hygiene mutations fail\n        run: python3 -B scripts/check_public_hygiene.py --self-test\n",
+        "      - name: Prove public hygiene mutations fail\n        shell: bash -c 'exit 0' {0}\n        run: python3 -B scripts/check_public_hygiene.py --self-test\n",
+        "workflow-step-contract",
+        "shell",
+    )
+
+    def remove_trigger_path(trigger: str, relative_path: str) -> str:
+        before, marker, after = healthy.partition(f"  {trigger}:\n")
+        item = f"      - {relative_path}\n"
+        if not marker or item not in after:
+            raise RuntimeError("controls trigger fixture did not match")
+        return before + after.replace(item, "", 1)
+
+    def extra_trigger_path(trigger: str) -> str:
+        before, marker, after = healthy.partition(f"  {trigger}:\n")
+        if not marker:
+            raise RuntimeError("controls trigger fixture did not match")
+        return before + after.replace("    paths:\n", "    paths:\n      - src/lib.rs\n", 1)
+
+    for trigger in ("pull_request", "push"):
+        for path_name, relative_path in zip(("rust", "controls", "scanner", "hygiene"), CONTROL_PATHS):
+            fixtures.append(case(
+                f"controls-remove-{trigger}-{path_name}-path",
+                remove_trigger_path(trigger, relative_path),
+                "workflow-controls-contract",
+                "four required control paths",
+            ))
+        fixtures.append(case(
+            f"controls-extra-{trigger}-path",
+            extra_trigger_path(trigger),
+            "workflow-controls-contract",
+            "four required control paths",
+        ))
+
+    pull_request_block = "  pull_request:\n    paths:\n" + "".join(
+        f"      - {path}\n" for path in CONTROL_PATHS
+    )
+    push_block = "  push:\n    branches:\n      - main\n    paths:\n" + "".join(
+        f"      - {path}\n" for path in CONTROL_PATHS
+    )
+    without_pr = healthy.replace(pull_request_block, "", 1)
+    fixtures.append(case("controls-remove-pull-request-trigger", without_pr, "workflow-controls-contract", "pull_request must"))
+    fixtures.append(case("controls-remove-push-trigger", healthy.replace(push_block, "", 1), "workflow-controls-contract", "push"))
+    fixtures.append(case(
+        "controls-remove-workflow-dispatch",
+        healthy.replace("  workflow_dispatch:\n", "", 1),
+        "workflow-controls-contract",
+        "exactly pull_request, push, and workflow_dispatch",
+    ))
+    add(
+        "controls-add-pull-request-branch-filter",
+        "  pull_request:\n",
+        "  pull_request:\n    branches:\n      - main\n",
+        "workflow-controls-contract",
+        "unsupported controls trigger metadata",
+    )
+    add(
+        "controls-extra-trigger",
+        "  workflow_dispatch:\n",
+        "  workflow_dispatch:\n  schedule:\n    - cron: '0 0 * * *'\n",
+        "workflow-controls-contract",
+        "exactly pull_request, push, and workflow_dispatch",
+    )
+    fake_root_trigger = without_pr + "pull_request:\n    paths:\n" + "".join(
+        f"      - {path}\n" for path in CONTROL_PATHS
+    )
+    fixtures.append(case("controls-fake-root-pull-request", fake_root_trigger, "workflow-controls-contract", "pull_request must"))
+    add("controls-remove-push-main", "      - main\n", "      - staging\n", "workflow-controls-contract", "exactly the main branch")
+    add(
+        "controls-remove-validation-step",
+        "      - name: Check controls workflow document\n        run: python3 -B scripts/check_rust_workflow.py check-controls-workflow --workflow .github/workflows/workflow-controls.yml\n",
+        "",
+        "workflow-controls-contract",
+        "required self-check invocation",
+    )
+    add(
+        "controls-continue-guard",
+        "      - name: Prove workflow contract mutations fail\n        run: python3 -B scripts/check_rust_workflow.py --self-test\n",
+        "      - name: Prove workflow contract mutations fail\n        continue-on-error: true\n        run: python3 -B scripts/check_rust_workflow.py --self-test\n",
+        "workflow-controls-contract",
+        "unconditional and propagate failure",
+    )
+    add(
+        "controls-setup-condition",
+        "      - name: Select stable Python 3.14\n        uses: actions/setup-python@",
+        "      - name: Select stable Python 3.14\n        if: ${{ false }}\n        uses: actions/setup-python@",
+        "workflow-action-contract",
+        "unconditional and propagate failure",
+    )
+    add(
+        "controls-checkout-continue-on-error",
+        "      - name: Check out the triggering revision\n        uses: actions/checkout@",
+        "      - name: Check out the triggering revision\n        continue-on-error: true\n        uses: actions/checkout@",
+        "workflow-action-contract",
+        "unconditional and propagate failure",
+    )
+    add("controls-floating-checkout", CHECKOUT, "actions/checkout@main", "workflow-action-pin", "full commit SHA")
+    add(
+        "controls-inline-quoted-step-if",
+        "      - name: Prove workflow contract mutations fail\n        run: python3 -B scripts/check_rust_workflow.py --self-test",
+        "      - \"if\": ${{ false }}\n        name: Prove workflow contract mutations fail\n        run: python3 -B scripts/check_rust_workflow.py --self-test",
+        "workflow-controls-contract",
+        "unconditional and propagate failure",
+    )
+    add(
+        "controls-unknown-step-field",
+        "      - name: Check controls workflow document\n        run:",
+        "      - name: Check controls workflow document\n        timeout-minutes: 1\n        run:",
+        "workflow-step-contract",
+        "unsupported step metadata timeout-minutes",
+    )
+    add(
+        "controls-selfcheck-condition",
+        "      - name: Check controls workflow document\n        run:",
+        "      - name: Check controls workflow document\n        if: ${{ false }}\n        run:",
+        "workflow-controls-contract",
+        "unconditional and propagate failure",
+    )
+    add(
+        "controls-quoted-checkout-continue",
+        "      - name: Check out the triggering revision\n        uses:",
+        "      - name: Check out the triggering revision\n        \"continue-on-error\": true\n        uses:",
+        "workflow-action-contract",
+        "unconditional and propagate failure",
+    )
+    controls_selfcheck = "        run: python3 -B scripts/check_rust_workflow.py check-controls-workflow --workflow .github/workflows/workflow-controls.yml"
+    add(
+        "controls-comment-job-if",
+        controls_selfcheck,
+        controls_selfcheck + "\n# comments do not end a YAML mapping\n    if: ${{ false }}",
+        "workflow-job-contract",
+        "conditional/dependent if",
+    )
+    add(
+        "controls-comment-permissions-write",
+        "permissions:\n  contents: read",
+        "permissions:\n  contents: read\n# comments do not end a YAML mapping\n  actions: write",
+        "workflow-permissions",
+        "read-only",
+    )
+    reordered = _replace_once(
+        healthy,
+        "        run: python3 -B scripts/check_rust_workflow.py --workflow .github/workflows/rust.yml",
+        "        run: python3 -B scripts/check_rust_workflow.py __ORDER_PROBE__",
+    )
+    reordered = _replace_once(
+        reordered,
+        "        run: python3 -B scripts/check_rust_workflow.py --self-test",
+        "        run: python3 -B scripts/check_rust_workflow.py --workflow .github/workflows/rust.yml",
+    )
+    reordered = _replace_once(
+        reordered,
+        "        run: python3 -B scripts/check_rust_workflow.py __ORDER_PROBE__",
+        "        run: python3 -B scripts/check_rust_workflow.py --self-test",
+    )
+    fixtures.append(case("controls-reordered-validation-steps", reordered, "workflow-controls-contract", "command sequence"))
+    return fixtures
+
+
+def _controls_self_test(script: Path, workflow: Path, root: Path) -> int:
+    if not workflow.exists():
+        print("Controls self-test failed: [workflow-read] missing controls document", file=sys.stderr)
+        return 1
+    healthy = _read_workflow(workflow)
+    fixtures = _controls_fixtures(healthy)
+    controls_directory = root / ".github" / "workflows"
+    controls_directory.mkdir(parents=True, exist_ok=True)
+    failures: list[str] = []
+    passed = 0
+    rejected = 0
+    for case in fixtures:
+        name = case["name"]
+        document = case["document"]
+        expected_exit = case["expected_exit"]
+        expected_detail = case["expected_detail"]
+        path = root / f"{name}.yml"
+        path.write_text(document, encoding="utf-8")
+        completed = _run_cli([
+            sys.executable,
+            "-B",
+            str(script),
+            "check-controls-workflow",
+            "--workflow",
+            str(path),
+        ])
+        output = completed.stdout + completed.stderr
+        expected_code = case["expected_code"]
+        passed_case = completed.returncode == expected_exit
+        if expected_detail is not None and expected_exit != 0:
+            passed_case = passed_case and expected_detail in output
+        if expected_code is not None and expected_exit != 0:
+            passed_case = passed_case and f"[{expected_code}]" in output
+        if expected_exit == 0 and passed_case:
+            passed += 1
+        elif passed_case:
+            rejected += 1
+        else:
+            failures.append(name)
+        print(f"{'PASS' if passed_case else 'FAIL'} controls-validation {name}: expected={expected_exit} actual={completed.returncode} code={expected_code or 'healthy'}")
+    if failures:
+        print("Controls self-test failed: " + ", ".join(failures), file=sys.stderr)
+        return 1
+    print(f"Controls document self-test passed: {passed} healthy document and {rejected} rejected mutations")
+    return 0
+
+
 def _static_self_test(script: Path, workflow: Path, root: Path) -> tuple[int, list[dict[str, object]]]:
     healthy = _read_workflow(workflow)
+    column_zero_comments = _replace_once(
+        healthy,
+        "permissions:\n  contents: read",
+        "permissions:\n  contents: read\n# a root comment does not end permissions",
+    )
+    column_zero_comments = _replace_once(
+        column_zero_comments,
+        "    runs-on: ubuntu-24.04",
+        "# a root comment does not end jobs\n    runs-on: ubuntu-24.04",
+    )
+    literal_job_text = _replace_once(
+        healthy,
+        "          python3 --version\n",
+        "          python3 --version\n"
+        "          printf \"%s\\n\" \"    if: not-job-metadata\" \"  helper: not-a-job\"\n",
+    )
     fixtures = [
         ("healthy-workflow", healthy, 0, None),
         ("healthy-job-comment", _replace_once(healthy, "  rust:\n", "  rust:\n    # if: ${{ false }}\n"), 0, None),
+        ("healthy-jobs-list-comment-colon", _replace_once(healthy, "jobs:\n", "jobs:\n  # if:\n"), 0, None),
+        ("healthy-jobs-list-helper-comment-colon", _replace_once(healthy, "jobs:\n", "jobs:\n  # helper:\n"), 0, None),
+        ("healthy-column-zero-comments", column_zero_comments, 0, None),
+        ("healthy-terminal-comment", healthy + "# harmless terminal comment\n", 0, None),
+        (
+            "healthy-inline-run",
+            _replace_once(
+                healthy,
+                "      - name: Check Rust formatting\n        run: cargo fmt --check",
+                "      - run: cargo fmt --check\n        name: Check Rust formatting",
+            ),
+            0,
+            None,
+        ),
+        (
+            "healthy-nested-env-if-name",
+            _replace_once(healthy, "      CARGO_TERM_COLOR: never", "      CARGO_TERM_COLOR: never\n      if: nested-env-data-not-job-condition"),
+            0,
+            None,
+        ),
+        ("healthy-step-literal-job-looking-text", literal_job_text, 0, None),
     ]
     expected_details = {
         "malformed-extra-cargo": "unparseable Cargo shell",
@@ -851,6 +1442,22 @@ def _static_self_test(script: Path, workflow: Path, root: Path) -> tuple[int, li
         "job-merge-metadata": "quoted and merge forms",
         "job-matrix-metadata": "unexpected root job metadata",
         "missing-plan-guard": "public",
+        "comment-job-if": "conditional/dependent if",
+        "comment-job-needs-helper": "conditional/dependent needs",
+        "comment-permissions-write": "read-only",
+        "comment-last-step-if": "public validators must be unconditional",
+        "step-cargo-quoted-if": "has a condition",
+        "step-cargo-inline-quoted-if": "has a condition",
+        "step-browser-merge-if": "cannot hide the browser phase",
+        "step-browser-quoted-continue": "unconditional",
+        "step-browser-custom-noop-shell": "cannot hide the browser phase",
+        "step-cargo-custom-noop-shell": "cannot hide the Cargo command",
+        "step-unknown-field": "unsupported step metadata timeout-minutes",
+        "early-workflow-check-if-false": "workflow and hygiene self-tests",
+        "early-hygiene-selftest-continue": "workflow and hygiene self-tests",
+        "early-controls-check-if-false": "workflow and hygiene self-tests",
+        "setup-python-if-false": "unconditional and propagate failure",
+        "checkout-continue-on-error": "unconditional and propagate failure",
     }
     for name, text, code in _mutations(healthy):
         fixtures.append((name, text, 1, code))
@@ -912,6 +1519,7 @@ def _runtime_self_test(script: Path, root: Path) -> tuple[int, list[dict[str, ob
         if PROCESS_CANARY in combined:
             passed = False
             record["literal_leaked"] = True
+        record["passed"] = passed
         record["kind"] = "runtime-output"
         results.append(record)
         return passed
@@ -985,11 +1593,12 @@ def self_test(script: Path, workflow: Path) -> int:
             root = Path(temporary)
             static_status, static_results = _static_self_test(script, workflow, root)
             runtime_status, runtime_results = _runtime_self_test(script, root)
+            controls_status = _controls_self_test(script, Path(__file__).resolve().parents[1] / ".github/workflows/workflow-controls.yml", root)
         results = static_results + runtime_results
         for record in results:
             state = "PASS" if record["passed"] else "FAIL"
             print(f"{state} {record['kind']} {record['name']} expected={record['expected_exit']} actual={record['actual_exit']}")
-        if static_status != 0 or runtime_status != 0:
+        if static_status != 0 or runtime_status != 0 or controls_status != 0:
             print("Runtime-output self-test failed", file=sys.stderr)
             return 1
         healthy_workflows = sum(record["kind"] == "healthy-workflow" for record in static_results)
@@ -1008,7 +1617,7 @@ def self_test(script: Path, workflow: Path) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", nargs="?", choices=["check-process-output"])
+    parser.add_argument("command", nargs="?", choices=["check-process-output", "check-controls-workflow"])
     parser.add_argument("--workflow", type=Path, default=Path(__file__).resolve().parents[1] / ".github/workflows/rust.yml")
     parser.add_argument("--self-test", action="store_true")
     parser.add_argument("--stdout", type=Path)
@@ -1016,6 +1625,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--probe-status")
     parser.add_argument("--probe", choices=["api", "persistence"])
     arguments = parser.parse_args(argv)
+    if arguments.command == "check-controls-workflow":
+        if any(value is not None for value in (arguments.stdout, arguments.stderr, arguments.probe_status, arguments.probe)):
+            print("Controls workflow validation failed: [workflow-input] process-output arguments do not belong here", file=sys.stderr)
+            return 2
+        return check_controls_path(arguments.workflow)
     if arguments.command == "check-process-output":
         if arguments.stdout is None or arguments.stderr is None or arguments.probe_status is None or arguments.probe is None:
             print("Process output validation failed: [workflow-input] two channels, status, and probe identity are required", file=sys.stderr)

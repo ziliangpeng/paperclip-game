@@ -103,30 +103,31 @@ def validate_repository(root: Path) -> int:
     errors: list[str] = []
     for relative in candidates:
         path = root / relative
+        display_relative = "<credential-shaped path>" if SECRET.search(relative) else relative
         if error := artifact_error(relative):
-            errors.append(f"{relative}: {error}")
+            errors.append(f"{display_relative}: {error}")
             continue
         if CJK.search(relative):
-            errors.append(f"{relative}: non-English CJK filename")
+            errors.append(f"{display_relative}: non-English CJK filename")
         if path.is_symlink() or not path.is_file():
-            errors.append(f"{relative}: public candidate is not a regular readable file")
+            errors.append(f"{display_relative}: public candidate is not a regular readable file")
             continue
         try:
             raw = path.read_bytes()
             text = raw.decode("utf-8")
         except (OSError, UnicodeError):
-            errors.append(f"{relative}: public candidate must be readable UTF-8 text")
+            errors.append(f"{display_relative}: public candidate must be readable UTF-8 text")
             continue
 
         if CJK.search(text):
-            errors.append(f"{relative}: non-English CJK content")
+            errors.append(f"{display_relative}: non-English CJK content")
         if PRIVATE_PATH.search(text):
-            errors.append(f"{relative}: private absolute path or file URL")
+            errors.append(f"{display_relative}: private absolute path or file URL")
         if SECRET.search(text):
-            errors.append(f"{relative}: credential-shaped content")
+            errors.append(f"{display_relative}: credential-shaped content")
         for number, line in enumerate(text.split("\n"), start=1):
             if line.endswith((" ", "\t", "\r")):
-                errors.append(f"{relative}:{number}: trailing whitespace")
+                errors.append(f"{display_relative}:{number}: trailing whitespace")
 
     if errors:
         print("Public hygiene validation failed;", file=sys.stderr)
@@ -172,6 +173,20 @@ def _self_test_cases() -> list[dict[str, object]]:
             "relative": cjk_filename,
             "data": b"ordinary text\n",
             "diagnostic": "non-English CJK filename",
+        },
+        {
+            "name": "credential-shaped-filename-whitespace",
+            "relative": "gh" + "p_" + ("A" * 24) + ".txt ",
+            "data": b"placeholder " + bytes((10,)),
+            "diagnostic": "trailing whitespace",
+            "canary": "gh" + "p_" + ("A" * 24) + ".txt ",
+        },
+        {
+            "name": "credential-shaped-filename-non-utf8",
+            "relative": "gh" + "p_" + ("A" * 24) + ".txt",
+            "data": b"\xff",
+            "diagnostic": "public candidate must be readable UTF-8 text",
+            "canary": "gh" + "p_" + ("A" * 24) + ".txt",
         },
         {
             "name": "private-path",
@@ -245,6 +260,7 @@ def _self_test_cases() -> list[dict[str, object]]:
             "data": private_bytes,
             "diagnostic": "public candidate must be readable UTF-8 text",
             "canary": "synthetic-private-input-canary",
+            "expect_relative_diagnostic": True,
         },
         {
             "name": "symbolic-link",
@@ -321,6 +337,9 @@ def self_test(script: Path) -> int:
                 canary = case.get("canary")
                 if canary is not None and str(canary) in combined:
                     failures.append(f"{name}: offending value was echoed")
+                    continue
+                if case.get("expect_relative_diagnostic") and relative not in completed.stderr:
+                    failures.append(f"{name}: ordinary relative diagnostic path was missing")
                     continue
                 if diagnostic is None:
                     healthy += 1
