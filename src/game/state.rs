@@ -65,6 +65,10 @@ impl GameState {
         }
     }
 
+    pub(crate) fn from_snapshot_parts(pro: ProState, clock: ClockState, rng: GameRng) -> Self {
+        Self { pro, clock, rng }
+    }
+
     /// Read-only observation never advances the game RNG stream.
     pub fn rng_state_hex(&self) -> String {
         self.rng.export_hex()
