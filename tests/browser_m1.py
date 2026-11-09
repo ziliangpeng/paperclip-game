@@ -2125,7 +2125,7 @@ def run_r3_raw_counters_and_diagnostic(binary: Path, executable: str, version: s
         page = browser.new_page("/")[0]
         assert state.fixture_sent[0].wait(8), "R3 healthy fixture baseline"
         baseline = wait_for(lambda: dom_state(page),
-            lambda value: value["revision"] == "1" and value["viewState"] == "ready", "R3 valid baseline")
+            lambda value: value.get("revision") == "1" and value.get("viewState") == "ready", "R3 valid baseline")
         page.evaluate("""(() => {
           window.r3History = [];
           const status = document.getElementById('connection-status');
