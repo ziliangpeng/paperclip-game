@@ -18,6 +18,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import traceback
 from typing import Any, Callable
 
 import check_api_process as api
@@ -385,6 +386,9 @@ def main() -> int:
 if __name__ == "__main__":
     try:
         sys.exit(main())
-    except (AssertionError, OSError, sqlite3.Error, subprocess.SubprocessError, http.client.HTTPException) as error:
-        print(f"persistence process check failed: {type(error).__name__}: {error}", file=sys.stderr)
+    except (AssertionError, OSError, sqlite3.Error, subprocess.SubprocessError, http.client.HTTPException):
+        # Keep failures fatal while preserving their exact source assertion.
+        # A collapsed bare AssertionError cannot expose safe-to-view state or
+        # distinguish the protected rollback and continuation checkpoints.
+        traceback.print_exc()
         sys.exit(1)
