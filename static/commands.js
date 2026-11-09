@@ -1,5 +1,6 @@
 // Strict public command transport for the default game.
 // No command result is a View or a source of resource mutations.
+import {parseTransportJson as parseSharedTransportJson} from "./stream.js";
 
 const COMMAND_TYPE = "make_paperclip";
 const MAX_COMMAND_ID_BYTES = 128;
@@ -7,6 +8,11 @@ const MAX_RESPONSE_BYTES = 16 * 1024;
 
 // Validation failures are distinct from failures to obtain or read a Response.
 class ResponseValidationError extends TypeError {}
+
+// Preserve the command boundary's private error classification with one shared parser.
+export function parseTransportJson(text) {
+  return parseSharedTransportJson(text, ResponseValidationError);
+}
 const textEncoder = new TextEncoder();
 
 function hasExactFields(value, fields) {
@@ -36,6 +42,7 @@ export function makePaperclipCommand(commandId) {
   });
 }
 
+// Preserve every numeric JSON primitive as parsed with its lexical integer rule.
 export async function readBoundedJson(response) {
   if (response.body === null) throw new ResponseValidationError("empty command response");
   const reader = response.body.getReader();
@@ -62,8 +69,9 @@ export async function readBoundedJson(response) {
     offset += chunk.byteLength;
   }
   try {
-    return JSON.parse(new TextDecoder("utf-8", {fatal: true}).decode(body));
+    return parseTransportJson(new TextDecoder("utf-8", {fatal: true}).decode(body));
   } catch (error) {
+    if (error instanceof ResponseValidationError) throw error;
     throw new ResponseValidationError("invalid JSON response");
   }
 }

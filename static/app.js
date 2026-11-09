@@ -1,6 +1,6 @@
 // Native application wiring: server Views are the only resource authority.
 
-import {GameViewSynchronizer, assertCompleteGameView} from "/static/stream.js";
+import {GameViewSynchronizer, assertCompleteGameView, parseTransportJson} from "/static/stream.js";
 import {MakePaperclipCommandRunner, readBoundedJson} from "/static/commands.js";
 import {renderView} from "/static/view-model.js";
 
@@ -14,6 +14,7 @@ let source = null;
 let streamToken = null;
 let initialFrame = true;
 let restartTimer = null;
+let invalidViewDiagnostic = false;
 
 function setCommandStatus(kind, message) {
   if (commandStatus.textContent !== message) commandStatus.textContent = message;
@@ -31,6 +32,8 @@ const synchronizer = new GameViewSynchronizer((view, decision) => {
     renderQueued = false;
     // Read the newest complete View, not a captured intermediate frame.
     renderView(document, synchronizer.current);
+    // Only actually presenting an accepted View clears this diagnosis.
+    invalidViewDiagnostic = false;
     if (decision === "adopted-new-run") {
       setConnectionStatus("Connected to the current server run.");
     } else {
@@ -126,7 +129,9 @@ async function fetchCurrentView() {
     // Adoption, not HTTP success or an ignored lower/equal View, owns recovery text.
     synchronizer.acceptGet(token, view);
   } catch (error) {
-    setConnectionStatus("The current View request failed or arrived too late; waiting for a live server baseline.");
+    if (!invalidViewDiagnostic) {
+      setConnectionStatus("The current View request failed or arrived too late; waiting for a live server baseline.");
+    }
   } finally {
     clearTimeout(timeout);
   }
@@ -161,7 +166,7 @@ function connectStream() {
     const wasInitial = initialFrame;
     let decision;
     try {
-      const view = assertCompleteGameView(JSON.parse(event.data));
+      const view = assertCompleteGameView(parseTransportJson(event.data));
       if (event.lastEventId !== `${view.run_id}:${view.revision}`) {
         throw new TypeError("invalid game_view event ID");
       }
@@ -173,6 +178,7 @@ function connectStream() {
     } catch (error) {
       // Ignore a malformed complete frame and retain the last good View. The
       // next valid full frame can restore this stream without local synthesis.
+      invalidViewDiagnostic = true;
       setConnectionStatus("An invalid server View was ignored; the last valid View is retained.");
       return;
     }

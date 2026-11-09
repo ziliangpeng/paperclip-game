@@ -11,6 +11,7 @@ import hashlib
 import http.client
 import json
 import os
+import re
 from pathlib import Path
 import socket
 import struct
@@ -307,13 +308,14 @@ class ProxyState:
         self.gate_stream_after_baseline: int | None = None
         self.real_stream_held = threading.Event()
         self.real_stream_gate = threading.Event()
-        self.fixture_frames: list[dict[str, Any]] | None = None
+        self.fixture_frames: list[dict[str, Any] | tuple[str, int, bytes]] | None = None
         self.fixture_connections = 0
         self.fixture_sent: list[threading.Event] = []
         self.fixture_release: list[threading.Event] = []
         self.fixture_close = threading.Event()
         self.fixture_get_gate = threading.Event()
         self.fixture_get_delivered = threading.Event()
+        self.fixture_get_body: bytes | None = None
         self.stream_baselines: list[dict[str, Any]] = []
         self.stream_connections = 0
         self.drop_first_stream = False
@@ -406,7 +408,8 @@ def proxy_handler(state: ProxyState) -> type[BaseHTTPRequestHandler]:
                     first = state.fixture_frames[0]
                     # Deliberately deliver the old GET only after the high frame.
                     assert state.fixture_get_gate.wait(8), "fixture high-view GET barrier"
-                    self.finite(200, json_bytes(first), "application/json")
+                    self.finite(200, state.fixture_get_body if state.fixture_get_body is not None
+                    else json_bytes(first), "application/json")
                     state.fixture_get_delivered.set()
                     return
                 body = self.bounded_body()
@@ -556,9 +559,12 @@ def proxy_handler(state: ProxyState) -> type[BaseHTTPRequestHandler]:
             self.end_headers()
             assert state.fixture_frames is not None
             for index, frame in enumerate(state.fixture_frames):
-                view = frame
-                data = json_bytes(view)
-                event = (f"id: {view['run_id']}:{view['revision']}\n"
+                if isinstance(frame, tuple):
+                    run_id, event_revision, data = frame
+                else:
+                    run_id, event_revision = frame["run_id"], frame["revision"]
+                    data = json_bytes(frame)
+                event = (f"id: {run_id}:{event_revision}\n"
                          f"event: game_view\ndata: ").encode() + data + b"\n\n"
                 self.wfile.write(event)
                 self.wfile.flush()
@@ -636,6 +642,23 @@ def fixture_view(template: dict[str, Any], run_id: str, revision: int,
     view["clock"]["update_count"] = revision * 100
     view["game"].update(changes)
     return view
+
+
+def raw_counter_frame(view: dict[str, Any], field: str, token: str) -> tuple[str, int, bytes]:
+    """Alter one actual JSON number token, preserving the whole wire View/event ID."""
+    container = view["clock"] if field == "update_count" else view
+    assert field in {"revision", "schema_version", "update_count"}
+    assert type(container[field]) is int
+    old_number = f'"{field}":{container[field]}'.encode()
+    new_number = f'"{field}":{token}'.encode()
+    assert re.fullmatch(rb"-?(?:0|[1-9][0-9]*)(?:\.[0-9]+|[eE][+-]?[0-9]+)?", token.encode())
+    data = json_bytes(view)
+    assert data.count(old_number) == 1
+    data = data.replace(old_number, new_number)
+    decoded = json.loads(data)
+    changed = decoded["clock"]["update_count"] if field == "update_count" else decoded[field]
+    assert isinstance(changed, (int, float)) and not isinstance(changed, bool)
+    return view["run_id"], view["revision"], data
 
 
 def check_assets_and_negative_commands(page: Cdp, port: int) -> None:
@@ -1168,6 +1191,48 @@ def check_response_boundaries(page: Cdp, closed_port: int) -> dict[str, Any]:
         if (outcome.kind !== 'invalid_response') throw new Error('invalid JSON media accepted: ' + contentType);
       }}
       outcomes.mediaTypes = {{accepted: accepted.length, rejected: rejected.length}};
+      const numericResponseCases = [['applied_float','{{"status":"applied","revision":7.0}}'],['applied_exponent','{{"status":"applied","revision":7e0}}'],['rejected_float','{{"status":"rule_rejected","revision":8.0,"reason":"insufficient_wire"}}'],['rejected_exponent','{{"status":"rule_rejected","revision":8e0,"reason":"insufficient_wire"}}']];
+      const numericResponseResults = {{}};
+      for (const [name, body] of numericResponseCases) {{
+        const events = [];
+        const runner = new MakePaperclipCommandRunner(event => events.push(event), {{fetch: () => response(body)}});
+        const outcome = await runner.run();
+        if (outcome.kind !== 'invalid_response' || runner.pending || !runner.retryAvailable ||
+            events.map(event => event.kind).join(',') !== 'pending,invalid_response') {{
+          throw new Error('noncanonical transport integer accepted: ' + name);
+        }}
+        numericResponseResults[name] = {{...outcome, pending: runner.pending, retry: runner.retryAvailable}};
+      }}
+      const assertNumericTokenRejected = (text) => {{
+        let error = null;
+        try {{ module.parseTransportJson(text); }} catch (caught) {{ error = caught; }}
+        if (!error || !(error instanceof TypeError) || error.constructor.name !== 'ResponseValidationError') {{
+          throw new Error('raw integer token validation: ' + String(error));
+        }}
+      }};
+      assertNumericTokenRejected('{{"revision":7.0}}');
+      assertNumericTokenRejected('{{"revision":7e0}}');
+      if (module.parseTransportJson('7') !== 7) throw new Error('native integer source support');
+      const quotedControl = {{"note":"literal 7.0 and 7e0 and -0 text","large_amount_as_string":"90071992547409930000000000000000000000000000000000001","revision":7}};
+      const quotedParsed = module.parseTransportJson(JSON.stringify(quotedControl));
+      if (quotedParsed.note !== quotedControl.note || quotedParsed.revision !== 7 ||
+          quotedParsed.large_amount_as_string !== quotedControl.large_amount_as_string ||
+          BigInt(quotedParsed.large_amount_as_string) !== BigInt(quotedControl.large_amount_as_string)) {{
+        throw new Error('quoted transport text was reinterpreted as a number');
+      }}
+      const nativeParse = JSON.parse;
+      let missingSourceError = null;
+      try {{
+        // Synchronous fault injection only; no event can run before restoration.
+        JSON.parse = (text, reviver) => nativeParse(text, (key, value) => reviver(key, value));
+        try {{ module.parseTransportJson('{{"revision":7}}'); }} catch (caught) {{ missingSourceError = caught; }}
+      }} finally {{ JSON.parse = nativeParse; }}
+      if (!missingSourceError || !(missingSourceError instanceof TypeError) ||
+          missingSourceError.constructor.name !== 'ResponseValidationError' || JSON.parse !== nativeParse) {{
+        throw new Error('unsupported JSON source metadata did not fail closed');
+      }}
+      outcomes.numericSourceValidation = {{responses: numericResponseResults, acceptedInteger: 7,
+        rejectedRawTokens: ['7.0', '7e0'], quotedTextUnchanged: true, missingSourceRejected: true}};
       const invalidBodies = [
         ['malformed', '{{bad json'], ['empty', ''],
         ['invalidUtf8', new Uint8Array([123, 34, 120, 34, 58, 255, 125])],
@@ -1244,6 +1309,11 @@ def check_response_boundaries(page: Cdp, closed_port: int) -> dict[str, Any]:
       return outcomes;
     }})()""")
     assert result["mediaTypes"] == {"accepted": 3, "rejected": 10}, result["mediaTypes"]
+    numeric = result["numericSourceValidation"]
+    assert set(numeric["responses"]) == {"applied_float", "applied_exponent", "rejected_float", "rejected_exponent"}
+    assert all(outcome["kind"] == "invalid_response" for outcome in numeric["responses"].values())
+    assert numeric["acceptedInteger"] == 7 and numeric["quotedTextUnchanged"] is True
+    assert numeric["missingSourceRejected"] is True and numeric["rejectedRawTokens"] == ["7.0", "7e0"]
     assert set(result["invalidBodies"]) == {"malformed", "empty", "invalidUtf8", "oversize", "nullBody"}, result
     assert result["bodyReadFailure"]["kind"] == "network_error"
     assert "native-body-read-failure" in result["bodyReadFailure"]["message"]
@@ -1741,6 +1811,78 @@ def run_r2_response_and_get(binary: Path, executable: str, version: str) -> dict
             "baseline": baseline, "failureText": failed_get, "heldRealFrame": True,
             "failedDom": failed_dom, "recoveredDom": recovered, "recoveredText": connection,
             "realRevisionBeforeRecovery": before_revision, "realRevisionAfterRecovery": int(recovered["revision"])}
+        # Each raw counter response is rejected with zero backend dispatch, then
+        # the removed fault permits a genuine same-ID/body retry and a real View.
+        numeric_command_cases = [
+            ("applied_float", 200, b'{"status":"applied","revision":7.0}'),
+            ("applied_exponent", 200, b'{"status":"applied","revision":7e0}'),
+            ("rejected_float", 422, b'{"status":"rule_rejected","revision":8.0,"reason":"insufficient_wire"}'),
+            ("rejected_exponent", 422, b'{"status":"rule_rejected","revision":8e0,"reason":"insufficient_wire"}'),
+        ]
+        numeric_command_results = []
+        for name, http_status, response_body in numeric_command_cases:
+            before_game = api.checked_json(client.get()[1])["game"]
+            expected_lifetime = int(before_game["lifetime_clips"]) + 1
+            expected_wire = int(before_game["wire"]) - 1
+            state.next_command_response = {"body": response_body, "content_type": "application/json",
+                                          "status": http_status}
+            attempt_number = len(state.command_records) + 1
+            page.evaluate("document.getElementById('make-paperclip').focus()")
+            page.press("Enter")
+            wait_commands(state, attempt_number)
+            rejected_record = state.command_records[-1]
+            rejected_dom = wait_for(lambda: dom_state(page),
+                lambda value: "response could not be validated" in value.get("status", "") and
+                    value.get("button") == "Retry Make Paperclip", "raw noncanonical command rejection: " + name)
+            exact_rejected = exact_command(rejected_record)
+            assert rejected_record["forwarded"] == 0 and rejected_record["injectedResponse"] is True
+            assert rejected_record["response_status"] == http_status, rejected_record
+            assert rejected_record["responseContentType"] == "application/json"
+            assert exact_rejected["type"] == "make_paperclip" and exact_rejected["arguments"] == {}
+            assert rejected_record["raw"].decode() == json.dumps(exact_rejected, separators=(",", ":"))
+            assert rejected_dom["ariaDisabled"] == "false" and rejected_dom["disabled"] is False
+            assert rejected_dom["focus"] == "make-paperclip" and rejected_dom["viewState"] == "ready"
+            assert int(rejected_dom["lifetime"]) == expected_lifetime - 1
+            assert int(rejected_dom["wire"]) == expected_wire + 1
+            assert "revision 7" not in rejected_dom["status"] and "revision 8" not in rejected_dom["status"]
+            assert api.checked_json(client.get()[1])["game"] == before_game, name
+
+            page.evaluate("document.getElementById('make-paperclip').focus()")
+            page.press("Enter")
+            wait_commands(state, attempt_number + 1)
+            genuine_record = wait_for(lambda: state.command_records[attempt_number],
+                lambda value: value.get("forwarded") == 1 and value.get("response_status") == 200 and
+                    isinstance(value.get("response_body"), dict) and "injectedResponse" not in value,
+                "complete genuine backend POST response after " + name)
+            assert genuine_record["raw"] == rejected_record["raw"]
+            assert genuine_record["json"] == rejected_record["json"]
+            assert exact_command(genuine_record) == exact_rejected
+            assert genuine_record["forwarded"] == 1 and "injectedResponse" not in genuine_record
+            assert genuine_record["response_status"] == 200
+            genuine_receipt = genuine_record["response_body"]
+            assert genuine_receipt["status"] == "applied" and type(genuine_receipt["revision"]) is int
+            recovered_dom = wait_for(lambda: dom_state(page),
+                lambda value: value.get("lifetime") == str(expected_lifetime) and
+                    value.get("wire") == str(expected_wire) and
+                    int(value.get("revision", -1)) >= genuine_receipt["revision"] and
+                    f"revision {genuine_receipt['revision']}" in value.get("status", ""),
+                "genuine retry and later complete View after " + name)
+            server_game = api.checked_json(client.get()[1])["game"]
+            assert server_game["lifetime_clips"] == str(expected_lifetime)
+            assert server_game["wire"] == str(expected_wire)
+            numeric_command_results.append({"case": name, "injectedHttpStatus": http_status,
+                "responseBodyHex": response_body.hex(), "zeroForwardRecord": exact_rejected,
+                "invalidDom": rejected_dom, "serverGameBefore": before_game,
+                "serverUnchangedAfterInvalid": True,
+                "genuineRetry": {"exactSameIdAndRawBody": True, "forwarded": 1,
+                                 "receipt": genuine_receipt, "domAfterRealView": recovered_dom},
+                "serverGameAfterRetry": server_game})
+        result["r3NumericCommandBoundaries"] = {
+            "controls": "four actual UI requests, finite HTTP numeric-source faults, then four genuine same-ID/body retries",
+            "cases": numeric_command_results,
+            "finalServerGame": api.checked_json(client.get()[1])["game"],
+        }
+
     return {**result, "browser": version, "chromeExit": case["chromeExit"], "backendExit": case["backendExit"]}
 
 
@@ -1849,6 +1991,240 @@ def run_r2_connection_lifecycle(binary: Path, executable: str, version: str) -> 
     return {**result, "browser": version, "chromeExit": case["chromeExit"], "backendExit": case["backendExit"]}
 
 
+def run_r3_raw_counters_and_diagnostic(binary: Path, executable: str, version: str) -> dict[str, Any]:
+    """Actual JSON wire grammar and stream-diagnostic ownership in native Chrome."""
+    with isolated_r2_browser(binary, executable, version, "native-r3-raw-counters") as case:
+        state: ProxyState = case["state"]
+        browser: Browser = case["browser"]
+        client: api.Client = case["client"]
+        template = api.checked_json(client.get()[1])
+        get_controls = []
+        for label, raw_token in [("canonical_integer", None), ("revision_1_0", "1.0"), ("revision_1e0", "1e0")]:
+            raw_frame = raw_counter_frame(template, "revision", raw_token) if raw_token is not None else None
+            state.next_get_response = {"body": raw_frame[2] if raw_frame is not None else None,
+                                       "content_type": "application/json"}
+            state.hold_next_get = True
+            state.get_captured.clear()
+            state.get_release.clear()
+            state.get_override_delivered.clear()
+            state.hold_first_stream = True
+            state.first_stream_captured.clear()
+            state.first_stream_release.clear()
+            state.real_stream_held.clear()
+            state.real_stream_gate.clear()
+            state.gate_stream_after_baseline = state.stream_connections + 1
+            page, context, target = browser.new_page("/")
+            assert state.get_captured.wait(8), "genuine backend View captured: " + label
+            assert state.first_stream_captured.wait(8), "native SSE HTTP held before headers: " + label
+            if label == "canonical_integer":
+                state.get_release.set()
+                assert state.get_override_delivered.wait(8), "healthy upstream View delivered"
+                healthy = wait_for(lambda: dom_state(page),
+                    lambda value: value["viewState"] == "ready" and value["lifetime"] == "0" and
+                        value["wire"] == "1000" and value["runId"] == template["run_id"],
+                    "healthy integer GET")
+                get_record = {"case": label, "genuineUpstream": state.get_override_records[-1],
+                    "domBeforeRealStream": healthy}
+                baseline_count = len(state.stream_baselines)
+                state.first_stream_release.set()
+                native_find = wait_for(
+                    lambda: state.stream_baselines[-1] if len(state.stream_baselines) > baseline_count else {},
+                    lambda value: value.get("run_id") == template["run_id"] and type(value.get("revision")) is int and
+                        value.get("game", {}).get("lifetime_clips") == "0" and value.get("game", {}).get("wire") == "1000",
+                    "real full View for healthy GET control", timeout=12)
+                healthy_sse = wait_for(lambda: dom_state(page),
+                    lambda value: value["viewState"] == "ready" and value["lifetime"] == "0" and
+                        int(value["revision"]) >= native_find["revision"], "healthy after GET SSE", timeout=10)
+                assert state.real_stream_held.wait(12), "healthy native next frame physically held"
+                get_record["actualIntegerBaseline"] = native_find
+                get_record["domAfterRealStream"] = healthy_sse
+                get_controls.append(get_record)
+            else:
+                page.evaluate("""(() => {
+                  window.r3GetHistory = [];
+                  const status = document.getElementById('connection-status');
+                  window.r3GetObserver = new MutationObserver(() => window.r3GetHistory.push(status.textContent));
+                  window.r3GetObserver.observe(status, {childList: true, characterData: true, subtree: true});
+                })()""")
+                state.get_release.set()
+                assert state.get_override_delivered.wait(8), "raw counter HTTP response delivered: " + label
+                rejected_history = wait_for(lambda: page.evaluate("window.r3GetHistory.slice()"),
+                    lambda history: any("waiting for a live server baseline" in item for item in history),
+                    "actual malformed numeric GET observation: " + label)
+                rejected_dom = dom_state(page)
+                assert rejected_dom["viewState"] == "loading" and rejected_dom.get("lifetime") is None
+                assert rejected_dom.get("revision") is None and rejected_dom.get("runId") in (None, "")
+                assert all("Connected to the current server run" not in item for item in rejected_history)
+                state.first_stream_release.set()
+                baseline_count = len(state.stream_baselines)
+                native_baseline = wait_for(
+                    lambda: state.stream_baselines[-1] if len(state.stream_baselines) > baseline_count else {},
+                    lambda value: value.get("run_id") == template["run_id"] and
+                        type(value.get("revision")) is int and value["revision"] >= 1 and
+                        value.get("game", {}).get("lifetime_clips") == "0" and value.get("game", {}).get("wire") == "1000",
+                    "actual integer full View after rejected GET: " + label, timeout=12)
+                recovered_dom = wait_for(lambda: dom_state(page),
+                    lambda value: value["viewState"] == "ready" and value.get("lifetime") == "0" and
+                        value.get("wire") == "1000" and value.get("runId") == template["run_id"] and
+                        value.get("revision") is not None and int(value["revision"]) >= native_baseline["revision"],
+                    "native View adoption after rejected GET: " + label)
+                assert state.real_stream_held.wait(12), "healthy native frame physically held after rejected GET"
+                held_history = page.evaluate("window.r3GetHistory.slice()")
+                assert held_history.count("Connected to the current server run.") == 1, held_history
+                assert not any("Newest accepted server View displayed" in item for item in held_history), held_history
+                before_advance = int(recovered_dom["revision"])
+                state.real_stream_gate.set()
+                advanced = wait_for(lambda: dom_state(page),
+                    lambda value: value["viewState"] == "ready" and value.get("revision") is not None and int(value["revision"]) > before_advance,
+                    "legitimate later View after malformed numeric GET", timeout=12)
+                recovered_history = page.evaluate("window.r3GetHistory.slice()")
+                assert recovered_history.count("Newest accepted server View displayed.") == 1, recovered_history
+                assert all("invalid server View" not in item for item in recovered_history), recovered_history
+                get_controls.append({"case": label, "rawToken": raw_token,
+                    "responseSha256": hashlib.sha256(raw_frame[2]).hexdigest(),
+                    "responseLength": len(raw_frame[2]), "injectedHttpStatus": 200,
+                    "httpBeforeStreamOpen": True, "rejectedDom": rejected_dom,
+                    "connectionHistory": recovered_history,
+                    "firstActualIntegerBaseline": native_baseline,
+                    "firstRecoveredDom": recovered_dom, "physicalStreamHeld": True,
+                    "legitimateLaterIntegerDom": advanced,
+                    "serverGame": api.checked_json(client.get()[1])["game"]})
+            # Let the held next healthy frame go, then close only this owned target.
+            state.real_stream_gate.set()
+            browser.browser_connection.call("Target.closeTarget", {"targetId": target})
+            browser.pages.remove(page)
+            page.close()
+        state.gate_stream_after_baseline = None
+        state.real_stream_gate.set()
+
+        run_id = "r3-counter-lifecycle-quoted-7.0-and-7e0"
+        good1 = fixture_view(template, run_id, 1, {})
+        bad2 = fixture_view(template, run_id, 2, {"funds": "1.0"})
+        good2 = fixture_view(template, run_id, 2, {
+            "lifetime_clips": "22", "unsold_clips": "22", "unused_clips": "22", "wire": "978",
+        })
+        counter_specs = [(3, "revision", "3.0"), (4, "revision", "4e0"),
+            (5, "schema_version", "1.0"), (6, "schema_version", "1e0"),
+            (7, "update_count", "1.0"), (8, "update_count", "1e0")]
+        counter_frames = []
+        for revision, field, token in counter_specs:
+            whole = fixture_view(template, run_id, revision, {
+                "lifetime_clips": "22", "unsold_clips": "22", "unused_clips": "22", "wire": "978",
+            })
+            frame = raw_counter_frame(whole, field, token)
+            counter_frames.append(frame)
+        recovery = fixture_view(template, run_id, 9, {
+            "lifetime_clips": "22", "unsold_clips": "22", "unused_clips": "22", "wire": "978",
+        })
+        state.fixture_frames = [good1, bad2, good2, *counter_frames, recovery]
+        state.fixture_get_body = b'{bad json'
+        state.fixture_get_gate.clear()
+        state.fixture_get_delivered.clear()
+        state.fixture_sent = [threading.Event() for _ in state.fixture_frames]
+        state.fixture_release = [threading.Event() for _ in state.fixture_frames]
+        page = browser.new_page("/")[0]
+        assert state.fixture_sent[0].wait(8), "R3 healthy fixture baseline"
+        baseline = wait_for(lambda: dom_state(page),
+            lambda value: value["revision"] == "1" and value["viewState"] == "ready", "R3 valid baseline")
+        page.evaluate("""(() => {
+          window.r3History = [];
+          const status = document.getElementById('connection-status');
+          window.r3Observer = new MutationObserver(() => window.r3History.push(status.textContent));
+          window.r3Observer.observe(status, {childList: true, characterData: true, subtree: true});
+        })()""")
+        state.fixture_release[0].set()
+        assert state.fixture_sent[1].wait(8), "invalid SSE actually sent"
+        invalid_text = wait_for(lambda: page.evaluate("document.getElementById('connection-status').textContent"),
+            lambda value: "invalid server View" in value, "R3 invalid SSE diagnostic")
+        assert dom_state(page) == baseline
+        state.fixture_get_gate.set()
+        assert state.fixture_get_delivered.wait(8), "real malformed GET delivered"
+        settle_dom(page)
+        bad_get_history = page.evaluate("window.r3History.slice()")
+        assert bad_get_history == [invalid_text], bad_get_history
+        assert all("waiting for a live server baseline" not in item for item in bad_get_history)
+        assert dom_state(page) == baseline
+        assert api.checked_json(client.get()[1])["game"] == template["game"]
+        state.fixture_release[1].set()
+        assert state.fixture_sent[2].wait(8)
+        recovered2 = wait_for(lambda: dom_state(page),
+            lambda value: value["revision"] == "2" and value["lifetime"] == "22" and value["wire"] == "978",
+            "valid View after malformed GET")
+        recovery_history = page.evaluate("window.r3History.slice()")
+        stream_held = state.fixture_connections == 1 and not state.fixture_release[2].is_set()
+        assert stream_held is True
+        assert recovery_history == [invalid_text, "Newest accepted server View displayed."], recovery_history
+
+        raw_cases = []
+        for frame_index, (revision, field, token) in enumerate(counter_specs, start=3):
+            state.fixture_release[frame_index - 1].set()
+            assert state.fixture_sent[frame_index].wait(8), f"R3 raw numeric SSE frame {frame_index}"
+            settle_dom(page)
+            snapshot = dom_state(page)
+            assert snapshot["revision"] == "2" and snapshot["lifetime"] == "22" and snapshot["wire"] == "978"
+            assert snapshot["viewState"] == "ready" and snapshot["runId"] == run_id
+            assert page.evaluate("document.getElementById('connection-status').textContent.includes('invalid server View')")
+            frame = counter_frames[frame_index - 3]
+            raw_cases.append({"field": field, "token": token, "canonicalEventId": f"{frame[0]}:{frame[1]}",
+                "rawBodySha256": hashlib.sha256(frame[2]).hexdigest(), "rawBodyHex": frame[2].hex(),
+                "retainedDom": snapshot, "physicalStreamHeld": not state.fixture_release[frame_index].is_set()})
+        final_index = len(state.fixture_frames) - 1
+        state.fixture_release[final_index - 1].set()
+        assert state.fixture_sent[final_index].wait(8)
+        recovered_final = wait_for(lambda: dom_state(page),
+            lambda value: value["revision"] == "9" and value["lifetime"] == "22" and value["wire"] == "978",
+            "higher valid View after raw numeric SSE")
+        final_history = page.evaluate("window.r3History.slice()")
+        stream_held_final = state.fixture_connections == 1 and not state.fixture_release[final_index].is_set()
+        assert stream_held_final is True
+        assert final_history == [invalid_text, "Newest accepted server View displayed.",
+                                 invalid_text, "Newest accepted server View displayed."], final_history
+        numeric_result = {"badAmountSseThenMalformedGet": {
+            "invalidText": invalid_text, "afterGetHistory": bad_get_history,
+            "afterGetDom": baseline, "recoveredDom": recovered2,
+            "afterRecoveryHistory": recovery_history, "diagnosticErasedByBadGet": False,
+            "physicalStreamHeld": stream_held, "serverGame": api.checked_json(client.get()[1])["game"]},
+            "rawNumericSse": raw_cases, "validHigherView": recovered_final,
+            "fullHistoryBeforeRealBackend": final_history, "physicalStreamHeldAtFinal": stream_held_final}
+        state.fixture_release[final_index].set()
+        state.fixture_frames = None
+        state.fixture_close.set()
+        actual_baseline = wait_for(lambda: dom_state(page),
+            lambda value: value["runId"] == template["run_id"] and value["viewState"] == "ready" and
+                value["lifetime"] == "0" and value["wire"] == "1000", "real backend View after fixtures", timeout=12)
+        assert api.checked_json(client.get()[1])["game"] == template["game"]
+        state.hold_commands = True
+        state.command_release.clear()
+        page.evaluate("document.getElementById('make-paperclip').focus()")
+        page.press("Enter")
+        wait_commands(state, 1)
+        pending = wait_for(lambda: dom_state(page),
+            lambda value: "Command pending" in value["status"] and value["ariaDisabled"] == "true" and
+                value["disabled"] is False and value["focus"] == "make-paperclip", "owned real command pending")
+        state.hold_commands = False
+        state.command_release.set()
+        actual_command = wait_for(lambda: state.command_records[0],
+            lambda value: value.get("forwarded") == 1 and value.get("response_status") == 200 and
+                isinstance(value.get("response_body"), dict) and value["response_body"].get("status") == "applied",
+            "real post-fixture command completion")
+        genuine = wait_for(lambda: dom_state(page),
+            lambda value: value["lifetime"] == "1" and value["wire"] == "999" and
+                int(value["revision"]) >= actual_command["response_body"]["revision"] and
+                f"revision {actual_command['response_body']['revision']}" in value["status"],
+            "real command and real newest View after numeric/lifecycle controls")
+        server_game = api.checked_json(client.get()[1])["game"]
+        assert server_game["lifetime_clips"] == "1" and server_game["wire"] == "999"
+        assert not state.errors, state.errors[:10]
+        numeric_result["postRecoveryRealBackendCommand"] = {"before": actual_baseline, "pending": pending,
+            "request": exact_command(actual_command), "sameCanonicalEnvelope": True, "forwarded": 1,
+            "receipt": actual_command["response_body"], "dom": genuine, "serverGame": server_game}
+        numeric_result["genuineBackendBeforeFixturesWasUnchanged"] = template["game"]
+    return {"moduleAndTransport": "shared commands.js parser for native command/GET/EventSource",
+            "realRawGetControls": get_controls,
+            "fixtureAuthority": "explicit transport bytes, not server commands or resource credits", **numeric_result,
+            "browser": version, "chromeExit": case["chromeExit"], "backendExit": case["backendExit"]}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("binary", type=Path)
@@ -1872,6 +2248,8 @@ def main() -> int:
     print("NATIVE_R2_RESPONSE_EVIDENCE=" + json.dumps(response_result, separators=(",", ":")))
     lifecycle_result = run_r2_connection_lifecycle(binary, executable, version)
     print("NATIVE_R2_LIFECYCLE_EVIDENCE=" + json.dumps(lifecycle_result, separators=(",", ":")))
+    r3_result = run_r3_raw_counters_and_diagnostic(binary, executable, version)
+    print("NATIVE_R3_COUNTER_DIAGNOSTIC_EVIDENCE=" + json.dumps(r3_result, separators=(",", ":")))
     worktree = Path(__file__).resolve().parent.parent
     started = time.perf_counter()
     with tempfile.TemporaryDirectory(prefix="paperclip-native-ui-browser-") as temporary_name:
@@ -1912,6 +2290,7 @@ def main() -> int:
                 "status": "pass", "browser": version, "independentBrowserContexts": 2,
                 "startup": startup_result, "main": main_result,
                 "numericOrdering": numeric_result, "recovery": recovery_result,
+                "r3CounterDiagnostic": r3_result,
                 "durationSeconds": round(time.perf_counter() - started, 3),
             }
             print("NATIVE_UI_BROWSER_SUMMARY=" + json.dumps(summary, separators=(",", ":")))
