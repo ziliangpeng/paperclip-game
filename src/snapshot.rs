@@ -330,12 +330,18 @@ fn validate_current_pro(state: &ProState) -> Result<(), SnapshotError> {
             return Err(SnapshotError::DomainViolation);
         }
     }
-    // These fields are not three disjoint physical inventories to sum. G01's
-    // ordinary production keeps Unused == Lifetime and Unsold is a subset of it.
-    // Sales transfer Unsold to the sold ledger without changing either production counter.
+    // These are conserved ledgers, not disjoint physical inventories: production
+    // increments all three, then sales transfer Unsold into ClipsSold.
+    // Equivalent to Unsold + ClipsSold == Lifetime, using checked nonnegative
+    // arithmetic rather than overflow-prone fixed-width addition.
+    let expected_sold = state
+        .lifetime_clips
+        .checked_sub(&state.unsold_clips)
+        .map_err(|_| SnapshotError::DomainViolation)?;
     if state.unused_clips != state.lifetime_clips
         || state.unsold_clips > state.unused_clips
         || state.clips_sold > state.lifetime_clips
+        || expected_sold != state.clips_sold
     {
         #[cfg(test)]
         eprintln!(
@@ -518,9 +524,11 @@ mod tests {
         .unwrap()
         .nonnegative()
         .unwrap();
-        state.pro.unsold_clips = Amount::parse("0.000000000000000001")
-            .unwrap()
-            .nonnegative()
+        state.pro.clips_sold = Amount::parse("42.5").unwrap().nonnegative().unwrap();
+        state.pro.unsold_clips = state
+            .pro
+            .lifetime_clips
+            .checked_sub(&state.pro.clips_sold)
             .unwrap();
         state.pro.unused_clips = Amount::parse(
             "30000000000000000000000000000000000000000000000000000001.000000000000000001",
@@ -545,6 +553,15 @@ mod tests {
         state.pro.auto_clipper_revealed = true;
         state.pro.auto_clippers = IntegralAmount::from_i128(7);
         state.pro.auto_clipper_cost = Amount::parse("6.21").unwrap();
+        state.pro.income = Amount::parse("456.789").unwrap();
+        state.pro.last_sale_revenue = Amount::parse("3.002").unwrap();
+        state.pro.wire_base_price = Amount::parse("19.876543210123456789").unwrap();
+        state.pro.wire_price_counter = SafeU64::new(17).unwrap();
+        state.pro.wire_purchase_count = SafeU64::new(9).unwrap();
+        state.pro.wire_inactivity_ticks = SafeU64::new(231).unwrap();
+        state.pro.marketing_effectiveness = Amount::parse("1.125").unwrap();
+        state.pro.demand_boost = Amount::parse("1.25").unwrap();
+        state.pro.prestige_u = IntegralAmount::from_i128(7);
         refresh_demand(&mut state.pro).unwrap();
         state.clock = ClockState::from_snapshot_parts(251, 1, 51, 1, 14_000_000, 156).unwrap();
         state
@@ -858,7 +875,22 @@ mod tests {
 
     #[test]
     fn version_one_migration_retains_state_and_continues_identically() {
-        let original = rich_state();
+        // V1 predates every G02 sales/Wire-modifier field. A valid fixture has
+        // all production still Unsold; later migration must not infer missing sales.
+        let mut original = rich_state();
+        original.pro.unsold_clips = original.pro.lifetime_clips.clone();
+        original.pro.clips_sold = NonNegativeAmount::zero();
+        original.pro.income = Amount::zero();
+        original.pro.last_sale_revenue = Amount::zero();
+        original.pro.marketing_effectiveness = Amount::from_i128(1);
+        original.pro.demand_boost = Amount::from_i128(1);
+        original.pro.prestige_u = IntegralAmount::from_i128(0);
+        original.pro.wire_base_price = Amount::from_i128(20);
+        original.pro.wire_price_counter = SafeU64::new(0).unwrap();
+        original.pro.wire_purchase_count = SafeU64::new(0).unwrap();
+        original.pro.wire_inactivity_ticks = SafeU64::new(0).unwrap();
+        original.pro.wire_quote = Amount::from_i128(17);
+        refresh_demand(&mut original.pro).unwrap();
         let current = Snapshot::capture(&original, 77).unwrap();
         let original_pro = ProSnapshotV1 {
             lifetime_clips: current.pro.lifetime_clips.clone(),
@@ -891,6 +923,7 @@ mod tests {
         assert_eq!(migrated.pro.lifetime_clips, current.pro.lifetime_clips);
         assert_eq!(migrated.pro.funds, current.pro.funds);
         assert_eq!(migrated.pro.wire_quote, current.pro.wire_quote);
+        assert_eq!(migrated.pro.wire_quote.to_string(), "17");
         assert_eq!(migrated.rng_state, current.rng_state);
         assert_eq!(migrated.pro.clips_sold, NonNegativeAmount::zero());
         assert_eq!(migrated.pro.income, Amount::zero());
@@ -906,7 +939,70 @@ mod tests {
             assert_same_state(&uninterrupted, &restored);
         }
         assert_eq!(restored.clock, uninterrupted.clock);
+        assert!(restored.pro.clips_sold > NonNegativeAmount::zero());
+        assert!(restored.pro.income > Amount::zero());
+        assert!(restored.pro.last_sale_revenue > Amount::zero());
+        assert_eq!(restored.pro.wire_inactivity_ticks.get(), 20);
         assert!(format!("{:?}", SnapshotError::DomainViolation).contains("DomainViolation"));
+    }
+
+    #[test]
+    fn nondefault_v2_economy_continuation_is_identical_after_restore() {
+        let original = rich_state();
+        let snapshot = Snapshot::capture(&original, 88).unwrap();
+        let encoded = snapshot.to_canonical_bytes().unwrap();
+        let mut restored = Snapshot::from_canonical_bytes(&encoded)
+            .unwrap()
+            .restore()
+            .unwrap()
+            .state;
+        let mut uninterrupted = original.clone();
+        assert_same_state(&uninterrupted, &restored);
+        assert_eq!(restored.pro.clips_sold.to_string(), "42.5");
+        assert_eq!(restored.pro.income.to_string(), "456.789");
+        assert_eq!(restored.pro.last_sale_revenue.to_string(), "3.002");
+        assert_eq!(
+            restored.pro.wire_base_price.to_string(),
+            "19.876543210123456789"
+        );
+        assert_eq!(restored.pro.wire_price_counter.get(), 17);
+        assert_eq!(restored.pro.wire_purchase_count.get(), 9);
+        assert_eq!(restored.pro.wire_inactivity_ticks.get(), 231);
+        assert!(restored.pro.demand > NonNegativeAmount::from_i128(100).unwrap());
+        for _ in 0..250 {
+            let left = uninterrupted.clock.advance().unwrap();
+            let right = restored.clock.advance().unwrap();
+            assert_eq!(left, right);
+            if left.fast_due {
+                advance_fast_phase(&mut uninterrupted).unwrap();
+                advance_fast_phase(&mut restored).unwrap();
+            }
+            assert_same_state(&uninterrupted, &restored);
+        }
+        assert!(
+            restored.pro.clips_sold
+                > NonNegativeAmount::new(Amount::parse("42.5").unwrap()).unwrap()
+        );
+        assert!(restored.pro.income > Amount::parse("456.789").unwrap());
+        assert!(restored.pro.last_sale_revenue > Amount::zero());
+        assert!(restored.pro.wire_inactivity_ticks.get() < 20);
+    }
+
+    #[test]
+    fn v2_conservation_rejects_vanished_clips_and_accepts_a_conserved_ledger() {
+        let healthy = Snapshot::capture(&rich_state(), 11).unwrap();
+        let canonical = healthy.to_canonical_bytes().unwrap();
+        Snapshot::from_canonical_bytes(&canonical)
+            .unwrap()
+            .restore()
+            .unwrap();
+        let mut vanished = healthy;
+        vanished.pro.unsold_clips = NonNegativeAmount::zero();
+        vanished.pro.clips_sold = NonNegativeAmount::zero();
+        assert_eq!(
+            vanished.to_canonical_bytes(),
+            Err(SnapshotError::DomainViolation)
+        );
     }
 
     #[test]

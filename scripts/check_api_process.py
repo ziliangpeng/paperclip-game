@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import argparse
+from decimal import Decimal
 import http.client
 import json
 import re
@@ -99,7 +100,8 @@ def assert_production(view: dict[str, Any], wire: str, clips: str,
     assert all(isinstance(game[key], str) and amount_pattern.fullmatch(game[key]) for key in amount_fields), (
         "every public Amount must remain an exact JSON string"
     )
-    assert int(game["unsold_clips"]) + int(game["clips_sold"]) == int(clips), (
+    assert (Decimal(game["unsold_clips"]) + Decimal(game["clips_sold"])
+            == Decimal(clips)), (
         "sales transfer only Unsold into the sold ledger", game
     )
     assert game == expected, (game, expected)

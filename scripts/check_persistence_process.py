@@ -13,6 +13,7 @@ import http.client
 import json
 from pathlib import Path
 import re
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -455,6 +456,76 @@ def check_sqlite_fault_and_health(binary: Path, temporary: Path) -> None:
         process.force_stop()
 
 
+def check_v2_conservation_startup_rejection(binary: Path, temporary: Path) -> None:
+    """Exercise a private tampered media copy, not a remote command attack."""
+    database = temporary / "conservation-healthy.sqlite3"
+    process, port, client = launch(binary, database, temporary, "conservation-healthy")
+    try:
+        for index in range(8):
+            status, body = client.make(f"v2-conservation-real-production-{index}")
+            assert status == 200 and api.checked_json(body)["status"] == "applied"
+        healthy_view = api.checked_json(client.get()[1])
+        assert healthy_view["game"]["lifetime_clips"] == "8"
+        stop_checked(process, client, port, temporary, "conservation-healthy")
+    finally:
+        client.close()
+        process.force_stop()
+    healthy = read_snapshot(database)
+    healthy_bytes = database.read_bytes()
+    assert Decimal(healthy["pro"]["lifetime_clips"]) > 0
+    assert Decimal(healthy["pro"]["unsold_clips"]) + Decimal(healthy["pro"]["clips_sold"]) == Decimal(healthy["pro"]["lifetime_clips"])
+
+    damaged = temporary / "conservation-damaged.sqlite3"
+    shutil.copyfile(database, damaged)
+    connection = sqlite3.connect(damaged)
+    try:
+        canonical = connection.execute(
+            "SELECT payload, checksum FROM game_snapshot WHERE slot = 'default'"
+        ).fetchone()
+        assert canonical is not None and hashlib.sha256(canonical[0].encode()).hexdigest() == canonical[1]
+        payload = json.loads(canonical[0])
+        payload["pro"]["unsold_clips"] = "0"
+        payload["pro"]["clips_sold"] = "0"
+        tampered = json.dumps(payload, separators=(",", ":")).encode()
+        connection.execute(
+            "UPDATE game_snapshot SET payload = ?, checksum = ? WHERE slot = 'default'",
+            (tampered.decode(), hashlib.sha256(tampered).hexdigest()),
+        )
+        assert connection.total_changes == 1
+        connection.commit()
+    finally:
+        connection.close()
+    # Startup must reject this fully canonical/checksum-matching V2 ledger.
+    damaged_bytes = damaged.read_bytes()
+    completed = subprocess.run(
+        [str(binary), "--listen-addr", "127.0.0.1:0", "--database-path", str(damaged)],
+        cwd=temporary,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=10,
+        check=False,
+    )
+    assert completed.returncode == 1, completed.returncode
+    assert completed.stdout == b""
+    assert completed.stderr == b"paperclip-game: persistence startup failed: invalid snapshot: snapshot field violates its numeric domain\n"
+    assert damaged.read_bytes() == damaged_bytes
+    assert database.read_bytes() == healthy_bytes
+
+    # The independently conserved positive control must still run/restart normally.
+    reopened, reopened_port, reopened_client = launch(binary, database, temporary, "conservation-reopen")
+    try:
+        reopened_view = api.checked_json(reopened_client.get()[1])
+        assert reopened_view["run_id"] != healthy_view["run_id"]
+        for field in ("lifetime_clips", "unsold_clips", "unused_clips", "clips_sold"):
+            assert reopened_view["game"][field] == healthy["pro"][field]
+        stop_checked(reopened, reopened_client, reopened_port, temporary, "conservation-reopen")
+    finally:
+        reopened_client.close()
+        reopened.force_stop()
+    print("process startup: checksum-valid V2 sales-ledger mismatch rejected; original row preserved; healthy reopen passed")
+
+
 def check_real_kill_and_repeated_restart(binary: Path, temporary: Path) -> None:
     database = temporary / "crash.sqlite3"
     run_ids = []
@@ -540,6 +611,7 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="paperclip-game-persistence-check-") as temporary_name:
         temporary = Path(temporary_name)
         check_corrupt_startup(binary, temporary)
+        check_v2_conservation_startup_rejection(binary, temporary)
         check_sqlite_fault_and_health(binary, temporary)
         check_real_kill_and_repeated_restart(binary, temporary)
     print(f"persistence process checks passed in {time.perf_counter() - started:.3f}s")

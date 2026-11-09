@@ -621,6 +621,10 @@ def dom_state(page: Cdp) -> dict[str, Any]:
       price: document.getElementById('price-per-clip').dataset.canonical,
       marketingLevel: document.getElementById('marketing-level').dataset.canonical,
       demand: document.getElementById('demand').dataset.canonical,
+      demandValue: document.getElementById('demand').value,
+      demandVisible: document.getElementById('demand').textContent,
+      demandTooltip: document.getElementById('demand').title,
+      demandRow: document.getElementById('demand').closest('tr').textContent,
       marketingCost: document.getElementById('marketing-cost').dataset.canonical,
       clipsSold: document.getElementById('clips-sold').dataset.canonical,
       income: document.getElementById('income').dataset.canonical,
@@ -679,11 +683,67 @@ def fixture_view(template: dict[str, Any], run_id: str, revision: int,
 
 
 def assert_only_wire_quote_can_advance(actual: dict[str, Any], expected: dict[str, Any]) -> None:
-    """Protect genuine resources from fixture writes while market time can advance."""
+    """Allow market time and fully accounted sales, not fixture resource writes."""
+    from decimal import Decimal
+
     api.assert_production({"game": actual}, actual["wire"], actual["lifetime_clips"], actual)
     unchanged = dict(expected)
     unchanged["wire_quote"] = actual["wire_quote"]
+    sold_delta = Decimal(actual["clips_sold"]) - Decimal(expected["clips_sold"])
+    assert sold_delta >= 0, (actual, expected)
+    if sold_delta:
+        # These checkpoints precede every Price/Marketing action. Production is
+        # frozen, so only integer inventory and the server's two-clip batches at
+        # .25 are admissible. Partial batches can occur only when stock empties.
+        assert expected["price_per_clip"] == "0.25" and expected["demand"] == "3.2"
+        assert sold_delta == Decimal(expected["unsold_clips"]) - Decimal(actual["unsold_clips"])
+        assert sold_delta == sold_delta.to_integral_value()
+        assert Decimal("0") <= Decimal(actual["unsold_clips"]) <= Decimal(expected["unsold_clips"])
+        revenue_delta = Decimal(actual["income"]) - Decimal(expected["income"])
+        funds_delta = Decimal(actual["funds"]) - Decimal(expected["funds"])
+        assert revenue_delta == funds_delta == sold_delta * Decimal("0.25")
+        if Decimal(actual["unsold_clips"]) == 0:
+            last_batch = Decimal(sold_delta % 2 or 2)
+        else:
+            assert sold_delta % 2 == 0, (actual, expected)
+            last_batch = Decimal("2")
+        assert Decimal(actual["last_sale_revenue"]) == last_batch * Decimal("0.25")
+        for field in ("unsold_clips", "clips_sold", "funds", "income", "last_sale_revenue"):
+            unchanged[field] = actual[field]
     assert actual == unchanged, (actual, unchanged)
+
+
+def checkpoint_sale_controls(template: dict[str, Any]) -> dict[str, Any]:
+    """Deterministic controls on private dictionaries; never mutate real UI/server state."""
+    from copy import deepcopy
+
+    before = deepcopy(template)
+    before.update({"lifetime_clips": "2", "unsold_clips": "2", "unused_clips": "2",
+                   "wire": "998", "funds": "0", "clips_sold": "0", "income": "0",
+                   "last_sale_revenue": "0"})
+    no_sale = deepcopy(before)
+    no_sale["wire_quote"] = "21"
+    assert_only_wire_quote_can_advance(no_sale, before)
+    sale = deepcopy(no_sale)
+    sale.update({"unsold_clips": "0", "clips_sold": "2",
+                 "funds": "0.5", "income": "0.5", "last_sale_revenue": "0.5"})
+    assert_only_wire_quote_can_advance(sale, before)
+
+    def rejected(changed: dict[str, Any]) -> bool:
+        try:
+            assert_only_wire_quote_can_advance(changed, before)
+        except AssertionError:
+            return True
+        raise AssertionError("checkpoint guard accepted a deliberately wrong mutation")
+
+    wrong_money = deepcopy(sale)
+    wrong_money["funds"] = "0.51"
+    wrong_unrelated = deepcopy(sale)
+    wrong_unrelated["auto_clippers"] = "1"
+    return {"noSaleAccepted": True, "genuineTwoClipSaleAccepted": True,
+            "wrongFundsRejected": rejected(wrong_money),
+            "wrongUnrelatedStateRejected": rejected(wrong_unrelated)}
+
 
 
 def raw_counter_frame(view: dict[str, Any], field: str, token: str) -> tuple[str, int, bytes]:
@@ -1101,7 +1161,7 @@ def run_startup_feedback_and_cleanup(binary: Path, executable: str, version: str
 def run_business_flow(browser: Browser, state: ProxyState, agent: api.Client,
                       page1: Cdp, page2: Cdp) -> dict[str, Any]:
     """Genuine native controls, production, stochastic sales and procurement."""
-    from decimal import Decimal
+    from decimal import Decimal, localcontext
     import time as clock
 
     started = clock.monotonic()
@@ -1164,6 +1224,29 @@ def run_business_flow(browser: Browser, state: ProxyState, agent: api.Client,
         for page in (page1, page2):
             wait_for(lambda page=page: dom_state(page), predicate, description)
 
+    demand_presentations = []
+
+    def assert_public_demand(raw: str, price: str, level: str, label: str) -> dict[str, str]:
+        # Independently scale the exact canonical string; no browser rounding or
+        # dataset-only assertion substitutes for reading the visible unit/value.
+        with localcontext() as context:
+            context.prec = len(raw) + 20
+            # Preserve the exact digits while applying canonical trailing-zero formatting.
+            scaled = format((Decimal(raw) * 10).normalize(), "f")
+        integer, dot, fraction = scaled.partition(".")
+        visible = f"{int(integer):,}{dot}{fraction}%"
+        assert_both_pages(lambda value: value["price"] == price and
+                          value["marketingLevel"] == level and
+                          value["demand"] == raw and value["demandValue"] == raw and
+                          value["demandVisible"] == visible and
+                          value["demandTooltip"] == visible and
+                          "".join(value["demandRow"].split()) == f"PublicDemand{visible}",
+                          f"actual {label} raw and visible Public Demand on both pages")
+        record = {"case": label, "rawDemand": raw, "price": price,
+                  "marketingLevel": level, "visibleDemand": visible}
+        demand_presentations.append(record)
+        return record
+
     def replay_rejection(record: dict[str, Any]) -> None:
         count = len(state.command_records)
         connection = http.client.HTTPConnection("127.0.0.1", browser.origin_port, timeout=8)
@@ -1188,6 +1271,10 @@ def run_business_flow(browser: Browser, state: ProxyState, agent: api.Client,
     assert_both_pages(lambda value: value.get("viewState") == "ready" and
                       value["lifetime"] == "0" and value["wire"] == "1000",
                       "loaded genuine business command forms before first activation")
+    # Only read all Demand DOM fields after the established readiness gate:
+    # an unset dataset canonical is deliberately absent from dom_state JSON.
+    # Initial raw demand 3.2 is a different contract from its visible 32%.
+    assert_public_demand("3.2", "0.25", "1", "initial")
     failed_wire = press("buy_wire", page1, 422)
     failed_marketing = press("buy_marketing", page2, 422)
     for record in (failed_wire, failed_marketing):
@@ -1234,6 +1321,15 @@ def run_business_flow(browser: Browser, state: ProxyState, agent: api.Client,
                       int(value["revision"]) >= expected_revision,
                       "serialized price cancellation on both pages")
 
+    # Isolate visible price transitions after preserving the held/cancel checks.
+    # These are two real zero-argument commands, not local price/demand fixtures.
+    lower_records = [press("lower_price", page1)]
+    lower_price_state = current()["game"]
+    assert lower_price_state["price_per_clip"] == "0.24"
+    assert_public_demand(lower_price_state["demand"], "0.24", "1", "lowered price")
+    raise_records = [press("raise_price", page2)]
+    assert_public_demand("3.2", "0.25", "1", "raised price")
+
     # Two actual Make commands precede exactly 998 additional public API commands.
     press("make_paperclip", page1)
     press("make_paperclip", page2)
@@ -1259,7 +1355,7 @@ def run_business_flow(browser: Browser, state: ProxyState, agent: api.Client,
                       "both pages reflect actual production and any real sales")
     print("native commerce: 2 native + 998 API production commands, Wire exhausted", flush=True)
 
-    lower_records = [press("lower_price") for _ in range(21)]
+    lower_records.extend(press("lower_price") for _ in range(21))
     assert_both_pages(lambda value: value["price"] == "0.04" and value["marketingCost"] == "100",
                       "21 genuine lower-price commands on both pages")
     for _ in range(3):
@@ -1268,9 +1364,11 @@ def run_business_flow(browser: Browser, state: ProxyState, agent: api.Client,
     assert minimum["response_body"]["reason"] == "price_at_minimum"
     assert_both_pages(lambda value: value["price"] == "0.01" and value["demand"] == "80",
                       "exact minimum price and Demand on both pages")
-    raise_records = [press("raise_price") for _ in range(3)]
+    assert_public_demand("80", "0.01", "1", "minimum price")
+    raise_records.extend(press("raise_price") for _ in range(3))
     assert_both_pages(lambda value: value["price"] == "0.04",
                       "native raise-price controls return to the working price")
+    assert_public_demand("20", "0.04", "1", "working price")
 
     # With zero purchases Wire base never grows: initial 20 plus +/-6 and ceiling
     # gives a first-price upper budget of 26. Every dollar comes from real sales.
@@ -1363,6 +1461,8 @@ def run_business_flow(browser: Browser, state: ProxyState, agent: api.Client,
     marketing_charge = Decimal(marketing_before["funds"]) + sale_delta - Decimal(marketing_after["game"]["funds"])
     assert marketing_charge == Decimal("100")
     assert Decimal(marketing_after["game"]["demand"]) > Decimal(marketing_before["demand"])
+    assert marketing_after["game"]["demand"] == "22"
+    assert_public_demand("22", "0.04", "2", "Marketing level 2")
     assert_both_pages(lambda value: value["marketingLevel"] == "2" and
                       value["marketingCost"] == "200" and
                       value["demand"] == marketing_after["game"]["demand"],
@@ -1392,6 +1492,7 @@ def run_business_flow(browser: Browser, state: ProxyState, agent: api.Client,
         "income": final["game"]["income"], "funds": final["game"]["funds"],
         "wireRemaining": final["game"]["wire"], "price": final["game"]["price_per_clip"],
         "demand": final["game"]["demand"], "marketingCost": final["game"]["marketing_cost"],
+        "publicDemandPresentation": demand_presentations,
         "twoIndependentPages": True, "nativeCommandCountThroughProxy": len(state.command_records),
         "durationSeconds": round(clock.monotonic() - started, 3),
     }
@@ -1411,8 +1512,33 @@ def run_business_native_evidence(binary: Path, executable: str, version: str) ->
 
 def run_main_ui(browser: Browser, state: ProxyState, backend_port: int, page1: Cdp, page2: Cdp) -> dict[str, Any]:
     check_assets_and_negative_commands(page1, browser.origin_port)
-    first = wait_for(lambda: dom_state(page1), lambda value: value.get("viewState") == "ready", "page one baseline")
-    second = wait_for(lambda: dom_state(page2), lambda value: value.get("viewState") == "ready", "page two baseline")
+    def page_with_observed_server_quote(page: Cdp) -> dict[str, Any] | None:
+        def real_view() -> dict[str, Any]:
+            client = api.Client(backend_port)
+            try:
+                view = api.checked_json(client.get()[1])
+                # The real initial stock is fixed; only the live Wire quote is temporal.
+                api.assert_production(view, "1000", "0", view["game"])
+                return view
+            finally:
+                client.close()
+        before = real_view()
+        candidate = dom_state(page)
+        if candidate.get("viewState") != "ready":
+            return None
+        after = real_view()
+        observed_quotes = {before["game"]["wire_quote"], after["game"]["wire_quote"]}
+        # The clock cannot be paused. Bind the DOM to a genuinely read server
+        # quote in the API/DOM/API window, never to an invented numeric range.
+        if candidate.get("wireQuote") not in observed_quotes:
+            return None
+        if candidate.get("runId") != before["run_id"] or before["run_id"] != after["run_id"]:
+            return None
+        return {**candidate, "observedServerWireQuotes": sorted(observed_quotes)}
+    first = wait_for(lambda: page_with_observed_server_quote(page1), bool,
+                     "page one baseline and actual server Wire quote")
+    second = wait_for(lambda: page_with_observed_server_quote(page2), bool,
+                      "page two baseline and actual server Wire quote")
     assert first["runId"] == second["runId"] and first["lifetime"] == second["lifetime"] == "0"
     initial_client = api.Client(backend_port)
     initial_view = api.checked_json(initial_client.get()[1])
@@ -1431,7 +1557,8 @@ def run_main_ui(browser: Browser, state: ProxyState, backend_port: int, page1: C
         assert baseline["headlineText"] == "0" and baseline["headlineTooltip"] == "0"
         assert baseline["unsold"] == baseline["unused"] == "0"
         assert baseline["funds"] == "0" and baseline["wire"] == "1000"
-        assert baseline["spool"] == "1000" and baseline["wireQuote"] == "20"
+        assert baseline["spool"] == "1000"
+        assert baseline["wireQuote"] in baseline["observedServerWireQuotes"]
         assert baseline["price"] == "0.25" and baseline["marketingLevel"] == "1"
         assert baseline["trust"] == "2" and baseline["processors"] == baseline["memory"] == "1"
         assert baseline["computingHidden"] and baseline["autoClippersHidden"]
@@ -1467,8 +1594,13 @@ def run_main_ui(browser: Browser, state: ProxyState, backend_port: int, page1: C
     after_one_client.close()
     assert after_one["run_id"] == initial_view["run_id"]
     api.assert_production(after_one, "999", "1", after_one["game"])
-    assert after_one["game"]["wire"] == "999" and after_one["game"]["funds"] == "0"
-    for field in ("wire_spool_length", "wire_quote", "price_per_clip", "marketing_level",
+    # A genuine sale may follow the applied frame before this newer API read.
+    # First account for exactly one manual production, then prove any sale.
+    before_post_production_sales = {**initial_view["game"], "lifetime_clips": "1",
+                                     "unsold_clips": "1", "unused_clips": "1", "wire": "999"}
+    assert_only_wire_quote_can_advance(after_one["game"], before_post_production_sales)
+    assert after_one["game"]["wire"] == "999"
+    for field in ("wire_spool_length", "price_per_clip", "marketing_level",
                   "trust", "processors", "memory", "auto_clippers", "auto_clipper_cost"):
         assert after_one["game"][field] == initial_view["game"][field], field
     assert records[0]["response_status"] == 200 and records[0]["response_body"]["status"] == "applied"
@@ -1583,7 +1715,7 @@ def run_main_ui(browser: Browser, state: ProxyState, backend_port: int, page1: C
 
     return {"commandsThroughUIProxy": len(state.command_records), "twoPageConvergedClips": "1000",
             "firstManualCommand": {"lifetime": "0->1", "unsold": "0->1", "unused": "0->1",
-                                   "wire": "1000->999", "funds": "0", "headline": "0->1"},
+                                   "wire": "1000->999", "funds": after_one["game"]["funds"], "headline": "0->1"},
             "pendingGrantedNothing": True, "serverAndBothPagesMatched": True,
             "agentAppliedCommands": 995, "sameIdRetryAppliedOnce": True,
             "realRuleRejections": 1, "apiConflicts": 1, "typedProxyConflicts": 1,
@@ -1769,6 +1901,14 @@ def check_numeric_helpers(page: Cdp, worktree: Path) -> dict[str, Any]:
       check(display.formatAmountForDisplay('6.1', {currency: true}) === '6.10', 'currency minimum two digits');
       check(display.formatAmountForDisplay('6.331', {currency: true}) === '6.331', 'no cent rounding');
       check(display.formatAmountForDisplay('-41117.99', {currency: true}) === '-41,117.99', 'signed currency grouping');
+      const demandPercentChecks = [
+        ['3.2', '32%'], ['3.52', '35.2%'], ['22', '220%'], ['80', '800%'],
+        ['0.000000000000000001', '0.00000000000000001%'],
+        ['9007199254740993', '90,071,992,547,409,930%'],
+      ];
+      for (const [raw, expected] of demandPercentChecks) {
+        check(display.formatDemandPercent(raw) === expected, 'exact Public Demand percent ' + raw);
+      }
       const invalid = ['', '-0', '+1', '01', '1.0', '.5', '1.', '1e3', ' 1', '1 ', '1\\n',
         '\\uFF11\\uFF12', 'NaN', 'Infinity', '0.0000000000000000000', '1.2345678901234567890',
         '1,000', 1, '1.000000000000000000'];
@@ -1780,9 +1920,12 @@ def check_numeric_helpers(page: Cdp, worktree: Path) -> dict[str, Any]:
       let capReason = null;
       try { parseAmount('1'.repeat(1048577)); } catch (error) { capReason = error.message; }
       check(capReason === 'non-canonical Amount', 'explicit character/allocation guard');
-      return {checks: checks.length, invalidRejected: invalid.length, capRejected: capReason === 'non-canonical Amount'};
+      return {checks: checks.length, invalidRejected: invalid.length,
+        demandPercentChecks: demandPercentChecks.length,
+        capRejected: capReason === 'non-canonical Amount'};
     })()""")
     assert result["invalidRejected"] == 19 and result["capRejected"] is True, result
+    assert result["demandPercentChecks"] == 6, result
     # Authority/display modules contain no numeric conversion calls; safe
     # integer predicates for bounded protocol counters remain legitimate.
     for relative in ("static/app.js", "static/commands.js", "static/view-model.js", "static/stream.js"):
@@ -1888,11 +2031,17 @@ def run_numeric_and_ordering(browser: Browser, state: ProxyState, template: dict
     }
     for element, canonical in expected.items():
         actual = amount(element)
-        assert actual["canonical"] == canonical and actual["title"] == canonical, (element, actual)
-        if element == "funds":
+        assert actual["canonical"] == canonical, (element, actual)
+        if element == "demand":
+            # Raw canonical demand is independent of the exact percent display.
+            # Arbitrary-precision integer math preserves >2^53 without a float shortcut.
+            assert actual["display"] == actual["title"] == f"{int(canonical) * 10:,}%", actual
+        elif element == "funds":
             assert actual["display"] == "-41,117.99"
+            assert actual["title"] == canonical, actual
         else:
             assert actual["display"].replace(",", "").removesuffix(".00") == canonical, (element, actual)
+            assert actual["title"] == canonical, actual
     state.fixture_release[2].set()
 
     assert state.fixture_sent[3].wait(8)
@@ -2094,6 +2243,7 @@ def run_r2_response_and_get(binary: Path, executable: str, version: str) -> dict
         client: api.Client = case["client"]
         template = api.checked_json(client.get()[1])
         assert template["game"]["lifetime_clips"] == "0" and template["game"]["wire"] == "1000"
+        result["checkpointSaleControls"] = checkpoint_sale_controls(template["game"])
         state.get_override_delivered.clear()
         module = check_response_boundaries(browser.new_page("/")[0], api.free_port())
         result["module"] = module
