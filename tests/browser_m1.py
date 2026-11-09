@@ -1575,6 +1575,11 @@ def run_autoclipper_native_evidence(binary: Path, executable: str, version: str)
         for index in range(1000):
             status, body = agent.make(f"g03-manual-{index}")
             assert status == 200 and api.checked_json(body)["status"] == "applied"
+        # Legal price controls raise demand without Wire or Marketing purchases.
+        # Keep the real first reveal inside its bounded stochastic window rather
+        # than injecting RNG, extending the timeout, or writing Funds directly.
+        for index in range(21):
+            public("lower_price", f"g03-working-price-{index}")
         first_crossing = wait_for(current, lambda view:
             Decimal(view["game"]["funds"]) >= Decimal("5") and
             view["game"]["auto_clipper_revealed"] is True,
@@ -1615,9 +1620,8 @@ def run_autoclipper_native_evidence(binary: Path, executable: str, version: str)
                 Decimal(after_rejection["income"]) - Decimal(before_rejection["income"]))
         assert after_rejection["console_messages"] == before_rejection["console_messages"]
 
-        # Replenish only by sales at a legal public price, not by a Funds setter.
-        for index in range(21):
-            public("lower_price", f"g03-working-price-{index}")
+        # The same legal $0.04 price now replenishes Funds through real sales;
+        # there is still no Funds setter or caller-selected server outcome.
         wait_for(current, lambda view: Decimal(view["game"]["funds"]) >= Decimal("6.1"),
                  "legal sales fund successor 6.1", timeout=90)
         before_second = current()["game"]
