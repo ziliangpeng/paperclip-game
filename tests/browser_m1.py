@@ -2168,9 +2168,20 @@ def run_r2_response_and_get(binary: Path, executable: str, version: str) -> dict
         assert retry["raw"] == rejected["raw"] and retry["json"] == rejected["json"]
         assert retry["raw"].decode() == json.dumps(rejected["json"], separators=(",", ":"))
         assert set(retry["json"]) == {"command_id", "type", "arguments"}
+        wait_for(lambda: retry,
+            lambda value: value.get("forwarded") == 1 and value.get("response_status") == 200 and
+                value.get("dropped") is False and "injectedResponse" not in value and
+                isinstance(value.get("response_body"), dict) and
+                value["response_body"].get("status") == "applied" and
+                type(value["response_body"].get("revision")) is int,
+            "complete genuine same-ID/body backend response")
         applied = wait_for(lambda: dom_state(page),
             lambda value: value.get("lifetime") == "2" and value.get("wire") == "998" and
-                int(value.get("revision", -1)) >= retry["response_body"]["revision"], "real same-ID/body retry")
+                int(value.get("revision", -1)) >= retry["response_body"]["revision"] and
+                value.get("status") == (
+                    f"Server applied the command at revision {retry['response_body']['revision']}. "
+                    "Displayed resources come from the newest full server View."
+                ), "real same-ID/body retry")
         assert retry["forwarded"] == 1 and "injectedResponse" not in retry
         assert applied["status"] == (f"Server applied the command at revision {retry['response_body']['revision']}. "
             "Displayed resources come from the newest full server View.")
