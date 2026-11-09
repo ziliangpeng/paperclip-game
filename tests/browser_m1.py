@@ -636,6 +636,10 @@ def dom_state(page: Cdp) -> dict[str, Any]:
       autoClippersHidden: document.getElementById('auto-clippers-panel').hidden,
       autoClippers: document.getElementById('auto-clippers').dataset.canonical,
       autoClipperCost: document.getElementById('auto-clipper-cost').dataset.canonical,
+      autoClipperCostText: document.getElementById('auto-clipper-cost').textContent,
+      autoClipperRate: document.getElementById('auto-clipper-rate').dataset.canonical,
+      autoClipperRateText: document.getElementById('auto-clipper-rate').textContent,
+      consoleMessages: [...document.querySelectorAll('#console-messages > li')].map(line => line.textContent),
       status: document.getElementById('command-status').textContent,
       button: document.getElementById('make-paperclip').textContent,
       controls: [...document.querySelectorAll('button')].map(button => ({id:button.id, disabled:button.disabled, ariaDisabled:button.getAttribute('aria-disabled')})),
@@ -811,7 +815,7 @@ def check_assets_and_negative_commands(page: Cdp, port: int) -> None:
         try { makePaperclipCommand(invalidId); } catch (error) { rejected = error instanceof TypeError && error.message === 'invalid opaque command ID'; }
         if (!rejected) throw new Error('command id guard');
       }
-      const closedKinds = ["buy_wire", "lower_price", "raise_price", "buy_marketing"];
+      const closedKinds = ["buy_wire", "lower_price", "raise_price", "buy_marketing", "buy_auto_clipper"];
       let closedRejected = 0;
       for (const kind of closedKinds) {
         const command = createCommand(kind, 'browser-business-' + kind);
@@ -854,7 +858,7 @@ def check_assets_and_negative_commands(page: Cdp, port: int) -> None:
         wrongContentTypeRejected: true, invalidAppliedShapeRejected: true,
         timeoutBounded: true, timeoutRetainsRetry: true};
     })()""")
-    assert result == {"badEnvelopes": 8, "closedRejected": 12, "invalidIds": 3, "fetches": 0,
+    assert result == {"badEnvelopes": 8, "closedRejected": 15, "invalidIds": 3, "fetches": 0,
                       "oversizeRejected": True, "wrongContentTypeRejected": True,
                       "invalidAppliedShapeRejected": True, "timeoutBounded": True,
                       "timeoutRetainsRetry": True}, result
@@ -896,11 +900,11 @@ def check_accessibility_and_keyboard_order(page: Cdp) -> None:
     visible = [heading for heading in structure["headings"] if not heading["hidden"]]
     assert visible[0]["level"] == 1 and all(h["level"] <= previous + 1 for h, previous in zip(visible[1:], [h["level"] for h in visible[:-1]]))
     assert structure["fakeControls"] == 0
-    assert structure["buttons"] == ["Make Paperclip", "Lower Price", "Raise Price", "Buy Marketing", "Buy Wire"]
+    assert structure["buttons"] == ["Make Paperclip", "Lower Price", "Raise Price", "Buy Marketing", "Buy Wire", "Buy AutoClipper"]
     assert structure["amountsOutsideLive"] and structure["statusLive"] == "polite" and structure["statusAtomic"] == "true"
     assert structure["labels"] and abs(structure["contrast"] - 21) < 1e-9 and abs(structure["buttonContrast"] - 21) < 1e-9, structure
     assert structure["computingHidden"] and structure["autoHidden"]
-    for forbidden in ("Feed", "Teach", "Clad", "Debug", "Reset", "New world", "Buy Auto"):
+    for forbidden in ("Feed", "Teach", "Clad", "Debug", "Reset", "New world"):
         assert forbidden not in structure["forbidden"]
     ax = page.call("Accessibility.getFullAXTree")["nodes"]
     roles = {node.get("role", {}).get("value") for node in ax if not node.get("ignored")}
@@ -1498,6 +1502,336 @@ def run_business_flow(browser: Browser, state: ProxyState, agent: api.Client,
     }
 
 
+def run_autoclipper_native_evidence(binary: Path, executable: str, version: str) -> dict[str, Any]:
+    """G03 public Controls only; never use a server-state write or debug fixture."""
+    from decimal import Decimal
+    import time as clock
+    import check_persistence_process as stored
+
+    with isolated_r2_browser(binary, executable, version, "m1-g03-autoclipper") as case:
+        browser: Browser = case["browser"]
+        state: ProxyState = case["state"]
+        agent: api.Client = case["client"]
+        database: Path = case["database"]
+        page1, context1, target1 = browser.new_page("/")
+        page2, context2, target2 = browser.new_page("/")
+        assert context1 != context2
+        started = clock.monotonic()
+        labels = {"buy_auto_clipper": "Buy AutoClipper", "buy_wire": "Buy Wire",
+                  "buy_marketing": "Buy Marketing"}
+
+        def current() -> dict[str, Any]:
+            return api.checked_json(agent.get()[1])
+
+        def public(kind: str, command_id: str) -> dict[str, Any]:
+            status, raw = agent.post(json_bytes({
+                "command_id": command_id, "type": kind, "arguments": {},
+            }))
+            body = api.checked_json(raw)
+            assert status == 200 and body["status"] == "applied", (kind, status, body)
+            return body
+
+        def press(page: Cdp, kind: str, expected_status: int = 200) -> dict[str, Any]:
+            count = len(state.command_records)
+            page.call("Page.bringToFront")
+            page.evaluate(f"document.getElementById({kind.replace('_', '-')!r}).focus()")
+            page.press("Enter")
+            record = wait_commands(state, count + 1)[-1]
+            exact_command(record, kind)
+            wait_for(lambda: record.get("response_body"), lambda value: isinstance(value, dict),
+                     f"actual {kind} response")
+            assert record["response_status"] == expected_status and record["forwarded"] == 1, record
+            body = record["response_body"]
+            revision = body["revision"]
+            if expected_status == 200:
+                message = (f"Server applied {labels[kind]} at revision {revision}. "
+                           "Resources come from the newest complete server View.")
+            else:
+                assert body["reason"] == "insufficient_funds"
+                message = (f"Server rejected {labels[kind]}: not enough Funds at the current "
+                           "server quote/cost. This request made no resource change.")
+            wait_for(lambda: dom_state(page), lambda value:
+                     value["status"] == message and int(value["revision"]) >= revision,
+                     f"native {kind} terminal feedback")
+            return record
+
+        def both(predicate: Callable[[dict[str, Any]], bool], description: str) -> None:
+            for page in (page1, page2):
+                def ready_and_matching(page: Cdp = page) -> bool:
+                    value = dom_state(page)
+                    return value.get("viewState") == "ready" and predicate(value)
+                wait_for(ready_and_matching, bool, description)
+
+        def close_page(page: Cdp, target: str) -> None:
+            assert browser.browser_connection is not None
+            browser.browser_connection.call("Target.closeTarget", {"targetId": target})
+            browser.pages.remove(page)
+            page.close()
+
+        # Fresh legal manual play: no Wire or Marketing command is sent before reveal.
+        both(lambda value: value.get("viewState") == "ready" and value["autoClippersHidden"] and
+             value["autoClippers"] == "0" and value["autoClipperCost"] == "5",
+             "fresh hidden AutoClippers on two pages")
+        for index in range(1000):
+            status, body = agent.make(f"g03-manual-{index}")
+            assert status == 200 and api.checked_json(body)["status"] == "applied"
+        first_crossing = wait_for(current, lambda view:
+            Decimal(view["game"]["funds"]) >= Decimal("5") and
+            view["game"]["auto_clipper_revealed"] is True,
+            "actual first Funds>=5 reveal through stochastic sales", timeout=45)
+        assert first_crossing["game"]["wire"] == "0"
+        assert first_crossing["game"]["marketing_level"] == "1"
+        assert first_crossing["game"]["auto_clippers"] == "0"
+        assert first_crossing["game"]["auto_clipper_cost"] == "5"
+        both(lambda value: value["autoClippersHidden"] is False and
+             value["autoClippers"] == "0" and value["autoClipperCost"] == "5" and
+             "AutoClippers revealed: Funds reached $5." in value["consoleMessages"] and
+             len(value["consoleMessages"]) == 5,
+             "actual first reveal/stored initial price on both native pages")
+
+        before = current()["game"]
+        first = press(page1, "buy_auto_clipper")
+        after = wait_for(current, lambda view: view["game"]["auto_clippers"] == "1",
+                         "first real AutoClipper purchase")["game"]
+        charge = (Decimal(before["funds"]) + Decimal(after["income"]) -
+                  Decimal(before["income"]) - Decimal(after["funds"]))
+        assert charge == Decimal("5") and after["auto_clipper_cost"] == "6.1"
+        assert after["wire"] == "0" and after["auto_clipper_rate"] == "0"
+        latched_below_five = Decimal(after["funds"]) < Decimal("5")
+        both(lambda value: value["autoClippers"] == "1" and
+             value["autoClipperCost"] == "6.1" and value["autoClipperCostText"] == "6.10" and
+             value["consoleMessages"][-1] == "AutoClipper 1 purchased.",
+             "first stored successor 6.1 and 6.10 presentation on both pages")
+
+        before_rejection = current()["game"]
+        assert Decimal(before_rejection["funds"]) < Decimal("6.1"), before_rejection
+        press(page2, "buy_auto_clipper", 422)
+        after_rejection = current()["game"]
+        assert after_rejection["auto_clippers"] == "1"
+        assert after_rejection["auto_clipper_cost"] == "6.1"
+        assert after_rejection["lifetime_clips"] == before_rejection["lifetime_clips"]
+        assert after_rejection["wire"] == "0"
+        assert (Decimal(after_rejection["funds"]) - Decimal(before_rejection["funds"]) ==
+                Decimal(after_rejection["income"]) - Decimal(before_rejection["income"]))
+        assert after_rejection["console_messages"] == before_rejection["console_messages"]
+
+        # Replenish only by sales at a legal public price, not by a Funds setter.
+        for index in range(21):
+            public("lower_price", f"g03-working-price-{index}")
+        wait_for(current, lambda view: Decimal(view["game"]["funds"]) >= Decimal("6.1"),
+                 "legal sales fund successor 6.1", timeout=90)
+        before_second = current()["game"]
+        second = press(page2, "buy_auto_clipper")
+        after_second = wait_for(current, lambda view: view["game"]["auto_clippers"] == "2",
+                                "distinct successor AutoClipper purchase")["game"]
+        second_charge = (Decimal(before_second["funds"]) + Decimal(after_second["income"]) -
+                         Decimal(before_second["income"]) - Decimal(after_second["funds"]))
+        assert second_charge == Decimal("6.1")
+        assert after_second["auto_clipper_cost"] == "6.21"
+        both(lambda value: value["autoClippers"] == "2" and
+             value["autoClipperCost"] == "6.21" and
+             value["consoleMessages"][-1] == "AutoClipper 2 purchased.",
+             "second stored successor on both native pages")
+
+        # Terminal same-ID replay through the same real proxy/server returns the
+        # original receipt after the later purchase and does not create producer 3.
+        connection = http.client.HTTPConnection("127.0.0.1", browser.origin_port, timeout=8)
+        try:
+            connection.request("POST", "/api/game/commands", body=first["raw"],
+                               headers={"Content-Type": first["contentType"]})
+            response = connection.getresponse()
+            replay_raw = response.read(16 * 1024 + 1)
+            assert response.status == first["response_status"] == 200
+        finally:
+            connection.close()
+        replay = wait_commands(state, len(state.command_records))[-1]
+        assert replay["raw"] == first["raw"] and replay_raw.hex() == first["responseBodyHex"]
+        assert replay["response_body"] == first["response_body"]
+        post_replay = current()["game"]
+        assert post_replay["auto_clippers"] == "2" and post_replay["auto_clipper_cost"] == "6.21"
+
+        first_wire_before = wait_for(current, lambda view:
+            Decimal(view["game"]["funds"]) >= Decimal("26"),
+            "legal sales fund the first Wire spool after reveal", timeout=120)["game"]
+        first_wire = press(page1, "buy_wire")
+        first_wire_after = wait_for(current, lambda view: int(view["game"]["wire"]) >= 900,
+                                    "first legal post-reveal spool")["game"]
+        wire_charge = (Decimal(first_wire_before["funds"]) + Decimal(first_wire_after["income"]) -
+                       Decimal(first_wire_before["income"]) - Decimal(first_wire_after["funds"]))
+        assert Decimal("0") < wire_charge <= Decimal("26")
+        assert first_wire_after["auto_clipper_cost"] == "6.21"
+        assert first_wire_after["auto_clippers"] == "2"
+
+        # Physically close both targets and the Agent connection. No browser or
+        # SSE client exists during the bounded real-server production interval.
+        close_page(page1, target1)
+        close_page(page2, target2)
+        agent.close()
+        disconnected = api.Client(case["port"])
+        disconnected_before = api.checked_json(disconnected.get()[1])
+        disconnected.close()
+        clock.sleep(2.2)
+        disconnected = api.Client(case["port"])
+        disconnected_after = api.checked_json(disconnected.get()[1])
+        disconnected.close()
+        seconds = (disconnected_after["clock"]["update_count"] // 100 -
+                   disconnected_before["clock"]["update_count"] // 100)
+        assert seconds >= 2, (disconnected_before, disconnected_after)
+        produced = (Decimal(disconnected_after["game"]["lifetime_clips"]) -
+                    Decimal(disconnected_before["game"]["lifetime_clips"]))
+        assert produced == Decimal(2 * seconds)
+        assert Decimal(disconnected_before["game"]["wire"]) - Decimal(disconnected_after["game"]["wire"]) == produced
+        assert disconnected_after["game"]["auto_clipper_rate"] == "2"
+        agent = api.Client(case["port"])
+        page1, context1, target1 = browser.new_page("/")
+        page2, context2, target2 = browser.new_page("/")
+        assert context1 != context2
+        both(lambda value: value["autoClippers"] == "2" and value["autoClipperCost"] == "6.21" and
+             value["autoClipperRate"] == "2" and value["runId"] == disconnected_after["run_id"],
+             "two fresh pages recover producer/rate after a zero-client interval")
+
+        # Fund initial Marketing only after the permanent reveal. Use public
+        # Make commands to convert each current spool, as in the proven G02 flow.
+        wire_purchases = 1
+        procurement_trace = []
+        production_stock_race_rejections = 0
+        for _ in range(12):
+            commerce = current()["game"]
+            procurement_trace.append({"funds": commerce["funds"], "wire": commerce["wire"],
+                                      "unsold": commerce["unsold_clips"], "wirePurchases": wire_purchases})
+            if Decimal(commerce["funds"]) >= Decimal("100"):
+                break
+            available_wire = int(Decimal(commerce["wire"]))
+            if available_wire > 0:
+                for index in range(available_wire):
+                    status, body = agent.make(f"g03-more-{wire_purchases}-{index}")
+                    decoded = api.checked_json(body)
+                    if status == 422 and decoded.get("reason") == "insufficient_wire":
+                        # AutoClippers legally consumed stock while this public
+                        # batch was in flight. Stop at the actual stock boundary;
+                        # any other status or rejection remains a hard failure.
+                        assert decoded["status"] == "rule_rejected"
+                        production_stock_race_rejections += 1
+                        break
+                    assert status == 200 and decoded["status"] == "applied", (index, status, decoded)
+                continue
+            commerce = current()["game"]
+            potential = (Decimal(commerce["funds"]) +
+                         Decimal(commerce["unsold_clips"]) * Decimal(commerce["price_per_clip"]))
+            if potential >= Decimal("100"):
+                # Existing legal inventory can fund Marketing without another
+                # spool; merely wait for actual sales instead of spending to 13.
+                wait_for(current, lambda view: Decimal(view["game"]["funds"]) >= Decimal("100"),
+                         "existing inventory funds Marketing without another spool", timeout=180)
+                break
+            wait_for(current, lambda view:
+                     Decimal(view["game"]["funds"]) >= Decimal("100") or
+                     Decimal(view["game"]["funds"]) >= Decimal(view["game"]["wire_quote"]) + Decimal("13"),
+                     "bounded sale-funded Marketing procurement at the current server quote", timeout=120)
+            commerce = current()["game"]
+            if Decimal(commerce["funds"]) < Decimal("100"):
+                press(page1, "buy_wire")
+                wire_purchases += 1
+        else:
+            raise AssertionError(f"bounded G03 Marketing funding did not reach 100: {procurement_trace}")
+
+        before_marketing = current()["game"]
+        assert Decimal(before_marketing["funds"]) >= Decimal("100")
+        marketing = press(page2, "buy_marketing")
+        after_marketing = wait_for(current, lambda view: view["game"]["marketing_level"] == "2",
+                                   "initial Marketing only after AutoClipper reveal")["game"]
+        marketing_charge = (Decimal(before_marketing["funds"]) + Decimal(after_marketing["income"]) -
+                            Decimal(before_marketing["income"]) - Decimal(after_marketing["funds"]))
+        assert marketing_charge == Decimal("100")
+        both(lambda value: value["marketingLevel"] == "2" and value["marketingCost"] == "200" and
+             value["autoClippers"] == "2" and value["autoClipperCost"] == "6.21" and
+             len(value["consoleMessages"]) == 5,
+             "G03 five-line console and shared Marketing/AutoClipper state")
+
+        # A real ordinary stop captures the final coherent writer View. Read its
+        # private SQLite row for recovery evidence only, never to alter state.
+        old_run = current()["run_id"]
+        agent.close()
+        old_backend = case["backendOwner"]
+        old_backend.stop()
+        saved = stored.read_snapshot(database)
+        assert saved["pro"]["auto_clippers"] == "2"
+        assert saved["pro"]["auto_clipper_cost"] == "6.21"
+        assert saved["pro"]["auto_clipper_revealed"] is True
+        assert len(saved["pro"]["console_messages"]) == 5
+
+        clock.sleep(0.2)  # Real process downtime; no logical clock should backfill it.
+        new_out = (case["temporary"] / "g03-restart.stdout").open("wb")
+        new_err = (case["temporary"] / "g03-restart.stderr").open("wb")
+        with new_out, new_err:
+            replacement = api.start_ready(binary, case["backendArguments"], case["port"],
+                                          case["temporary"], new_out, new_err)
+        case["backendOwner"] = replacement
+        case["backendProcess"] = replacement.process
+        agent = api.Client(case["port"])
+        recovered = current()
+        update_delta = recovered["clock"]["update_count"] - saved["clock"]["update_count"]
+        assert update_delta >= 0
+        recovered_seconds = (recovered["clock"]["update_count"] // 100 -
+                             saved["clock"]["update_count"] // 100)
+        expected_production = min(2 * recovered_seconds, int(Decimal(saved["pro"]["wire"])))
+        if recovered_seconds == 0:
+            expected_rate = Decimal(saved["pro"]["auto_clipper_rate"])
+        else:
+            wire_before_latest_second = (Decimal(saved["pro"]["wire"]) -
+                                         Decimal(2 * (recovered_seconds - 1)))
+            expected_rate = max(Decimal("0"), min(Decimal("2"), wire_before_latest_second))
+        assert Decimal(recovered["game"]["auto_clipper_rate"]) == expected_rate
+        assert recovered["revision"] - saved["revision"] == update_delta
+        assert Decimal(recovered["game"]["lifetime_clips"]) - Decimal(saved["pro"]["lifetime_clips"]) == expected_production
+        assert Decimal(saved["pro"]["wire"]) - Decimal(recovered["game"]["wire"]) == expected_production
+        assert recovered["run_id"] != old_run
+        assert recovered["game"]["auto_clippers"] == "2"
+        assert recovered["game"]["auto_clipper_cost"] == "6.21"
+        assert recovered["game"]["auto_clipper_revealed"] is True
+        both(lambda value: value["runId"] == recovered["run_id"] and value["autoClippers"] == "2" and
+             value["autoClipperCost"] == "6.21" and value["consoleMessages"] == saved["pro"]["console_messages"],
+             "new-run browser resync restores exact AutoClipper fields without level-zero recomputation")
+        agent.close()
+
+        result = {
+            "freshLegalManualCommands": 1000,
+            "firstRevealBeforeSuccessfulWireOrMarketing": True,
+            "preRevealWirePurchases": 0,
+            "preRevealMarketingLevel": "1",
+            "firstFundsObserved": first_crossing["game"]["funds"],
+            "firstCharge": str(charge), "firstStoredSuccessor": after["auto_clipper_cost"],
+            "firstReceiptRevision": first["response_body"]["revision"],
+            "belowCurrentCostRejected": True,
+            "permanentRevealBelowFive": latched_below_five,
+            "secondCharge": str(second_charge), "secondStoredSuccessor": after_second["auto_clipper_cost"],
+            "secondReceiptRevision": second["response_body"]["revision"],
+            "firstTerminalUuidReplay": "original bytes/revision, no third producer",
+            "twoAnonymousPagesAndCanonicalCostDisplay": "6.1 stored / 6.10 shown; 6.21 unchanged",
+            "firstPostRevealWireCharge": str(wire_charge),
+            "zeroClientSeconds": seconds, "zeroClientProduced": str(produced),
+            "zeroClientRate": disconnected_after["game"]["auto_clipper_rate"],
+            "wirePurchasesAfterReveal": wire_purchases,
+            "marketingProcurementTrace": procurement_trace,
+            "boundedManualAutomaticStockRaceRejections": production_stock_race_rejections,
+            "initialMarketingAfterReveal": {"charge": str(marketing_charge),
+                "revision": marketing["response_body"]["revision"], "level": "2"},
+            "fiveLineConsole": saved["pro"]["console_messages"],
+            "snapshotVersion": 3,
+            "recoveredRunIdChanged": True,
+            "recoveryStoredCountCostReveal": ["2", "6.21", True],
+            "recoveryOnlyOnlineProduction": str(expected_production),
+            "savedRate": saved["pro"]["auto_clipper_rate"],
+            "recoveredRate": recovered["game"]["auto_clipper_rate"],
+            "expectedRecoveredRate": str(expected_rate),
+            "noOfflineBackfillOrLevelZeroRecompute": True,
+            "durationSeconds": round(clock.monotonic() - started, 3),
+        }
+    return {**result, "browser": version, "realBackend": True,
+            "chromeExit": case["chromeExit"], "backendExit": case["backendExit"],
+            "prefundedOrClientAuthority": False}
+
+
 def run_business_native_evidence(binary: Path, executable: str, version: str) -> dict[str, Any]:
     with isolated_r2_browser(binary, executable, version, "m1-g02-business") as case:
         browser: Browser = case["browser"]
@@ -1546,6 +1880,7 @@ def run_main_ui(browser: Browser, state: ProxyState, backend_port: int, page1: C
     assert initial_view["run_id"] == first["runId"]
     assert_only_wire_quote_can_advance(initial_view["game"], {
         "auto_clipper_cost": "5", "auto_clipper_revealed": False, "auto_clippers": "0",
+        "auto_clipper_rate": "0", "console_messages": ["", "", "", "", ""],
         "computing_hidden": True, "funds": "0", "lifetime_clips": "0",
         "demand": "3.2", "marketing_cost": "100", "clips_sold": "0",
         "income": "0", "last_sale_revenue": "0", "marketing_level": "1", "memory": "1", "price_per_clip": "0.25",
@@ -1680,9 +2015,9 @@ def run_main_ui(browser: Browser, state: ProxyState, backend_port: int, page1: C
     wait_for(lambda: dom_state(page1), lambda value: "Command ID conflict" in value["status"], "understandable conflict feedback")
     assert dom_state(page1)["lifetime"] == "6"
 
-    # No new typed executable intent exists beyond make_paperclip. Use the #9
-    # explicitly supported existing-key/unsupported-action 409 path rather than
-    # inventing a fake future command or claiming a new intent type exists.
+    # Unsupported actions remain closed. Use the #9 explicitly supported
+    # existing-key/unsupported-action 409 path rather than inventing a fake
+    # executable future command.
     conflict_status, conflict_body = agent_client.post(json_bytes({
         "command_id": retry_command["command_id"], "type": "unsupported_action", "arguments": {},
     }))
@@ -2204,7 +2539,10 @@ def isolated_r2_browser(binary: Path, executable: str, version: str, label: str)
             client = api.Client(port)
             browser = Browser(executable, temporary, f"http://127.0.0.1:{proxy.server_address[1]}")
             info.update({"state": state, "browser": browser, "client": client,
-                         "version": version, "temporary": temporary,
+                         "version": version, "temporary": temporary, "port": port,
+                         "database": temporary / "owned.sqlite3", "backendOwner": process,
+                         "backendArguments": ["--listen-addr", f"127.0.0.1:{port}",
+                                              "--database-path", str(temporary / "owned.sqlite3")],
                          "chromeProcess": browser.process, "backendProcess": process.process})
             yield info
             assert not state.errors, state.errors[:10]
@@ -2227,9 +2565,11 @@ def isolated_r2_browser(binary: Path, executable: str, version: str, label: str)
             assert not proxy_thread.is_alive()
             if client is not None:
                 client.close()
-            if process is not None:
-                process.stop()
-                info["backendExit"] = info["backendProcess"].poll()
+            active_backend = info.get("backendOwner", process)
+            if active_backend is not None:
+                if active_backend.process.poll() is None:
+                    active_backend.stop()
+                info["backendExit"] = active_backend.process.poll()
                 assert info["backendExit"] is not None, info
             out.close()
             err.close()
@@ -3245,6 +3585,9 @@ def main() -> int:
     business_result = run_business_native_evidence(binary, executable, version)
     assert (business_result["chromeExit"], business_result["backendExit"]) == (0, 0)
     print("NATIVE_G02_BUSINESS_EVIDENCE=" + json.dumps(business_result, separators=(",", ":")))
+    autoclipper_result = run_autoclipper_native_evidence(binary, executable, version)
+    assert (autoclipper_result["chromeExit"], autoclipper_result["backendExit"]) == (0, 0)
+    print("NATIVE_G03_AUTOCLIPPER_EVIDENCE=" + json.dumps(autoclipper_result, separators=(",", ":")))
     worktree = Path(__file__).resolve().parent.parent
     started = time.perf_counter()
     with tempfile.TemporaryDirectory(prefix="paperclip-native-ui-browser-") as temporary_name:
@@ -3286,6 +3629,7 @@ def main() -> int:
                 "startup": startup_result, "main": main_result,
                 "numericOrdering": numeric_result, "recovery": recovery_result,
                 "g02NativeBusiness": business_result,
+                "g03NativeAutoClipper": autoclipper_result,
                 "r3CounterDiagnostic": r3_result,
                 "physicalReconnectLifecycle": physical_result,
                 "durationSeconds": round(time.perf_counter() - started, 3),

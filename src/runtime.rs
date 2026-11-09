@@ -87,17 +87,18 @@ pub struct Command {
     intent: Intent,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Intent {
     MakePaperclip,
     BuyWire,
     LowerPrice,
     RaisePrice,
     BuyMarketing,
+    BuyAutoClipper,
 }
 
 impl Command {
-    /// The sole M1 player intent: exactly one Wire, with no amount argument.
+    /// The manual M1 intent: exactly one Wire, with no amount argument.
     pub fn make_paperclip(id: CommandId) -> Self {
         Self {
             id,
@@ -119,6 +120,10 @@ impl Command {
 
     pub fn buy_marketing(id: CommandId) -> Self {
         Self::intent(id, Intent::BuyMarketing)
+    }
+
+    pub fn buy_auto_clipper(id: CommandId) -> Self {
+        Self::intent(id, Intent::BuyAutoClipper)
     }
 
     fn intent(id: CommandId, intent: Intent) -> Self {
@@ -552,6 +557,10 @@ impl<C: MonotonicClock> Writer<C> {
             .map_err(RuntimeFailure::LogicalClock)?;
         if cadence.fast_due {
             economy::advance_fast_phase(&mut candidate).map_err(RuntimeFailure::Economy)?;
+            economy::observe_auto_clipper_reveal(&mut candidate.pro);
+        }
+        if cadence.second_due {
+            economy::advance_auto_clippers(&mut candidate).map_err(RuntimeFailure::Economy)?;
         }
         self.state = candidate;
         self.revision = next_revision;
@@ -578,7 +587,27 @@ impl<C: MonotonicClock> Writer<C> {
             Intent::BuyMarketing => {
                 economy::buy_marketing(&mut candidate.pro).map_err(CommandRejection::Economy)
             }
+            Intent::BuyAutoClipper => {
+                economy::buy_auto_clipper(&mut candidate.pro).map_err(CommandRejection::Economy)
+            }
         };
+        if outcome.is_ok() {
+            match command.intent {
+                Intent::BuyWire => {
+                    let message = format!("Wire spool purchased at ${}.", candidate.pro.wire_quote);
+                    economy::push_console_message(&mut candidate.pro, message);
+                }
+                Intent::BuyMarketing => {
+                    let message = format!(
+                        "Marketing level {} purchased.",
+                        candidate.pro.marketing_level
+                    );
+                    economy::push_console_message(&mut candidate.pro, message);
+                }
+                _ => {}
+            }
+            economy::observe_auto_clipper_reveal(&mut candidate.pro);
+        }
         let result = match outcome {
             Ok(()) => {
                 self.state = candidate;
@@ -862,12 +891,27 @@ mod tests {
         Arc<FakeClock>,
         RuntimeDatabase,
     ) {
+        persistent_runtime_with_producers(label, 0)
+    }
+
+    fn persistent_runtime_with_producers(
+        label: &str,
+        producers: i128,
+    ) -> (
+        GameRuntime,
+        RuntimeHandle,
+        crate::persistence::RuntimePersistence,
+        Arc<FakeClock>,
+        RuntimeDatabase,
+    ) {
         use crate::persistence::{RuntimePersistence, SnapshotStore};
         use crate::snapshot::Snapshot;
 
         let database = RuntimeDatabase::new(label);
         let mut state = GameState::fresh(GameRng::from_test_seed([23_u8; 32]));
         state.pro.wire = Amount::parse("100").unwrap().nonnegative().unwrap();
+        state.pro.auto_clippers = crate::game::amount::IntegralAmount::from_i128(producers);
+        state.pro.auto_clipper_revealed = producers > 0;
         let initial = Snapshot::capture(&state, 0).unwrap();
         let (store, stored) = SnapshotStore::open_or_initialize(&database.0, &initial).unwrap();
         let clock = Arc::new(FakeClock::new());
@@ -958,7 +1002,8 @@ mod tests {
     async fn persistence_blocking_does_not_stop_runtime_and_valid_commit_recovers_health() {
         use crate::health::{PersistenceFailure, PersistencePhase};
 
-        let (runtime, handle, persistence, clock, database) = persistent_runtime("blocking");
+        let (runtime, handle, persistence, clock, database) =
+            persistent_runtime_with_producers("blocking", 1);
         let blocker = rusqlite::Connection::open(&database.0).unwrap();
         blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
         clock.advance(Duration::from_secs(30));
@@ -978,8 +1023,13 @@ mod tests {
         clock.advance(Duration::from_millis(10));
         let live = wait_for(&handle, |view| view.game.clock.update_count() >= 3_001).await;
         assert!(live.revision > receipt.revision);
-        assert_eq!(live.game.pro.wire.to_string(), "99");
-        assert_eq!(live.game.pro.lifetime_clips.to_string(), "1");
+        assert_eq!(live.game.pro.wire.to_string(), "69");
+        assert_eq!(live.game.pro.lifetime_clips.to_string(), "31");
+        assert_eq!(live.game.pro.auto_clippers.to_string(), "1");
+        assert_eq!(live.game.pro.auto_clipper_rate.to_string(), "1");
+        eprintln!(
+            "G03/PERSIST-SNAPSHOT-30S-NONBLOCK: one producer continued through real SQLite busy capture; 30 automatic + one manual clips"
+        );
         clock.advance(Duration::from_secs(30));
         let still_degraded = wait_for_health(&persistence, |health| {
             health.latest_captured_revision >= Some(6_000)
@@ -1104,6 +1154,62 @@ mod tests {
             before_rejected.rng_state_hex()
         );
         assert_eq!(handle.view().revision, 1);
+        runtime.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn auto_clipper_writer_execution_and_same_id_replay_preserve_stored_costs() {
+        let mut first = GameState::fresh(GameRng::from_test_seed([43u8; 32]));
+        first.pro.funds = Amount::from_i128(5);
+        first.pro.auto_clipper_revealed = true;
+        let (runtime, handle, _clock) = test_runtime_with_state(first);
+        let first_command = Command::buy_auto_clipper(CommandId::new(501).unwrap());
+        let receipt = handle.execute(first_command.clone()).await.unwrap();
+        assert_eq!(receipt.revision, 1);
+        assert_eq!(receipt.result, Ok(()));
+        let bought = handle.view();
+        assert_eq!(bought.game.pro.funds, Amount::zero());
+        assert_eq!(bought.game.pro.auto_clippers.to_string(), "1");
+        assert_eq!(bought.game.pro.auto_clipper_cost.to_string(), "6.1");
+
+        let before_rejection = bought.game.clone();
+        let insufficient = handle
+            .execute(Command::buy_auto_clipper(CommandId::new(502).unwrap()))
+            .await
+            .unwrap();
+        assert_eq!(insufficient.revision, 1);
+        assert_eq!(
+            insufficient.result,
+            Err(CommandRejection::Economy(EconomyError::InsufficientFunds))
+        );
+        assert_eq!(handle.view().game.pro, before_rejection.pro);
+        assert_eq!(handle.view().revision, 1);
+
+        // Let later logical state advance before replay: the stored receipt is
+        // still the first terminal result and cannot buy another producer.
+        _clock.advance(Duration::from_millis(10));
+        wait_for(&handle, |view| view.game.clock.update_count() == 1).await;
+        let replay = handle.execute(first_command).await.unwrap();
+        assert_eq!(replay, receipt);
+        let after_replay = handle.view();
+        assert_eq!(after_replay.game.pro.auto_clippers.to_string(), "1");
+        assert_eq!(after_replay.game.pro.auto_clipper_cost.to_string(), "6.1");
+        runtime.shutdown().await.unwrap();
+
+        let mut second = GameState::fresh(GameRng::from_test_seed([44u8; 32]));
+        second.pro.funds = Amount::from_i128(20);
+        second.pro.auto_clipper_revealed = true;
+        second.pro.auto_clippers = crate::game::amount::IntegralAmount::from_i128(1);
+        second.pro.auto_clipper_cost = Amount::parse("6.1").unwrap();
+        let (runtime, handle, _clock) = test_runtime_with_state(second);
+        let successor = handle
+            .execute(Command::buy_auto_clipper(CommandId::new(503).unwrap()))
+            .await
+            .unwrap();
+        assert_eq!(successor.result, Ok(()));
+        assert_eq!(handle.view().game.pro.funds.to_string(), "13.9");
+        assert_eq!(handle.view().game.pro.auto_clippers.to_string(), "2");
+        assert_eq!(handle.view().game.pro.auto_clipper_cost.to_string(), "6.21");
         runtime.shutdown().await.unwrap();
     }
 

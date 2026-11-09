@@ -4,6 +4,7 @@ import {parseTransportJson as parseSharedTransportJson} from "./stream.js";
 
 const COMMAND_TYPES = Object.freeze([
   "make_paperclip", "buy_wire", "lower_price", "raise_price", "buy_marketing",
+  "buy_auto_clipper",
 ]);
 const MAX_COMMAND_ID_BYTES = 128;
 const MAX_RESPONSE_BYTES = 16 * 1024;

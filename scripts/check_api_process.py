@@ -37,10 +37,12 @@ def checked_json(raw: bytes) -> dict[str, Any]:
     return value
 
 
-# Only these fields legitimately move with G02 time, pricing and commerce.
+# Only these fields legitimately move through real clock/business/G03 actions.
 ECONOMIC_VIEW_FIELDS = frozenset({
     "unsold_clips", "funds", "wire_quote", "price_per_clip", "marketing_level",
     "demand", "marketing_cost", "clips_sold", "income", "last_sale_revenue",
+    "auto_clipper_revealed", "auto_clippers", "auto_clipper_cost",
+    "auto_clipper_rate", "console_messages",
 })
 
 
@@ -71,13 +73,15 @@ def assert_production(view: dict[str, Any], wire: str, clips: str,
         "auto_clipper_revealed": False,
         "auto_clippers": "0",
         "auto_clipper_cost": "5",
+        "auto_clipper_rate": "0",
+        "console_messages": ["", "", "", "", ""],
     }
     economic_fields = ECONOMIC_VIEW_FIELDS - {"marketing_cost"} if stored_model else ECONOMIC_VIEW_FIELDS
     if economic_values is not None:
         # This is a constrained captured expectation for temporal fields, never
         # a way to override production authority or admit private View members.
         # Only the documented stored model excludes the derived cost; every
-        # other economic field remains mandatory in the captured expectation.
+        # other captured G02/G03 field remains mandatory in the expectation.
         supplied = {key: economic_values[key] for key in economic_fields}
         expected.update(supplied)
     if stored_model:
@@ -94,6 +98,7 @@ def assert_production(view: dict[str, Any], wire: str, clips: str,
         "wire_spool_length", "wire_quote", "price_per_clip", "marketing_level",
         "demand", "marketing_cost", "clips_sold", "income", "last_sale_revenue",
         "trust", "processors", "memory", "auto_clippers", "auto_clipper_cost",
+        "auto_clipper_rate",
     )
     if stored_model:
         amount_fields = tuple(key for key in amount_fields if key != "marketing_cost")

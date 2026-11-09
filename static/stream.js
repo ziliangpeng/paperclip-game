@@ -23,14 +23,14 @@ const CLOCK_FIELDS = [
   "slow_phase", "update_count",
 ];
 const GAME_FIELDS = [
-  "auto_clipper_cost", "auto_clipper_revealed", "auto_clippers", "clips_sold",
-  "computing_hidden", "demand", "funds", "income", "last_sale_revenue",
+  "auto_clipper_cost", "auto_clipper_rate", "auto_clipper_revealed", "auto_clippers", "clips_sold",
+  "computing_hidden", "console_messages", "demand", "funds", "income", "last_sale_revenue",
   "lifetime_clips", "marketing_cost", "marketing_level", "memory",
   "price_per_clip", "processors", "projects_hidden", "trust", "unsold_clips",
   "unused_clips", "wire", "wire_quote", "wire_spool_length",
 ];
 const AMOUNT_FIELDS = [
-  "auto_clipper_cost", "auto_clippers", "clips_sold", "demand", "funds",
+  "auto_clipper_cost", "auto_clipper_rate", "auto_clippers", "clips_sold", "demand", "funds",
   "income", "last_sale_revenue", "lifetime_clips", "marketing_cost",
   "marketing_level", "memory", "price_per_clip", "processors", "trust",
   "unsold_clips", "unused_clips", "wire", "wire_quote", "wire_spool_length",
@@ -39,7 +39,7 @@ const BOOLEAN_FIELDS = [
   "auto_clipper_revealed", "computing_hidden", "projects_hidden",
 ];
 const NONNEGATIVE_FIELDS = [
-  "clips_sold", "demand", "lifetime_clips", "unsold_clips", "unused_clips",
+  "auto_clipper_rate", "clips_sold", "demand", "lifetime_clips", "unsold_clips", "unused_clips",
   "wire", "wire_spool_length",
 ];
 const INTEGRAL_FIELDS = [
@@ -77,6 +77,11 @@ export function assertCompleteGameView(view) {
   }
   for (const field of BOOLEAN_FIELDS) {
     if (typeof view.game[field] !== "boolean") throw new TypeError("invalid GameView flag");
+  }
+  if (!Array.isArray(view.game.console_messages) || view.game.console_messages.length !== 5 ||
+      view.game.console_messages.some((message) => typeof message !== "string" ||
+        message.length > 256 || !/^[\x20-\x7e]*$/.test(message))) {
+    throw new TypeError("invalid five-line console history");
   }
   return view;
 }

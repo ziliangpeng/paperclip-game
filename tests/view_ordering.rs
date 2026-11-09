@@ -42,7 +42,9 @@ fn view_json(run_id: &str, revision: u64, clips: &str) -> Value {
             "projects_hidden": true,
             "auto_clipper_revealed": false,
             "auto_clippers": "0",
-            "auto_clipper_cost": "5"
+            "auto_clipper_cost": "5",
+            "auto_clipper_rate": "0",
+            "console_messages": ["", "", "", "", ""]
         }
     })
 }
