@@ -108,12 +108,172 @@ def assert_stored_pro(pro: dict[str, Any]) -> dict[str, Any]:
     return public
 
 
-def assert_view_matches_stored(pro: dict[str, Any], view: dict[str, Any]) -> None:
+AMOUNT_SCALE = 10**18
+TEMPORAL_PRO_FIELDS = {
+    "unsold_clips", "funds", "wire_quote", "clips_sold", "income",
+    "last_sale_revenue", "wire_base_price", "wire_price_counter",
+    "wire_inactivity_ticks",
+}
+
+
+def amount_mantissa(value: str) -> int:
+    """Exact cents/mill units on the common 10^-18 Amount grid; never float."""
+    sign = -1 if value.startswith("-") else 1
+    unsigned = value.removeprefix("-")
+    whole, separator, fraction = unsigned.partition(".")
+    assert whole.isascii() and whole.isdigit()
+    assert not separator or (fraction.isascii() and fraction.isdigit() and len(fraction) <= 18)
+    return sign * (int(whole) * AMOUNT_SCALE + int(fraction.ljust(18, "0") or "0"))
+
+
+def assert_public_sales_between_events(
+    before: dict[str, str], after: dict[str, str], expected_makes: int = 0
+) -> None:
+    """Only real clock progress and observed production separate checkpoints.
+
+    No business purchases are issued in these intervals. ``expected_makes``
+    counts already accepted real ``make_paperclip`` commands (0 or 1 here),
+    never client-granted resources. Price
+    stays .25 and Marketing level 1, so each nonempty request offers exactly
+    two whole clips and the available stock in this suite never exceeds two.
+    """
+    allowed = {
+        "lifetime_clips", "unused_clips", "wire", "unsold_clips", "funds",
+        "wire_quote", "clips_sold", "income", "last_sale_revenue",
+    }
+    different = {key: (before[key], after[key]) for key in before
+                 if key not in allowed and before[key] != after[key]}
+    assert not different, ("non-temporal public state changed", different)
+    assert type(expected_makes) is int and expected_makes in (0, 1)
+    for field, delta in (
+        ("lifetime_clips", expected_makes),
+        ("unused_clips", expected_makes),
+        ("wire", -expected_makes),
+    ):
+        assert amount_mantissa(after[field]) - amount_mantissa(before[field]) == delta * AMOUNT_SCALE
+    assert before["price_per_clip"] == "0.25" and before["marketing_level"] == "1"
+    assert before["demand"] == "3.2" == after["demand"]
+    old_sold = amount_mantissa(before["clips_sold"])
+    new_sold = amount_mantissa(after["clips_sold"])
+    sold_delta = new_sold - old_sold
+    assert 0 <= sold_delta <= 2 * AMOUNT_SCALE and sold_delta % AMOUNT_SCALE == 0
+    assert type(expected_makes) is int and expected_makes in (0, 1)
+    unsold = amount_mantissa(before["unsold_clips"]) + expected_makes * AMOUNT_SCALE - sold_delta
+    assert unsold == amount_mantissa(after["unsold_clips"])
+    price = amount_mantissa(before["price_per_clip"])
+    revenue = sold_delta * price // AMOUNT_SCALE
+    assert sold_delta * price % AMOUNT_SCALE == 0
+    assert amount_mantissa(after["income"]) == amount_mantissa(before["income"]) + revenue
+    assert amount_mantissa(after["funds"]) == amount_mantissa(before["funds"]) + revenue
+    if sold_delta == 0:
+        assert after["last_sale_revenue"] == before["last_sale_revenue"]
+    else:
+        # With at most two available whole clips, one response may be two
+        # sales or one larger sale; either last-revenue value is source-valid.
+        assert amount_mantissa(after["last_sale_revenue"]) in {price, 2 * price}
+
+
+def validate_clock(clock: dict[str, Any]) -> None:
+    for key in ("update_count", "combat_pulses"):
+        assert type(clock[key]) is int and 0 <= clock[key] <= api.SAFE_INTEGER
+    for key in ("fast_phase", "second_phase", "slow_phase", "combat_remainder_nanos"):
+        assert type(clock[key]) is int and clock[key] >= 0
+    update = clock["update_count"]
+    assert clock["fast_phase"] == update % 10
+    assert clock["second_phase"] == update % 100
+    assert clock["slow_phase"] == update % 250
+    assert clock["combat_pulses"] == update * 5 // 8
+    assert clock["combat_remainder_nanos"] == update * 10_000_000 % 16_000_000
+
+
+def fast_phases_between(before: dict[str, Any], after: dict[str, Any]) -> int:
+    before_clock, after_clock = before["clock"], after["clock"]
+    validate_clock(before_clock)
+    validate_clock(after_clock)
+    assert after_clock["update_count"] >= before_clock["update_count"]
+    # ClockState.advance produces fast_due at every multiple of ten updates.
+    return after_clock["update_count"] // 10 - before_clock["update_count"] // 10
+
+
+def assert_rng_continuation(before: str, after: str, phases: int) -> None:
+    """Exact independent stream-position check, without printing seed material."""
+    prior, later = bytes.fromhex(before), bytes.fromhex(after)
+    assert len(prior) == len(later) == 57 and prior[0] == later[0] == 1
+    # Seed and stream never change through restoration or logical advancement.
+    assert prior[1:41] == later[1:41], "RNG seed or stream was reinitialized on restore"
+    prior_position = int.from_bytes(prior[41:], "big")
+    later_position = int.from_bytes(later[41:], "big")
+    assert 0 <= prior_position < 1 << 68 and 0 <= later_position < 1 << 68
+    # advance_fast_phase consumes Wire and sales next_u64 calls. rand_chacha's
+    # next_u64 consumes two next_u32 calls (rand_chacha 0.10.0 + rand_core).
+    expected = (prior_position + 4 * phases) % (1 << 68)
+    assert later_position == expected, (prior_position, later_position, expected, phases)
+
+
+def assert_snapshot_continuation(
+    before: dict[str, Any], after: dict[str, Any], label: str, expected_makes: int = 0
+) -> None:
+    """Compare snapshots around idle process activity, including private state.
+
+    A restart may allow real logical phases while serving the restored world;
+    it must not infer unsaved commands or offline sales. Those processes alone
+    cannot reproduce a generic persistent byte equality test after G02.
+    """
+    assert after["revision"] >= before["revision"], label
+    assert after["sequence"] >= before["sequence"], label
+    assert type(expected_makes) is int and expected_makes in (0, 1)
+    before_public = assert_stored_pro(before["pro"])
+    after_public = assert_stored_pro(after["pro"])
+    phases = fast_phases_between(before, after)
+    assert_rng_continuation(before["rng_state"], after["rng_state"], phases)
+    different = {
+        key: (before["pro"][key], after["pro"][key])
+        for key in STORED_PRO_FIELDS - TEMPORAL_PRO_FIELDS - {
+            "lifetime_clips", "unused_clips", "wire"
+        }
+        if before["pro"][key] != after["pro"][key]
+    }
+    assert not different, (label, "fields changed without a producer/business command", different)
+    # Concrete production and its Wire consumption, as well as sale changes,
+    # share one public projection checker with live View observations below.
+    if phases == 0 and expected_makes == 0:
+        # No economic opportunity or explicit production: preserve the former
+        # exact whole-Pro and whole-RNG assertions, including private fields.
+        assert after["pro"] == before["pro"], (label, "non-temporal updates cannot alter Pro")
+    else:
+        assert_public_sales_between_events(before_public, after_public, expected_makes)
+    base = amount_mantissa(before["pro"]["wire_base_price"])
+    inactivity = before["pro"]["wire_inactivity_ticks"]
+    for _ in range(phases):
+        inactivity += 1
+        if inactivity > 250 and base > 15 * AMOUNT_SCALE:
+            base = base * 999 // 1000
+            inactivity = 0
+    assert inactivity <= api.SAFE_INTEGER
+    assert amount_mantissa(after["pro"]["wire_base_price"]) == base, (label, "Wire decay")
+    assert after["pro"]["wire_inactivity_ticks"] == inactivity, (label, "Wire inactivity")
+    increment = after["pro"]["wire_price_counter"] - before["pro"]["wire_price_counter"]
+    assert 0 <= increment <= phases, (label, "more reprices than logical phases")
+    if increment == 0:
+        assert after["pro"]["wire_quote"] == before["pro"]["wire_quote"], label
+    assert amount_mantissa(after["pro"]["wire_quote"]) > 0
+    assert amount_mantissa(after["pro"]["wire_quote"]) % AMOUNT_SCALE == 0
+
+
+def assert_view_matches_stored(
+    pro: dict[str, Any], view: dict[str, Any], expected_makes: int = 0
+) -> None:
+    """A public observation after a stored checkpoint, allowing only clock sales.
+
+    This is intentionally not equality with an older View: the raw RNG and
+    logical phase counter checks belong to assert_snapshot_continuation.
+    """
     api.assert_view_schema(view)
-    expected = dict(view["game"])
-    # This is the sole display-derived field that ProState does not persist.
-    expected.pop("marketing_cost")
-    assert assert_stored_pro(pro) == expected
+    before = assert_stored_pro(pro)
+    after = dict(view["game"])
+    # ProSnapshot stores level, not this one derived public display field.
+    after.pop("marketing_cost")
+    assert_public_sales_between_events(before, after, expected_makes)
 
 def read_snapshot(database: Path) -> dict[str, Any]:
     # Only call this for a known-valid database. Startup corruption is tested
@@ -349,7 +509,11 @@ def check_real_kill_and_repeated_restart(binary: Path, temporary: Path) -> None:
         third.force_stop()
     committed_third = read_snapshot(database)
     assert_view_matches_stored(committed_third["pro"], third_view)
-    assert committed_third["rng_state"] == saved["rng_state"]
+    # The resend is one genuinely accepted manual production, not a clock
+    # effect or fabricated resource. Its production/wire deltas stay exact.
+    assert_snapshot_continuation(
+        saved, committed_third, "kill/replay after actual downtime", expected_makes=1
+    )
 
     fourth, fourth_port, fourth_client = launch(binary, database, temporary, "crash-restore-again")
     try:
@@ -362,8 +526,7 @@ def check_real_kill_and_repeated_restart(binary: Path, temporary: Path) -> None:
         fourth_client.close()
         fourth.force_stop()
     committed_fourth = read_snapshot(database)
-    assert committed_fourth["pro"] == committed_third["pro"]
-    assert committed_fourth["rng_state"] == committed_third["rng_state"]
+    assert_snapshot_continuation(committed_third, committed_fourth, "fourth restart continuation")
     assert len(set(run_ids)) == len(run_ids)
     print("process crash: real SIGKILL rolled back only unsaved state; resend/repeated restart/new run_ids passed")
 
