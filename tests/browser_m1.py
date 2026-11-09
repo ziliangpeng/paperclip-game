@@ -1680,17 +1680,18 @@ def run_autoclipper_native_evidence(binary: Path, executable: str, version: str)
         disconnected.close()
         seconds = (disconnected_after["clock"]["update_count"] // 100 -
                    disconnected_before["clock"]["update_count"] // 100)
-        update_delta = (disconnected_after["clock"]["update_count"] -
-                        disconnected_before["clock"]["update_count"])
-        assert seconds >= 2 and update_delta > 0, (disconnected_before, disconnected_after)
+        disconnected_update_delta = (disconnected_after["clock"]["update_count"] -
+                                       disconnected_before["clock"]["update_count"])
+        assert seconds >= 2 and disconnected_update_delta > 0, (disconnected_before, disconnected_after)
         # The reference follows every owned 10 ms tick, including partial
         # whole-second windows; it is not an arbitrary integer production cap.
-        expected_tick_production = Decimal(update_delta) * Decimal("0.02")
+        expected_tick_production = Decimal(disconnected_update_delta) * Decimal("0.02")
         produced = (Decimal(disconnected_after["game"]["lifetime_clips"]) -
                     Decimal(disconnected_before["game"]["lifetime_clips"]))
         assert produced == expected_tick_production, {
             "before": disconnected_before, "after": disconnected_after,
             "expectedTickProduction": str(expected_tick_production),
+            "disconnectedUpdateDelta": disconnected_update_delta,
         }
         assert Decimal(disconnected_before["game"]["wire"]) - Decimal(disconnected_after["game"]["wire"]) == produced
         assert disconnected_after["game"]["auto_clipper_rate"] == "2"
@@ -1834,7 +1835,7 @@ def run_autoclipper_native_evidence(binary: Path, executable: str, version: str)
             "twoAnonymousPagesAndCanonicalCostDisplay": "6.1 stored / 6.10 shown; 6.21 unchanged",
             "firstPostRevealWireCharge": str(wire_charge),
             "zeroClientSeconds": seconds, "zeroClientProduced": str(produced),
-            "zeroClientTickUpdates": update_delta,
+            "zeroClientTickUpdates": disconnected_update_delta,
             "zeroClientExpectedTickProduction": str(expected_tick_production),
             "zeroClientRate": disconnected_after["game"]["auto_clipper_rate"],
             "wirePurchasesAfterReveal": wire_purchases,
