@@ -1608,18 +1608,6 @@ def run_autoclipper_native_evidence(binary: Path, executable: str, version: str)
              value["consoleMessages"][-1] == "AutoClipper 1 purchased.",
              "first stored successor 6.1 and 6.10 presentation on both pages")
 
-        before_rejection = current()["game"]
-        assert Decimal(before_rejection["funds"]) < Decimal("6.1"), before_rejection
-        press(page2, "buy_auto_clipper", 422)
-        after_rejection = current()["game"]
-        assert after_rejection["auto_clippers"] == "1"
-        assert after_rejection["auto_clipper_cost"] == "6.1"
-        assert after_rejection["lifetime_clips"] == before_rejection["lifetime_clips"]
-        assert after_rejection["wire"] == "0"
-        assert (Decimal(after_rejection["funds"]) - Decimal(before_rejection["funds"]) ==
-                Decimal(after_rejection["income"]) - Decimal(before_rejection["income"]))
-        assert after_rejection["console_messages"] == before_rejection["console_messages"]
-
         # The same legal $0.04 price now replenishes Funds through real sales;
         # there is still no Funds setter or caller-selected server outcome.
         wait_for(current, lambda view: Decimal(view["game"]["funds"]) >= Decimal("6.1"),
@@ -1636,6 +1624,24 @@ def run_autoclipper_native_evidence(binary: Path, executable: str, version: str)
              value["autoClipperCost"] == "6.21" and
              value["consoleMessages"][-1] == "AutoClipper 2 purchased.",
              "second stored successor on both native pages")
+
+        # Full Views and real sales continue while the native feedback settles.
+        # The second purchase may therefore become affordable before a third.
+        # Reject only at a real below-current-cost point rather than assume it.
+        before_rejection = current()["game"]
+        assert after_second["auto_clippers"] == "2"
+        assert after_second["auto_clipper_cost"] == "6.21"
+        assert (Decimal(before_rejection["funds"]) <
+                Decimal(before_rejection["auto_clipper_cost"])), before_rejection
+        press(page2, "buy_auto_clipper", 422)
+        after_rejection = current()["game"]
+        assert after_rejection["auto_clippers"] == "2"
+        assert after_rejection["auto_clipper_cost"] == "6.21"
+        assert after_rejection["lifetime_clips"] == before_rejection["lifetime_clips"]
+        assert after_rejection["wire"] == "0"
+        assert (Decimal(after_rejection["funds"]) - Decimal(before_rejection["funds"]) ==
+                Decimal(after_rejection["income"]) - Decimal(before_rejection["income"]))
+        assert after_rejection["console_messages"] == before_rejection["console_messages"]
 
         # Terminal same-ID replay through the same real proxy/server returns the
         # original receipt after the later purchase and does not create producer 3.
@@ -1828,6 +1834,9 @@ def run_autoclipper_native_evidence(binary: Path, executable: str, version: str)
             "firstCharge": str(charge), "firstStoredSuccessor": after["auto_clipper_cost"],
             "firstReceiptRevision": first["response_body"]["revision"],
             "belowCurrentCostRejected": True,
+            "belowCurrentCostCase": {"count": after_rejection["auto_clippers"],
+                "fundsBefore": before_rejection["funds"], "storedCost": before_rejection["auto_clipper_cost"],
+                "fundsAfter": after_rejection["funds"], "storedCostAfter": after_rejection["auto_clipper_cost"]},
             "permanentRevealBelowFive": latched_below_five,
             "secondCharge": str(second_charge), "secondStoredSuccessor": after_second["auto_clipper_cost"],
             "secondReceiptRevision": second["response_body"]["revision"],
