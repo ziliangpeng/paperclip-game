@@ -3,6 +3,7 @@
 use super::amount::{Amount, IntegralAmount, NonNegativeAmount};
 use super::clock::ClockState;
 use super::rng::GameRng;
+use num_bigint::BigInt;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProState {
@@ -26,6 +27,30 @@ pub struct ProState {
 }
 
 impl ProState {
+    /// Current Marketing cost in whole dollars, exactly derived from its stored level.
+    /// The level is already persisted; keeping the derived cost avoids a second
+    /// authority that could disagree after recovery.
+    pub fn marketing_cost(&self) -> Option<Amount> {
+        let unit = Amount::from_i128(1);
+        let level = self.marketing_level.amount().mantissa() / unit.mantissa();
+        if level < BigInt::from(1u8) {
+            return None;
+        }
+        let mut exponent = level - BigInt::from(1u8);
+        let mut power = BigInt::from(1u8);
+        let mut base = BigInt::from(2u8);
+        while exponent > BigInt::from(0u8) {
+            if &exponent % BigInt::from(2u8) == BigInt::from(1u8) {
+                power *= &base;
+            }
+            exponent /= BigInt::from(2u8);
+            if exponent > BigInt::from(0u8) {
+                base = &base * &base;
+            }
+        }
+        Some(Amount::from_i128(100).multiply_integer(&power))
+    }
+
     pub(crate) fn fresh() -> Self {
         Self {
             lifetime_clips: NonNegativeAmount::zero(),
@@ -91,6 +116,10 @@ mod tests {
         assert_eq!(state.wire_quote.to_string(), "20");
         assert_eq!(state.price_per_clip.to_string(), "0.25");
         assert_eq!(state.marketing_level.to_string(), "1");
+        assert_eq!(
+            state.marketing_cost().map(|cost| cost.to_string()),
+            Some("100".to_owned())
+        );
         assert_eq!(state.trust.to_string(), "2");
         assert_eq!(state.processors.to_string(), "1");
         assert_eq!(state.memory.to_string(), "1");
