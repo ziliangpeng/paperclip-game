@@ -1772,19 +1772,29 @@ def run_autoclipper_native_evidence(binary: Path, executable: str, version: str)
         recovered = current()
         update_delta = recovered["clock"]["update_count"] - saved["clock"]["update_count"]
         assert update_delta >= 0
-        recovered_seconds = (recovered["clock"]["update_count"] // 100 -
-                             saved["clock"]["update_count"] // 100)
-        expected_production = min(2 * recovered_seconds, int(Decimal(saved["pro"]["wire"])))
-        if recovered_seconds == 0:
-            expected_rate = Decimal(saved["pro"]["auto_clipper_rate"])
-        else:
-            wire_before_latest_second = (Decimal(saved["pro"]["wire"]) -
-                                         Decimal(2 * (recovered_seconds - 1)))
-            expected_rate = max(Decimal("0"), min(Decimal("2"), wire_before_latest_second))
+        assert update_delta <= 5_000, "bounded recovered online-tick reference"
+        # Replay only online updates after restoration. The stored partial second
+        # continues exactly, and each ordinary G01 Wire gate/request is observed.
+        expected_lifetime = Decimal(saved["pro"]["lifetime_clips"])
+        expected_wire = Decimal(saved["pro"]["wire"])
+        expected_accumulator = Decimal(saved["pro"]["auto_clipper_production_accumulator"])
+        expected_rate = Decimal(saved["pro"]["auto_clipper_rate"])
+        expected_production = Decimal("0")
+        tick_request = Decimal("0.02")  # two producers / 100 updates per second
+        for tick_offset in range(1, update_delta + 1):
+            actual = min(tick_request, expected_wire) if expected_wire >= Decimal("1") else Decimal("0")
+            expected_production += actual
+            expected_lifetime += actual
+            expected_wire -= actual
+            expected_accumulator += actual
+            current_update = saved["clock"]["update_count"] + tick_offset - 1
+            if (saved["clock"]["update_count"] + tick_offset) % 100 == 0:
+                expected_rate = expected_accumulator
+                expected_accumulator = Decimal("0")
         assert Decimal(recovered["game"]["auto_clipper_rate"]) == expected_rate
         assert recovered["revision"] - saved["revision"] == update_delta
-        assert Decimal(recovered["game"]["lifetime_clips"]) - Decimal(saved["pro"]["lifetime_clips"]) == expected_production
-        assert Decimal(saved["pro"]["wire"]) - Decimal(recovered["game"]["wire"]) == expected_production
+        assert Decimal(recovered["game"]["lifetime_clips"]) == expected_lifetime
+        assert Decimal(recovered["game"]["wire"]) == expected_wire
         assert recovered["run_id"] != old_run
         assert recovered["game"]["auto_clippers"] == "2"
         assert recovered["game"]["auto_clipper_cost"] == "6.21"

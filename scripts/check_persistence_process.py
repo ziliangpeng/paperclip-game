@@ -73,11 +73,12 @@ STORED_PRO_FIELDS = {
     "wire_price_counter", "wire_purchase_count", "wire_inactivity_ticks",
     "trust", "processors", "memory", "computing_hidden", "projects_hidden",
     "auto_clipper_revealed", "auto_clippers", "auto_clipper_cost",
-    "auto_clipper_rate", "console_messages",
+    "auto_clipper_rate", "auto_clipper_production_accumulator", "console_messages",
 }
 INTERNAL_PRO_FIELDS = {
     "marketing_effectiveness", "demand_boost", "prestige_u", "wire_base_price",
     "wire_price_counter", "wire_purchase_count", "wire_inactivity_ticks",
+    "auto_clipper_production_accumulator",
 }
 
 
@@ -92,7 +93,8 @@ def assert_stored_pro(pro: dict[str, Any]) -> dict[str, Any]:
     for field in ("wire_price_counter", "wire_purchase_count", "wire_inactivity_ticks"):
         value = pro[field]
         assert type(value) is int and 0 <= value <= api.SAFE_INTEGER
-    for field in ("marketing_effectiveness", "demand_boost", "wire_base_price"):
+    for field in ("marketing_effectiveness", "demand_boost", "wire_base_price",
+                  "auto_clipper_production_accumulator"):
         value = pro[field]
         assert isinstance(value, str) and re.fullmatch(
             r"(?:0|[1-9][0-9]*)(?:\.[0-9]*[1-9])?", value
@@ -114,7 +116,7 @@ AMOUNT_SCALE = 10**18
 TEMPORAL_PRO_FIELDS = {
     "unsold_clips", "funds", "wire_quote", "clips_sold", "income",
     "last_sale_revenue", "wire_base_price", "wire_price_counter",
-    "wire_inactivity_ticks",
+    "wire_inactivity_ticks", "auto_clipper_production_accumulator",
 }
 
 

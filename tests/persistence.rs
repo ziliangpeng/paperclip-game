@@ -318,6 +318,82 @@ fn strict_stored_payload_negative_table_preserves_existing_raw_database() {
     );
 }
 
+fn r1_corrupt_autoclipper_snapshot(startup: &StartupSnapshot, impossible_rate: bool) -> Snapshot {
+    let mut invalid = snapshot(startup, 1);
+    invalid.pro.auto_clippers = IntegralAmount::from_i128(1);
+    invalid.pro.auto_clipper_revealed = impossible_rate;
+    invalid.pro.auto_clipper_cost = Amount::parse("6.1").unwrap();
+    invalid.pro.auto_clipper_rate = if impossible_rate {
+        NonNegativeAmount::from_i128(999).unwrap()
+    } else {
+        NonNegativeAmount::zero()
+    };
+    invalid
+}
+
+fn r1_assert_autoclipper_corruption_fails_store_and_startup(impossible_rate: bool) {
+    let commit_directory = TestDirectory::new();
+    let commit_path = commit_directory.database();
+    let mut startup = open(&commit_path);
+    let good = snapshot(&startup, 0);
+    let invalid = r1_corrupt_autoclipper_snapshot(&startup, impossible_rate);
+    let raw = String::from_utf8(serde_json::to_vec(&invalid).unwrap()).unwrap();
+    assert_eq!(
+        Snapshot::from_canonical_bytes(raw.as_bytes()),
+        Err(SnapshotError::DomainViolation)
+    );
+    let good_payload = payload(&commit_path);
+    assert_eq!(
+        startup.store.commit(1, &invalid),
+        Err(StorageError::Snapshot(SnapshotError::DomainViolation))
+    );
+    assert_eq!(payload(&commit_path), good_payload);
+    assert_eq!(startup.store.last_revision(), 0);
+    assert_eq!(startup.store.last_sequence(), 0);
+    drop(startup);
+    let reopened = open(&commit_path);
+    assert_eq!(reopened.capture_sequence, 0);
+    assert_eq!(reopened.revision, 0);
+    assert_eq!(reopened.state.pro.auto_clippers.to_string(), "0");
+    assert!(!reopened.state.pro.auto_clipper_revealed);
+    assert_eq!(state_snapshot(&reopened.state, 0), good);
+    drop(reopened);
+
+    let startup_directory = TestDirectory::new();
+    let startup_path = startup_directory.database();
+    let startup = open(&startup_path);
+    let initial = snapshot(&startup, 0);
+    let invalid = r1_corrupt_autoclipper_snapshot(&startup, impossible_rate);
+    drop(startup);
+    replace_payload(
+        &startup_path,
+        &String::from_utf8(serde_json::to_vec(&invalid).unwrap()).unwrap(),
+    );
+    assert_rejected_without_mutation(
+        &startup_directory,
+        &initial,
+        StorageError::Snapshot(SnapshotError::DomainViolation),
+    );
+    eprintln!(
+        "R1 strict V3/store/startup rejected {} without changing the last good row",
+        if impossible_rate {
+            "stored rate above producer count"
+        } else {
+            "hidden producer"
+        }
+    );
+}
+
+#[test]
+fn r1_hidden_producer_fails_decode_commit_and_startup_without_losing_good_row() {
+    r1_assert_autoclipper_corruption_fails_store_and_startup(false);
+}
+
+#[test]
+fn r1_impossible_latest_second_rate_fails_decode_commit_and_startup_without_losing_good_row() {
+    r1_assert_autoclipper_corruption_fails_store_and_startup(true);
+}
+
 #[test]
 fn checksum_metadata_utf8_and_schema_faults_are_explicit_and_non_mutating() {
     let mutations: [PathMutation; 7] = [
@@ -817,6 +893,10 @@ fn legacy_v1_bytes(snapshot: &Snapshot) -> Vec<u8> {
             serde_json::to_string(&p.auto_clipper_rate).unwrap(),
         ),
         (
+            "auto_clipper_production_accumulator",
+            serde_json::to_string(&p.auto_clipper_production_accumulator).unwrap(),
+        ),
+        (
             "console_messages",
             serde_json::to_string(&p.console_messages).unwrap(),
         ),
@@ -894,6 +974,10 @@ fn legacy_v2_bytes(snapshot: &Snapshot) -> Vec<u8> {
         (
             "auto_clipper_rate",
             serde_json::to_string(&p.auto_clipper_rate).unwrap(),
+        ),
+        (
+            "auto_clipper_production_accumulator",
+            serde_json::to_string(&p.auto_clipper_production_accumulator).unwrap(),
         ),
         (
             "console_messages",

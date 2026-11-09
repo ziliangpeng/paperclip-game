@@ -59,6 +59,7 @@ pub struct ProSnapshot {
     pub auto_clippers: IntegralAmount,
     pub auto_clipper_cost: Amount,
     pub auto_clipper_rate: NonNegativeAmount,
+    pub auto_clipper_production_accumulator: NonNegativeAmount,
     pub console_messages: [String; 5],
 }
 
@@ -370,6 +371,7 @@ impl ProSnapshot {
             auto_clippers: state.auto_clippers.clone(),
             auto_clipper_cost: state.auto_clipper_cost.clone(),
             auto_clipper_rate: state.auto_clipper_rate.clone(),
+            auto_clipper_production_accumulator: state.auto_clipper_production_accumulator.clone(),
             console_messages: state.console_messages.clone(),
         }
     }
@@ -405,6 +407,7 @@ impl ProSnapshot {
             auto_clippers: self.auto_clippers.clone(),
             auto_clipper_cost: self.auto_clipper_cost.clone(),
             auto_clipper_rate: self.auto_clipper_rate.clone(),
+            auto_clipper_production_accumulator: self.auto_clipper_production_accumulator.clone(),
             console_messages: self.console_messages.clone(),
         })
     }
@@ -422,6 +425,15 @@ fn validate_current_pro(state: &ProState) -> Result<(), SnapshotError> {
         if count.amount().is_negative() {
             return Err(SnapshotError::DomainViolation);
         }
+    }
+    // A legal producer purchase always reveals. Actual output and its partial-
+    // second accumulator cannot exceed the whole request for the stored count.
+    // Wire==0 says nothing about historical output and is deliberately unrelated.
+    if (state.auto_clippers.amount() > &Amount::zero() && !state.auto_clipper_revealed)
+        || state.auto_clipper_rate.amount() > state.auto_clippers.amount()
+        || state.auto_clipper_production_accumulator.amount() > state.auto_clippers.amount()
+    {
+        return Err(SnapshotError::DomainViolation);
     }
     // These are conserved ledgers, not disjoint physical inventories: production
     // increments all three, then sales transfer Unsold into ClipsSold.
@@ -654,6 +666,8 @@ mod tests {
         state.pro.auto_clippers = IntegralAmount::from_i128(7);
         state.pro.auto_clipper_cost = Amount::parse("6.21").unwrap();
         state.pro.auto_clipper_rate = Amount::parse("1.5").unwrap().nonnegative().unwrap();
+        state.pro.auto_clipper_production_accumulator =
+            Amount::parse("0.25").unwrap().nonnegative().unwrap();
         state.pro.console_messages = std::array::from_fn(|index| {
             if index == 4 {
                 "AutoClipper 7 purchased.".to_owned()
@@ -730,6 +744,77 @@ mod tests {
         eprintln!(
             "complete snapshot: exact tiny/huge/signed Amounts, clock 251->271, partial-byte RNG and ledger continuation matched"
         );
+    }
+
+    #[test]
+    fn r1_snapshot_rejects_hidden_producer_without_normalizing_it() {
+        let mut invalid = Snapshot::capture(&rich_state(), 1).expect("healthy fixture");
+        invalid.pro.auto_clippers = IntegralAmount::from_i128(1);
+        invalid.pro.auto_clipper_revealed = false;
+        invalid.pro.auto_clipper_rate = NonNegativeAmount::zero();
+        invalid.pro.auto_clipper_cost = Amount::parse("6.1").unwrap();
+        let bytes = serde_json::to_vec(&invalid).unwrap();
+        assert_eq!(
+            Snapshot::from_canonical_bytes(&bytes),
+            Err(SnapshotError::DomainViolation)
+        );
+        assert_eq!(
+            invalid.to_canonical_bytes(),
+            Err(SnapshotError::DomainViolation)
+        );
+        assert_eq!(invalid.pro.auto_clipper_cost.to_string(), "6.1");
+        assert!(!invalid.pro.auto_clipper_revealed);
+    }
+
+    #[test]
+    fn r1_snapshot_rejects_rate_above_count_and_keeps_valid_zero_and_prepurchase() {
+        let mut invalid = Snapshot::capture(&rich_state(), 1).expect("healthy fixture");
+        invalid.pro.auto_clippers = IntegralAmount::from_i128(1);
+        invalid.pro.auto_clipper_revealed = true;
+        invalid.pro.auto_clipper_rate = NonNegativeAmount::from_i128(999).unwrap();
+        invalid.pro.auto_clipper_cost = Amount::parse("6.1").unwrap();
+        let bytes = serde_json::to_vec(&invalid).unwrap();
+        assert_eq!(
+            Snapshot::from_canonical_bytes(&bytes),
+            Err(SnapshotError::DomainViolation)
+        );
+        assert_eq!(
+            invalid.to_canonical_bytes(),
+            Err(SnapshotError::DomainViolation)
+        );
+
+        let mut bad_accumulator = Snapshot::capture(&rich_state(), 1).unwrap();
+        bad_accumulator.pro.auto_clippers = IntegralAmount::from_i128(1);
+        bad_accumulator.pro.auto_clipper_rate = NonNegativeAmount::zero();
+        bad_accumulator.pro.auto_clipper_production_accumulator =
+            NonNegativeAmount::from_i128(2).unwrap();
+        assert_eq!(
+            Snapshot::from_canonical_bytes(&serde_json::to_vec(&bad_accumulator).unwrap()),
+            Err(SnapshotError::DomainViolation)
+        );
+
+        // Zero producers hidden or pre-purchase revealed are valid. Stored cost
+        // remains independent of a producer-level formula on restoration.
+        let fresh = GameState::fresh(GameRng::from_test_seed([92u8; 32]));
+        let mut pre_purchase = Snapshot::capture(&fresh, 0).unwrap();
+        pre_purchase.pro.auto_clipper_revealed = true;
+        let bytes = pre_purchase.to_canonical_bytes().unwrap();
+        let restored = Snapshot::from_canonical_bytes(&bytes)
+            .unwrap()
+            .restore()
+            .unwrap();
+        assert!(restored.state.pro.auto_clipper_revealed);
+        assert_eq!(restored.state.pro.auto_clippers.to_string(), "0");
+        assert_eq!(restored.state.pro.auto_clipper_rate.to_string(), "0");
+        assert_eq!(
+            restored
+                .state
+                .pro
+                .auto_clipper_production_accumulator
+                .to_string(),
+            "0"
+        );
+        assert_eq!(restored.state.pro.auto_clipper_cost.to_string(), "5");
     }
 
     #[test]
@@ -1029,6 +1114,7 @@ mod tests {
         // all production still Unsold; later migration must not infer missing sales.
         let mut original = rich_state();
         original.pro.auto_clipper_rate = NonNegativeAmount::zero();
+        original.pro.auto_clipper_production_accumulator = NonNegativeAmount::zero();
         original.pro.console_messages = std::array::from_fn(|_| String::new());
         original.pro.unsold_clips = original.pro.lifetime_clips.clone();
         original.pro.clips_sold = NonNegativeAmount::zero();
@@ -1104,8 +1190,9 @@ mod tests {
         let current = Snapshot::capture(&original, 92).unwrap();
         let canonical = String::from_utf8(current.to_canonical_bytes().unwrap()).unwrap();
         let additions = format!(
-            ",\"auto_clipper_rate\":{},\"console_messages\":{}",
+            ",\"auto_clipper_rate\":{},\"auto_clipper_production_accumulator\":{},\"console_messages\":{}",
             serde_json::to_string(&current.pro.auto_clipper_rate).unwrap(),
+            serde_json::to_string(&current.pro.auto_clipper_production_accumulator).unwrap(),
             serde_json::to_string(&current.pro.console_messages).unwrap()
         );
         assert!(canonical.contains(&additions));
@@ -1124,6 +1211,10 @@ mod tests {
             migrated.pro.console_messages,
             std::array::from_fn(|_| String::new())
         );
+        assert_eq!(
+            migrated.pro.auto_clipper_production_accumulator,
+            NonNegativeAmount::zero()
+        );
         assert_eq!(migrated.pro.lifetime_clips, original.pro.lifetime_clips);
 
         let restored = migrated.restore().unwrap().state;
@@ -1135,10 +1226,10 @@ mod tests {
         assert_same_state(&restored, &reopened);
         let mut left = restored;
         let mut right = reopened;
-        advance_auto_clippers(&mut left).unwrap();
-        advance_auto_clippers(&mut right).unwrap();
+        advance_auto_clippers(&mut left, true).unwrap();
+        advance_auto_clippers(&mut right, true).unwrap();
         assert_same_state(&left, &right);
-        assert_eq!(left.pro.auto_clipper_rate.to_string(), "7");
+        assert_eq!(left.pro.auto_clipper_rate.to_string(), "0.07");
         eprintln!(
             "G03 v2 migration: count 7/stored 6.21/reveal retained; no legacy rate/messages/offline gain inferred"
         );

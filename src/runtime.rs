@@ -559,9 +559,8 @@ impl<C: MonotonicClock> Writer<C> {
             economy::advance_fast_phase(&mut candidate).map_err(RuntimeFailure::Economy)?;
             economy::observe_auto_clipper_reveal(&mut candidate.pro);
         }
-        if cadence.second_due {
-            economy::advance_auto_clippers(&mut candidate).map_err(RuntimeFailure::Economy)?;
-        }
+        economy::advance_auto_clippers(&mut candidate, cadence.second_due)
+            .map_err(RuntimeFailure::Economy)?;
         self.state = candidate;
         self.revision = next_revision;
         self.lag_debt_nanos -= UPDATE_QUANTUM_NANOS;
@@ -1021,14 +1020,14 @@ mod tests {
         let receipt = handle.execute(command(7_777)).await.unwrap();
         assert_eq!(receipt.result, Ok(()));
         clock.advance(Duration::from_millis(10));
-        let live = wait_for(&handle, |view| view.game.clock.update_count() >= 3_001).await;
+        let live = wait_for(&handle, |view| view.game.clock.update_count() == 3_001).await;
         assert!(live.revision > receipt.revision);
-        assert_eq!(live.game.pro.wire.to_string(), "69");
-        assert_eq!(live.game.pro.lifetime_clips.to_string(), "31");
+        assert_eq!(live.game.pro.wire.to_string(), "68.99");
+        assert_eq!(live.game.pro.lifetime_clips.to_string(), "31.01");
         assert_eq!(live.game.pro.auto_clippers.to_string(), "1");
         assert_eq!(live.game.pro.auto_clipper_rate.to_string(), "1");
         eprintln!(
-            "G03/PERSIST-SNAPSHOT-30S-NONBLOCK: one producer continued through real SQLite busy capture; 30 automatic + one manual clips"
+            "G03/PERSIST-SNAPSHOT-30S-NONBLOCK: one producer continued through real SQLite busy capture; 30.01 automatic + one manual clip reaches exact update 3,001"
         );
         clock.advance(Duration::from_secs(30));
         let still_degraded = wait_for_health(&persistence, |health| {
@@ -1155,6 +1154,180 @@ mod tests {
         );
         assert_eq!(handle.view().revision, 1);
         runtime.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn r1_update_90_purchase_accrues_only_owned_ticks_and_full_later_second() {
+        let mut state = GameState::fresh(GameRng::from_test_seed([90u8; 32]));
+        state.clock =
+            crate::game::clock::ClockState::from_snapshot_parts(90, 0, 90, 90, 4_000_000, 56)
+                .unwrap();
+        state.pro.funds = Amount::from_i128(5);
+        state.pro.auto_clipper_revealed = true;
+        state.pro.wire = Amount::parse("100").unwrap().nonnegative().unwrap();
+        let (runtime, handle, clock) = test_runtime_with_state(state);
+        let receipt = handle
+            .execute(Command::buy_auto_clipper(CommandId::new(9_090).unwrap()))
+            .await
+            .unwrap();
+        assert_eq!(receipt.result, Ok(()));
+        let purchased = wait_for(&handle, |view| view.process.applied_commands == 1).await;
+        assert_eq!(purchased.game.clock.update_count(), 90);
+        assert_eq!(purchased.game.pro.lifetime_clips.to_string(), "0");
+        assert_eq!(purchased.game.pro.auto_clipper_rate.to_string(), "0");
+
+        clock.advance(Duration::from_millis(100));
+        let boundary = wait_for(&handle, |view| view.game.clock.update_count() == 100).await;
+        eprintln!(
+            "R1 update 90 -> 100 ownership=10 ticks: lifetime={} wire={} rate={}",
+            boundary.game.pro.lifetime_clips,
+            boundary.game.pro.wire,
+            boundary.game.pro.auto_clipper_rate
+        );
+        assert_eq!(boundary.game.pro.lifetime_clips.to_string(), "0.1");
+        assert_eq!(boundary.game.pro.wire.to_string(), "99.9");
+        assert_eq!(boundary.game.pro.auto_clipper_rate.to_string(), "0.1");
+        for ledger in [
+            &boundary.game.pro.lifetime_clips,
+            &boundary.game.pro.unsold_clips,
+            &boundary.game.pro.unused_clips,
+        ] {
+            assert_eq!(ledger.to_string(), "0.1");
+        }
+
+        // The following complete owned second contributes exactly one more clip.
+        clock.advance(Duration::from_secs(1));
+        let full_second = wait_for(&handle, |view| view.game.clock.update_count() == 200).await;
+        assert_eq!(full_second.game.pro.lifetime_clips.to_string(), "1.1");
+        assert_eq!(full_second.game.pro.wire.to_string(), "98.9");
+        assert_eq!(full_second.game.pro.auto_clipper_rate.to_string(), "1");
+        runtime.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn r1_lagged_command_starts_production_only_after_its_writer_execution_tick() {
+        let mut state = GameState::fresh(GameRng::from_test_seed([91u8; 32]));
+        state.pro.funds = Amount::from_i128(5);
+        state.pro.auto_clipper_revealed = true;
+        state.pro.wire = Amount::parse("100").unwrap().nonnegative().unwrap();
+        let (runtime, handle, clock) = test_runtime_with_state(state);
+        // Prove the idle writer is waiting, then make the command pending before
+        // the one-second gap. The ordinary turn processes ten updates first.
+        wait_for(&handle, |view| view.process.writer_turns >= 1).await;
+        let pending = handle
+            .try_submit(Command::buy_auto_clipper(CommandId::new(9_091).unwrap()))
+            .unwrap();
+        clock.advance(Duration::from_secs(1));
+        let receipt = pending.wait().await.unwrap();
+        assert_eq!(receipt.result, Ok(()));
+        assert_eq!(
+            receipt.revision, 11,
+            "the lag turn executes ten updates before this one purchase"
+        );
+        // The writer may have drained the rest of the gap when this future is
+        // scheduled again; the latest watch value is not the execution-time View.
+        let boundary = wait_for(&handle, |view| view.game.clock.update_count() == 100).await;
+        eprintln!(
+            "R1 lagged purchase update=10 -> 100 ownership=90 ticks: lifetime={} wire={} rate={}",
+            boundary.game.pro.lifetime_clips,
+            boundary.game.pro.wire,
+            boundary.game.pro.auto_clipper_rate
+        );
+        assert_eq!(boundary.game.pro.lifetime_clips.to_string(), "0.9");
+        assert_eq!(boundary.game.pro.wire.to_string(), "99.1");
+        assert_eq!(boundary.game.pro.auto_clipper_rate.to_string(), "0.9");
+        runtime.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn r1_restore_preserves_partial_second_production_without_offline_backfill() {
+        let mut state = GameState::fresh(GameRng::from_test_seed([93u8; 32]));
+        state.clock =
+            crate::game::clock::ClockState::from_snapshot_parts(90, 0, 90, 90, 4_000_000, 56)
+                .unwrap();
+        state.pro.funds = Amount::from_i128(5);
+        state.pro.auto_clipper_revealed = true;
+        state.pro.wire = Amount::parse("100").unwrap().nonnegative().unwrap();
+        let (runtime, handle, clock) = test_runtime_with_state(state);
+        assert_eq!(
+            handle
+                .execute(Command::buy_auto_clipper(CommandId::new(9_093).unwrap()))
+                .await
+                .unwrap()
+                .result,
+            Ok(())
+        );
+        clock.advance(Duration::from_millis(400));
+        let saved = wait_for(&handle, |view| view.game.clock.update_count() == 130).await;
+        assert_eq!(saved.game.pro.lifetime_clips.to_string(), "0.4");
+        assert_eq!(saved.game.pro.auto_clipper_rate.to_string(), "0.1");
+        assert_eq!(
+            saved
+                .game
+                .pro
+                .auto_clipper_production_accumulator
+                .to_string(),
+            "0.3"
+        );
+        let snapshot = crate::snapshot::Snapshot::capture(&saved.game, saved.revision).unwrap();
+        let restored = crate::snapshot::Snapshot::from_canonical_bytes(
+            &snapshot.to_canonical_bytes().unwrap(),
+        )
+        .unwrap()
+        .restore()
+        .unwrap();
+        assert_eq!(restored.state.pro, saved.game.pro);
+        runtime.shutdown().await.unwrap();
+
+        let (resumed, resumed_handle, resumed_clock) = test_runtime_with_state(restored.state);
+        let initial = resumed_handle.view();
+        assert_eq!(initial.game.clock.update_count(), 130);
+        assert_eq!(initial.game.pro.lifetime_clips.to_string(), "0.4");
+        assert_eq!(
+            initial
+                .game
+                .pro
+                .auto_clipper_production_accumulator
+                .to_string(),
+            "0.3"
+        );
+        assert_eq!(initial.process.lag_debt_nanos, 0);
+        assert_ne!(initial.run_id, saved.run_id);
+
+        resumed_clock.advance(Duration::from_millis(70));
+        let partial = wait_for(&resumed_handle, |view| {
+            view.game.clock.update_count() == 137
+        })
+        .await;
+        assert_eq!(partial.game.pro.lifetime_clips.to_string(), "0.47");
+        assert_eq!(partial.game.pro.auto_clipper_rate.to_string(), "0.1");
+        assert_eq!(
+            partial
+                .game
+                .pro
+                .auto_clipper_production_accumulator
+                .to_string(),
+            "0.37"
+        );
+        resumed_clock.advance(Duration::from_millis(630));
+        let complete = wait_for(&resumed_handle, |view| {
+            view.game.clock.update_count() == 200
+        })
+        .await;
+        assert_eq!(complete.game.pro.lifetime_clips.to_string(), "1.1");
+        assert_eq!(complete.game.pro.auto_clipper_rate.to_string(), "1");
+        assert_eq!(
+            complete
+                .game
+                .pro
+                .auto_clipper_production_accumulator
+                .to_string(),
+            "0"
+        );
+        eprintln!(
+            "R1 mid-window restore: update 130 lifetime 0.4/accumulator 0.3 resumed to 0.47 at 137 and 1.1/rate 1 at 200; zero startup backfill"
+        );
+        resumed.shutdown().await.unwrap();
     }
 
     #[tokio::test]

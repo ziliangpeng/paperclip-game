@@ -73,7 +73,7 @@ async fn real_clock_two_autoclippers_advance_without_browser_or_sse() {
     let observed = timeout(Duration::from_secs(4), async {
         loop {
             let current = views.borrow().clone();
-            if current.game.clock.update_count() >= 205 {
+            if current.game.clock.update_count() >= 200 {
                 return current;
             }
             views.changed().await.expect("real writer stays alive");
@@ -81,9 +81,19 @@ async fn real_clock_two_autoclippers_advance_without_browser_or_sse() {
     })
     .await
     .unwrap();
-    assert_eq!(observed.game.pro.lifetime_clips.to_string(), "4");
-    assert_eq!(observed.game.pro.unused_clips.to_string(), "4");
-    assert_eq!(observed.game.pro.wire.to_string(), "46");
+    let expected = Amount::quantize_ratio(
+        &(num_bigint::BigInt::from(observed.game.clock.update_count()) * 2u8),
+        &num_bigint::BigInt::from(100u8),
+    )
+    .unwrap()
+    .nonnegative()
+    .unwrap();
+    assert_eq!(observed.game.pro.lifetime_clips, expected);
+    assert_eq!(observed.game.pro.unused_clips, expected);
+    assert_eq!(
+        observed.game.pro.wire,
+        NonNegativeAmount::new(&Amount::from_i128(50) - expected.amount()).unwrap()
+    );
     assert_eq!(observed.game.pro.auto_clipper_rate.to_string(), "2");
     assert_eq!(
         observed
@@ -95,7 +105,9 @@ async fn real_clock_two_autoclippers_advance_without_browser_or_sse() {
     );
     assert_eq!(observed.process.applied_commands, 0);
     eprintln!(
-        "RT-NO-CLIENTS-CONTINUOUS G03: real server, zero browser/SSE/Commands, two producers -> four clips in two seconds"
+        "RT-NO-CLIENTS-CONTINUOUS G03: real server, zero browser/SSE/Commands; tick-exact expected lifetime={} at update={}",
+        observed.game.pro.lifetime_clips,
+        observed.game.clock.update_count()
     );
     runtime.shutdown().await.unwrap();
 }

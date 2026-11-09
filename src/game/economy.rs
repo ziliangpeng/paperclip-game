@@ -227,26 +227,41 @@ pub fn buy_auto_clipper(state: &mut ProState) -> Result<(), EconomyError> {
     Ok(())
 }
 
-/// One complete logical second of nominal one-clip/s producer requests.
-pub fn advance_auto_clippers(state: &mut GameState) -> Result<(), EconomyError> {
+/// One logical 10 ms step of nominal one-clip/s producer requests.
+/// Only time after the writer admitted ownership is part of this request.
+pub fn advance_auto_clippers(state: &mut GameState, second_due: bool) -> Result<(), EconomyError> {
     let mut next = state.clone();
     let request = whole(&next.pro.auto_clippers);
-    if request < BigInt::from(0u8) {
+    if request < BigInt::from(0u8)
+        || (request > BigInt::from(0u8) && !next.pro.auto_clipper_revealed)
+    {
         return Err(EconomyError::InvalidState);
     }
-    next.pro.auto_clipper_rate = if request == BigInt::from(0u8) {
-        // Crucially, this branch never calls the ordinary conversion primitive.
-        NonNegativeAmount::zero()
-    } else if next.pro.wire < NonNegativeAmount::from_i128(1).expect("one is nonnegative") {
-        // G01's ordinary at-least-one-Wire gate precedes every automatic request.
+    let actual = if request == BigInt::from(0u8)
+        || next.pro.wire < NonNegativeAmount::from_i128(1).expect("one is nonnegative")
+    {
+        // Zero producers never call conversion. G01's ordinary Wire gate also
+        // precedes every computed request, including positive remainders.
         NonNegativeAmount::zero()
     } else {
-        match convert_wire_ratio(&mut next.pro, &request, &BigInt::from(1u8)) {
+        // 10 ms is exactly 1/100 second on the Amount grid. Quantize only the
+        // operation-local request; the later capped conserved transfer is exact.
+        match convert_wire_ratio(&mut next.pro, &request, &BigInt::from(100u8)) {
             Ok(actual) => actual,
             Err(ConversionError::InsufficientWire) => NonNegativeAmount::zero(),
             Err(_) => return Err(EconomyError::InvalidState),
         }
     };
+    next.pro.auto_clipper_production_accumulator = next
+        .pro
+        .auto_clipper_production_accumulator
+        .add_exact(&actual);
+    if second_due {
+        // Rollover reports the actual latest complete interval, never the
+        // producer count guessed from current elapsed or remaining Wire.
+        next.pro.auto_clipper_rate = next.pro.auto_clipper_production_accumulator.clone();
+        next.pro.auto_clipper_production_accumulator = NonNegativeAmount::zero();
+    }
     *state = next;
     Ok(())
 }
@@ -702,43 +717,114 @@ mod autoclipper_tests {
     fn first_and_second_producers_use_conserved_conversion_and_positive_final_cap() {
         let mut state = game();
         state.pro.auto_clippers = IntegralAmount::from_i128(1);
+        state.pro.auto_clipper_revealed = true;
         state.pro.wire = positive("2");
-        advance_auto_clippers(&mut state).unwrap();
+        for tick in 1..=100 {
+            // denom=100 quantizes 1/100 exactly on the 10^-18 grid per tick.
+            advance_auto_clippers(&mut state, tick % 100 == 0).unwrap();
+            if tick == 10 {
+                assert_eq!(state.pro.lifetime_clips.to_string(), "0.1");
+                assert_eq!(state.pro.auto_clipper_rate.to_string(), "0");
+            }
+        }
         assert_eq!(state.pro.wire.to_string(), "1");
         assert_eq!(state.pro.lifetime_clips.to_string(), "1");
         assert_eq!(state.pro.auto_clipper_rate.to_string(), "1");
-        advance_auto_clippers(&mut state).unwrap();
-        assert_eq!(state.pro.wire.to_string(), "0");
-        assert_eq!(state.pro.lifetime_clips.to_string(), "2");
-        assert_eq!(state.pro.auto_clipper_rate.to_string(), "1");
-        advance_auto_clippers(&mut state).unwrap();
-        assert_eq!(state.pro.lifetime_clips.to_string(), "2");
+        assert_eq!(
+            state.pro.auto_clipper_production_accumulator.to_string(),
+            "0"
+        );
+        for tick in 1..=100 {
+            advance_auto_clippers(&mut state, tick % 100 == 0).unwrap();
+        }
+        // G01 allows another 0.01 at Wire 1, then leaves 0.99 below its gate.
+        // Nothing can manufacture a full second clip from the missing stock.
+        assert_eq!(state.pro.wire.to_string(), "0.99");
+        assert_eq!(state.pro.lifetime_clips.to_string(), "1.01");
+        assert_eq!(state.pro.auto_clipper_rate.to_string(), "0.01");
+        for tick in 1..=100 {
+            advance_auto_clippers(&mut state, tick % 100 == 0).unwrap();
+        }
+        assert_eq!(state.pro.lifetime_clips.to_string(), "1.01");
         assert_eq!(state.pro.auto_clipper_rate.to_string(), "0");
 
         let mut fractional = game();
         fractional.pro.auto_clippers = IntegralAmount::from_i128(2);
+        fractional.pro.auto_clipper_revealed = true;
         fractional.pro.wire = positive("1.5");
-        advance_auto_clippers(&mut fractional).unwrap();
-        assert_eq!(fractional.pro.wire, NonNegativeAmount::zero());
+        for tick in 1..=100 {
+            advance_auto_clippers(&mut fractional, tick % 100 == 0).unwrap();
+        }
+        // 0.52 is produced while the G01 gate stays open; 0.98 is stranded
+        // strictly below one Wire, with exact conserved increments throughout.
+        assert_eq!(fractional.pro.wire.to_string(), "0.98");
         for ledger in [
             &fractional.pro.lifetime_clips,
             &fractional.pro.unsold_clips,
             &fractional.pro.unused_clips,
             &fractional.pro.auto_clipper_rate,
         ] {
-            assert_eq!(ledger, &positive("1.5"));
+            assert_eq!(ledger, &positive("0.52"));
         }
-        eprintln!("G01/G03 partial cap: requested 2, Wire 1.5 -> all three ledgers +1.5, Wire 0");
+        assert_eq!(
+            fractional
+                .pro
+                .auto_clipper_production_accumulator
+                .to_string(),
+            "0"
+        );
+
+        // A stock-limited final request itself can be fractional. Quantization
+        // applies only to this request, never to the conserved capped transfer.
+        let mut final_partial = game();
+        final_partial.pro.auto_clippers = IntegralAmount::from_i128(200);
+        final_partial.pro.auto_clipper_revealed = true;
+        final_partial.pro.wire = positive("1.005");
+        advance_auto_clippers(&mut final_partial, true).unwrap();
+        assert_eq!(final_partial.pro.wire, NonNegativeAmount::zero());
+        for ledger in [
+            &final_partial.pro.lifetime_clips,
+            &final_partial.pro.unsold_clips,
+            &final_partial.pro.unused_clips,
+            &final_partial.pro.auto_clipper_rate,
+        ] {
+            assert_eq!(ledger, &positive("1.005"));
+        }
+        assert_eq!(
+            final_partial
+                .pro
+                .auto_clipper_production_accumulator
+                .to_string(),
+            "0"
+        );
+        eprintln!(
+            "G01/G03 partial cap: count 200 requests 2, Wire 1.005 -> all three ledgers +1.005, Wire 0; sub-one stock produces nothing further"
+        );
     }
 
     #[test]
     fn zero_producers_or_no_elapsed_second_never_requests_or_mints() {
         let mut state = game();
         let before = state.clone();
-        advance_auto_clippers(&mut state).unwrap();
+        advance_auto_clippers(&mut state, false).unwrap();
+        advance_auto_clippers(&mut state, true).unwrap();
         assert_eq!(state.pro, before.pro);
         assert_eq!(state.clock, before.clock);
         assert_eq!(state.rng_state_hex(), before.rng_state_hex());
         assert_eq!(state.pro.auto_clipper_rate.to_string(), "0");
+        assert_eq!(
+            state.pro.auto_clipper_production_accumulator.to_string(),
+            "0"
+        );
+
+        let mut hidden = game();
+        hidden.pro.auto_clippers = IntegralAmount::from_i128(1);
+        let hidden_before = hidden.clone();
+        assert_eq!(
+            advance_auto_clippers(&mut hidden, true),
+            Err(EconomyError::InvalidState)
+        );
+        assert_eq!(hidden.pro, hidden_before.pro);
+        assert_eq!(hidden.rng_state_hex(), hidden_before.rng_state_hex());
     }
 }
