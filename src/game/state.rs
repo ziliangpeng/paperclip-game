@@ -128,6 +128,14 @@ mod tests {
         assert!(!state.auto_clipper_revealed);
         assert_eq!(state.auto_clippers.to_string(), "0");
         assert_eq!(state.auto_clipper_cost.to_string(), "5");
+
+        let game = GameState::fresh(GameRng::from_test_seed([0_u8; 32]));
+        assert_eq!(game.clock.update_count(), 0);
+        assert_eq!(game.clock.fast_phase(), 0);
+        assert_eq!(game.clock.second_phase(), 0);
+        assert_eq!(game.clock.slow_phase(), 0);
+        assert_eq!(game.clock.combat_remainder_nanos(), 0);
+        assert_eq!(game.clock.combat_pulses(), 0);
     }
 
     #[test]

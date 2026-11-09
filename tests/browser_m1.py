@@ -610,6 +610,7 @@ def dom_state(page: Cdp) -> dict[str, Any]:
       viewState: document.documentElement.dataset.viewState,
       lifetime: document.getElementById('lifetime-clips').dataset.canonical,
       headlineText: document.getElementById('lifetime-clips').textContent,
+      headlineTooltip: document.getElementById('lifetime-clips').title,
       unsold: document.getElementById('unsold-clips').dataset.canonical,
       unused: document.getElementById('unused-clips').dataset.canonical,
       funds: document.getElementById('funds').dataset.canonical,
@@ -1066,7 +1067,8 @@ def run_main_ui(browser: Browser, state: ProxyState, backend_port: int, page1: C
         "wire_quote": "20", "wire_spool_length": "1000",
     }
     for baseline in (first, second):
-        assert baseline["headlineText"] == "0" and baseline["unsold"] == baseline["unused"] == "0"
+        assert baseline["headlineText"] == "0" and baseline["headlineTooltip"] == "0"
+        assert baseline["unsold"] == baseline["unused"] == "0"
         assert baseline["funds"] == "0" and baseline["wire"] == "1000"
         assert baseline["spool"] == "1000" and baseline["wireQuote"] == "20"
         assert baseline["price"] == "0.25" and baseline["marketingLevel"] == "1"
@@ -1092,7 +1094,8 @@ def run_main_ui(browser: Browser, state: ProxyState, backend_port: int, page1: C
     state.command_release.set()
     def first_clip_rendered(value: dict[str, Any]) -> bool:
         return (value["lifetime"] == value["unsold"] == value["unused"] == "1" and
-                value["headlineText"] == "1" and value["wire"] == "999" and value["funds"] == "0")
+                value["headlineText"] == value["headlineTooltip"] == "1" and
+                value["wire"] == "999" and value["funds"] == "0")
     first_applied = wait_for(lambda: dom_state(page1),
                              lambda value: first_clip_rendered(value) and "applied" in value["status"],
                              "page one applied View and all three ledgers")
@@ -1121,7 +1124,8 @@ def run_main_ui(browser: Browser, state: ProxyState, backend_port: int, page1: C
     for page in (page1, page2):
         wait_for(lambda page=page: dom_state(page),
                  lambda value: (value["lifetime"] == value["unsold"] == value["unused"] == "2" and
-                                value["headlineText"] == "2" and value["wire"] == "998" and
+                                value["headlineText"] == value["headlineTooltip"] == "2" and
+                                value["wire"] == "998" and
                                 value["runId"] == initial_view["run_id"]),
                  "two-page second command convergence")
 
