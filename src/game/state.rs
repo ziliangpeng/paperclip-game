@@ -35,6 +35,12 @@ pub struct ProState {
     pub auto_clipper_revealed: bool,
     pub auto_clippers: IntegralAmount,
     pub auto_clipper_cost: Amount,
+    /// Actual Wire-limited automatic production in the latest complete second.
+    pub auto_clipper_rate: NonNegativeAmount,
+    /// Actual production accumulated in the current logical second.
+    pub auto_clipper_production_accumulator: NonNegativeAmount,
+    /// Newest-last general feedback, always exactly five slots.
+    pub console_messages: [String; 5],
 }
 
 impl ProState {
@@ -83,6 +89,9 @@ impl ProState {
             auto_clipper_revealed: false,
             auto_clippers: IntegralAmount::from_i128(0),
             auto_clipper_cost: Amount::from_i128(5),
+            auto_clipper_rate: NonNegativeAmount::zero(),
+            auto_clipper_production_accumulator: NonNegativeAmount::zero(),
+            console_messages: std::array::from_fn(|_| String::new()),
         }
     }
 }
@@ -141,6 +150,12 @@ mod tests {
         assert!(!state.auto_clipper_revealed);
         assert_eq!(state.auto_clippers.to_string(), "0");
         assert_eq!(state.auto_clipper_cost.to_string(), "5");
+        assert_eq!(state.auto_clipper_rate.to_string(), "0");
+        assert_eq!(state.auto_clipper_production_accumulator.to_string(), "0");
+        assert_eq!(
+            state.console_messages,
+            std::array::from_fn(|_| String::new())
+        );
 
         let game = GameState::fresh(GameRng::from_test_seed([0_u8; 32]));
         assert_eq!(game.clock.update_count(), 0);

@@ -1,6 +1,7 @@
 //! Exact G02 commands and 100 ms economy rules.
 
 use super::amount::{Amount, IntegralAmount, NonNegativeAmount, SafeU64};
+use super::conversion::{ConversionError, convert_wire_ratio};
 use super::evaluator::{EvaluatorError, ExactRatio, sale_request, wire_quote};
 use super::rng::GameRng;
 use super::state::{GameState, ProState};
@@ -161,6 +162,106 @@ pub fn buy_marketing(state: &mut ProState) -> Result<(), EconomyError> {
         .integral()
         .map_err(|_| EconomyError::InvalidState)?;
     refresh_demand(&mut next)?;
+    *state = next;
+    Ok(())
+}
+
+pub(crate) fn push_console_message(state: &mut ProState, message: String) {
+    state.console_messages.rotate_left(1);
+    state.console_messages[4] = message;
+}
+
+/// Latch reveal only after the authoritative Funds balance actually reaches 5.
+pub fn observe_auto_clipper_reveal(state: &mut ProState) {
+    if !state.auto_clipper_revealed && state.funds >= Amount::from_i128(5) {
+        state.auto_clipper_revealed = true;
+        push_console_message(state, "AutoClippers revealed: Funds reached $5.".to_owned());
+    }
+}
+
+/// Exact 5 + (11/10)^level, ceiled only at the final 10^-18 price boundary.
+/// This is an integer-exponent rational, not a binary64 transcendental operation.
+fn auto_clipper_successor_cost(level: &BigInt) -> Result<Amount, EconomyError> {
+    if *level < BigInt::from(1u8) {
+        return Err(EconomyError::InvalidState);
+    }
+    if *level > BigInt::from(MAX_EXACT_EXPONENT) {
+        return Err(EconomyError::ExponentResourceLimit);
+    }
+    let level = u32::try_from(level).map_err(|_| EconomyError::ExponentResourceLimit)?;
+    let numerator = BigInt::from(11u8).pow(level) * Amount::from_i128(1).mantissa();
+    let denominator = BigInt::from(10u8).pow(level);
+    let mut increment = &numerator / &denominator;
+    if numerator % &denominator != BigInt::from(0u8) {
+        increment += 1u8;
+    }
+    Ok(Amount::from_mantissa(
+        Amount::from_i128(5).mantissa() + increment,
+    ))
+}
+
+/// Buy exactly one producer at the stored current price at writer execution.
+pub fn buy_auto_clipper(state: &mut ProState) -> Result<(), EconomyError> {
+    let mut next = state.clone();
+    let charged = next.auto_clipper_cost.clone();
+    if charged < Amount::from_i128(5) || next.auto_clippers.amount().is_negative() {
+        return Err(EconomyError::InvalidState);
+    }
+    if next.funds < charged {
+        return Err(EconomyError::InsufficientFunds);
+    }
+    let level = whole(&next.auto_clippers) + BigInt::from(1u8);
+    let successor = auto_clipper_successor_cost(&level)?;
+    observe_auto_clipper_reveal(&mut next);
+    next.funds = &next.funds - &charged;
+    next.auto_clippers = Amount::from_i128(1)
+        .multiply_integer(&level)
+        .integral()
+        .map_err(|_| EconomyError::InvalidState)?;
+    next.auto_clipper_cost = successor;
+    // Keep bounded feedback independent of an unbounded exact successor's digits.
+    // The typed public cost fields carry that exact value; console remains short.
+    let message = format!("AutoClipper {} purchased.", next.auto_clippers);
+    push_console_message(&mut next, message);
+    *state = next;
+    Ok(())
+}
+
+/// One logical 10 ms step of nominal one-clip/s producer requests.
+/// Only time after the writer admitted ownership is part of this request.
+pub fn advance_auto_clippers(state: &mut GameState, second_due: bool) -> Result<(), EconomyError> {
+    let mut next = state.clone();
+    let request = whole(&next.pro.auto_clippers);
+    if request < BigInt::from(0u8)
+        || (request > BigInt::from(0u8) && !next.pro.auto_clipper_revealed)
+    {
+        return Err(EconomyError::InvalidState);
+    }
+    let actual = if request == BigInt::from(0u8)
+        || next.pro.wire < NonNegativeAmount::from_i128(1).expect("one is nonnegative")
+    {
+        // Zero producers never call conversion. G01's ordinary Wire gate also
+        // precedes every computed request, including positive remainders.
+        NonNegativeAmount::zero()
+    } else {
+        // 10 ms is exactly 1/100 second on the Amount grid. Quantize only the
+        // operation-local request; the later capped conserved transfer is exact.
+        match convert_wire_ratio(&mut next.pro, &request, &BigInt::from(100u8)) {
+            Ok(actual) => actual,
+            Err(ConversionError::InsufficientWire) => NonNegativeAmount::zero(),
+            Err(_) => return Err(EconomyError::InvalidState),
+        }
+    };
+    next.pro.auto_clipper_production_accumulator = next
+        .pro
+        .auto_clipper_production_accumulator
+        .add_exact(&actual);
+    if second_due {
+        // Rollover reports the actual latest complete interval, never the
+        // producer count guessed from current elapsed or remaining Wire.
+        next.pro.auto_clipper_rate = next.pro.auto_clipper_production_accumulator.clone();
+        next.pro.auto_clipper_production_accumulator = NonNegativeAmount::zero();
+    }
     *state = next;
     Ok(())
 }
@@ -484,5 +585,246 @@ mod tests {
             ))
         );
         assert_eq!(state, before);
+    }
+}
+
+#[cfg(test)]
+mod autoclipper_tests {
+    use super::*;
+
+    fn positive(text: &str) -> NonNegativeAmount {
+        Amount::parse(text).unwrap().nonnegative().unwrap()
+    }
+
+    fn game() -> GameState {
+        GameState::fresh(GameRng::from_test_seed([41u8; 32]))
+    }
+
+    #[test]
+    fn reveal_latches_at_actual_crossing_and_never_recomputes_initial_price() {
+        let mut state = ProState::fresh();
+        state.funds = Amount::parse("4.99").unwrap();
+        observe_auto_clipper_reveal(&mut state);
+        assert!(!state.auto_clipper_revealed);
+        assert_eq!(state.auto_clipper_cost, Amount::from_i128(5));
+
+        state.funds = Amount::from_i128(5);
+        observe_auto_clipper_reveal(&mut state);
+        assert!(state.auto_clipper_revealed);
+        assert_eq!(state.console_messages.len(), 5);
+        assert_eq!(
+            state.console_messages[4],
+            "AutoClippers revealed: Funds reached $5."
+        );
+        state.funds = Amount::zero();
+        observe_auto_clipper_reveal(&mut state);
+        assert!(state.auto_clipper_revealed);
+        assert_eq!(state.auto_clipper_cost, Amount::from_i128(5));
+    }
+
+    #[test]
+    fn exact_stored_cost_lifecycle_and_below_cost_rejection_are_atomic() {
+        let mut state = ProState::fresh();
+        state.funds = Amount::from_i128(5);
+        observe_auto_clipper_reveal(&mut state);
+        state.funds = Amount::parse("4.99").unwrap();
+        let before = state.clone();
+        assert_eq!(
+            buy_auto_clipper(&mut state),
+            Err(EconomyError::InsufficientFunds)
+        );
+        assert_eq!(state, before, "4.99 cannot buy the stored price 5");
+        eprintln!(
+            "G03 below-cost rejection: Funds 4.99/count 0/cost 5 unchanged; latch remained true"
+        );
+
+        state.funds = Amount::from_i128(5);
+        buy_auto_clipper(&mut state).unwrap();
+        assert_eq!(state.funds, Amount::zero());
+        assert_eq!(state.auto_clippers.to_string(), "1");
+        assert_eq!(state.auto_clipper_cost.to_string(), "6.1");
+        assert!(state.auto_clipper_revealed);
+        assert_eq!(state.wire.to_string(), "1000");
+        assert_eq!(state.lifetime_clips.to_string(), "0");
+        eprintln!("G03 exact threshold receipt: charged 5 -> Funds 0/count 1/next 6.1");
+
+        state.funds = Amount::from_i128(20);
+        buy_auto_clipper(&mut state).unwrap();
+        assert_eq!(state.funds.to_string(), "13.9");
+        assert_eq!(state.auto_clippers.to_string(), "2");
+        assert_eq!(state.auto_clipper_cost.to_string(), "6.21");
+        state.funds = Amount::from_i128(100);
+        buy_auto_clipper(&mut state).unwrap();
+        assert_eq!(state.auto_clipper_cost.to_string(), "6.331");
+        eprintln!(
+            "G03 successors: stored 6.1 charged to count 2/next 6.21; third next 6.331 (not cents)"
+        );
+    }
+
+    #[test]
+    fn successor_price_is_an_exact_rational_ceil_at_the_grid_only() {
+        for (level, expected) in [
+            (1, "6.1"),
+            (2, "6.21"),
+            (3, "6.331"),
+            (7, "6.9487171"),
+            (18, "10.559917313492231481"),
+            (19, "11.11590904484145463"),
+            (20, "11.727499949325600093"),
+        ] {
+            assert_eq!(
+                auto_clipper_successor_cost(&BigInt::from(level))
+                    .unwrap()
+                    .to_string(),
+                expected
+            );
+        }
+        let mut boundary = ProState {
+            auto_clippers: IntegralAmount::from_i128(i128::from(MAX_EXACT_EXPONENT) - 1),
+            auto_clipper_cost: Amount::parse("6.1").unwrap(),
+            funds: Amount::from_i128(100),
+            ..ProState::fresh()
+        };
+        buy_auto_clipper(&mut boundary).unwrap();
+        let boundary_state = GameState {
+            pro: boundary,
+            ..game()
+        };
+        let snapshot = crate::snapshot::Snapshot::capture(&boundary_state, 1).unwrap();
+        assert!(snapshot.pro.console_messages[4].len() <= 256);
+        assert_eq!(snapshot.pro.auto_clippers.to_string(), "10000");
+        assert!(snapshot.pro.auto_clipper_cost.to_string().len() > 256);
+        assert_eq!(
+            snapshot.pro.console_messages[4],
+            "AutoClipper 10000 purchased."
+        );
+
+        let before = ProState {
+            auto_clippers: IntegralAmount::from_i128(i128::from(MAX_EXACT_EXPONENT)),
+            auto_clipper_cost: Amount::parse("6.1").unwrap(),
+            funds: Amount::from_i128(100),
+            ..ProState::fresh()
+        };
+        let mut state = before.clone();
+        assert_eq!(
+            buy_auto_clipper(&mut state),
+            Err(EconomyError::ExponentResourceLimit)
+        );
+        assert_eq!(state, before);
+    }
+
+    #[test]
+    fn first_and_second_producers_use_conserved_conversion_and_positive_final_cap() {
+        let mut state = game();
+        state.pro.auto_clippers = IntegralAmount::from_i128(1);
+        state.pro.auto_clipper_revealed = true;
+        state.pro.wire = positive("2");
+        for tick in 1..=100 {
+            // denom=100 quantizes 1/100 exactly on the 10^-18 grid per tick.
+            advance_auto_clippers(&mut state, tick % 100 == 0).unwrap();
+            if tick == 10 {
+                assert_eq!(state.pro.lifetime_clips.to_string(), "0.1");
+                assert_eq!(state.pro.auto_clipper_rate.to_string(), "0");
+            }
+        }
+        assert_eq!(state.pro.wire.to_string(), "1");
+        assert_eq!(state.pro.lifetime_clips.to_string(), "1");
+        assert_eq!(state.pro.auto_clipper_rate.to_string(), "1");
+        assert_eq!(
+            state.pro.auto_clipper_production_accumulator.to_string(),
+            "0"
+        );
+        for tick in 1..=100 {
+            advance_auto_clippers(&mut state, tick % 100 == 0).unwrap();
+        }
+        // G01 allows another 0.01 at Wire 1, then leaves 0.99 below its gate.
+        // Nothing can manufacture a full second clip from the missing stock.
+        assert_eq!(state.pro.wire.to_string(), "0.99");
+        assert_eq!(state.pro.lifetime_clips.to_string(), "1.01");
+        assert_eq!(state.pro.auto_clipper_rate.to_string(), "0.01");
+        for tick in 1..=100 {
+            advance_auto_clippers(&mut state, tick % 100 == 0).unwrap();
+        }
+        assert_eq!(state.pro.lifetime_clips.to_string(), "1.01");
+        assert_eq!(state.pro.auto_clipper_rate.to_string(), "0");
+
+        let mut fractional = game();
+        fractional.pro.auto_clippers = IntegralAmount::from_i128(2);
+        fractional.pro.auto_clipper_revealed = true;
+        fractional.pro.wire = positive("1.5");
+        for tick in 1..=100 {
+            advance_auto_clippers(&mut fractional, tick % 100 == 0).unwrap();
+        }
+        // 0.52 is produced while the G01 gate stays open; 0.98 is stranded
+        // strictly below one Wire, with exact conserved increments throughout.
+        assert_eq!(fractional.pro.wire.to_string(), "0.98");
+        for ledger in [
+            &fractional.pro.lifetime_clips,
+            &fractional.pro.unsold_clips,
+            &fractional.pro.unused_clips,
+            &fractional.pro.auto_clipper_rate,
+        ] {
+            assert_eq!(ledger, &positive("0.52"));
+        }
+        assert_eq!(
+            fractional
+                .pro
+                .auto_clipper_production_accumulator
+                .to_string(),
+            "0"
+        );
+
+        // A stock-limited final request itself can be fractional. Quantization
+        // applies only to this request, never to the conserved capped transfer.
+        let mut final_partial = game();
+        final_partial.pro.auto_clippers = IntegralAmount::from_i128(200);
+        final_partial.pro.auto_clipper_revealed = true;
+        final_partial.pro.wire = positive("1.005");
+        advance_auto_clippers(&mut final_partial, true).unwrap();
+        assert_eq!(final_partial.pro.wire, NonNegativeAmount::zero());
+        for ledger in [
+            &final_partial.pro.lifetime_clips,
+            &final_partial.pro.unsold_clips,
+            &final_partial.pro.unused_clips,
+            &final_partial.pro.auto_clipper_rate,
+        ] {
+            assert_eq!(ledger, &positive("1.005"));
+        }
+        assert_eq!(
+            final_partial
+                .pro
+                .auto_clipper_production_accumulator
+                .to_string(),
+            "0"
+        );
+        eprintln!(
+            "G01/G03 partial cap: count 200 requests 2, Wire 1.005 -> all three ledgers +1.005, Wire 0; sub-one stock produces nothing further"
+        );
+    }
+
+    #[test]
+    fn zero_producers_or_no_elapsed_second_never_requests_or_mints() {
+        let mut state = game();
+        let before = state.clone();
+        advance_auto_clippers(&mut state, false).unwrap();
+        advance_auto_clippers(&mut state, true).unwrap();
+        assert_eq!(state.pro, before.pro);
+        assert_eq!(state.clock, before.clock);
+        assert_eq!(state.rng_state_hex(), before.rng_state_hex());
+        assert_eq!(state.pro.auto_clipper_rate.to_string(), "0");
+        assert_eq!(
+            state.pro.auto_clipper_production_accumulator.to_string(),
+            "0"
+        );
+
+        let mut hidden = game();
+        hidden.pro.auto_clippers = IntegralAmount::from_i128(1);
+        let hidden_before = hidden.clone();
+        assert_eq!(
+            advance_auto_clippers(&mut hidden, true),
+            Err(EconomyError::InvalidState)
+        );
+        assert_eq!(hidden.pro, hidden_before.pro);
+        assert_eq!(hidden.rng_state_hex(), hidden_before.rng_state_hex());
     }
 }

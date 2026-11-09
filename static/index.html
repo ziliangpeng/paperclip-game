@@ -85,9 +85,19 @@
           <tbody>
             <tr><th scope="row">AutoClippers</th><td><data id="auto-clippers" class="amount" value="">Waiting for server</data></td></tr>
             <tr><th scope="row">Current cost</th><td>$<data id="auto-clipper-cost" class="amount currency" value="">Waiting for server</data></td></tr>
+            <tr><th scope="row">Actual latest production / second</th><td><data id="auto-clipper-rate" class="amount" value="">Waiting for server</data></td></tr>
           </tbody>
         </table>
+        <form id="buy-auto-clipper-form"><button id="buy-auto-clipper" type="submit">Buy AutoClipper</button></form>
+        <p>A successful purchase adds one server producer at the stored current cost. Production advances without this page.</p>
       </section>
+    </section>
+
+    <section id="console-history" aria-labelledby="console-heading">
+      <h2 id="console-heading">Console</h2>
+      <ol id="console-messages" aria-label="Five most recent server messages">
+        <li></li><li></li><li></li><li></li><li></li>
+      </ol>
     </section>
 
     <section id="computational-resources" aria-labelledby="computing-heading" hidden>

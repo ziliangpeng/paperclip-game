@@ -50,6 +50,7 @@ const COMMANDS = [
   ["lower-price-form", "lower-price", "lower_price", "Lower Price"],
   ["raise-price-form", "raise-price", "raise_price", "Raise Price"],
   ["buy-marketing-form", "buy-marketing", "buy_marketing", "Buy Marketing"],
+  ["buy-auto-clipper-form", "buy-auto-clipper", "buy_auto_clipper", "Buy AutoClipper"],
 ];
 const controls = [];
 

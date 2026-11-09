@@ -46,6 +46,7 @@ export function createViewModel(view) {
     revision: view.revision,
     computingHidden: view.game.computing_hidden,
     autoClippersRevealed: view.game.auto_clipper_revealed,
+    consoleMessages: view.game.console_messages,
   };
 }
 
@@ -69,6 +70,7 @@ const ELEMENT_FIELDS = {
   memory: "memory",
   auto_clippers: "auto-clippers",
   auto_clipper_cost: "auto-clipper-cost",
+  auto_clipper_rate: "auto-clipper-rate",
 };
 
 export function renderView(document, view) {
@@ -86,6 +88,8 @@ export function renderView(document, view) {
   }
   document.getElementById("computational-resources").hidden = model.computingHidden;
   document.getElementById("auto-clippers-panel").hidden = !model.autoClippersRevealed;
+  const consoleLines = document.querySelectorAll("#console-messages > li");
+  model.consoleMessages.forEach((message, index) => { consoleLines[index].textContent = message; });
   document.documentElement.dataset.viewState = "ready";
   document.documentElement.dataset.runId = model.runId;
   document.documentElement.dataset.revision = String(model.revision);

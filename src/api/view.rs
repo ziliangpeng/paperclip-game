@@ -75,6 +75,8 @@ pub struct ProductionView {
     pub auto_clipper_revealed: bool,
     pub auto_clippers: IntegralAmount,
     pub auto_clipper_cost: Amount,
+    pub auto_clipper_rate: NonNegativeAmount,
+    pub console_messages: [String; 5],
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -174,6 +176,8 @@ impl TryFrom<&ProState> for ProductionView {
             auto_clipper_revealed: state.auto_clipper_revealed,
             auto_clippers: state.auto_clippers.clone(),
             auto_clipper_cost: state.auto_clipper_cost.clone(),
+            auto_clipper_rate: state.auto_clipper_rate.clone(),
+            console_messages: state.console_messages.clone(),
         })
     }
 }

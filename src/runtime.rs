@@ -87,17 +87,18 @@ pub struct Command {
     intent: Intent,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Intent {
     MakePaperclip,
     BuyWire,
     LowerPrice,
     RaisePrice,
     BuyMarketing,
+    BuyAutoClipper,
 }
 
 impl Command {
-    /// The sole M1 player intent: exactly one Wire, with no amount argument.
+    /// The manual M1 intent: exactly one Wire, with no amount argument.
     pub fn make_paperclip(id: CommandId) -> Self {
         Self {
             id,
@@ -119,6 +120,10 @@ impl Command {
 
     pub fn buy_marketing(id: CommandId) -> Self {
         Self::intent(id, Intent::BuyMarketing)
+    }
+
+    pub fn buy_auto_clipper(id: CommandId) -> Self {
+        Self::intent(id, Intent::BuyAutoClipper)
     }
 
     fn intent(id: CommandId, intent: Intent) -> Self {
@@ -552,7 +557,10 @@ impl<C: MonotonicClock> Writer<C> {
             .map_err(RuntimeFailure::LogicalClock)?;
         if cadence.fast_due {
             economy::advance_fast_phase(&mut candidate).map_err(RuntimeFailure::Economy)?;
+            economy::observe_auto_clipper_reveal(&mut candidate.pro);
         }
+        economy::advance_auto_clippers(&mut candidate, cadence.second_due)
+            .map_err(RuntimeFailure::Economy)?;
         self.state = candidate;
         self.revision = next_revision;
         self.lag_debt_nanos -= UPDATE_QUANTUM_NANOS;
@@ -578,7 +586,27 @@ impl<C: MonotonicClock> Writer<C> {
             Intent::BuyMarketing => {
                 economy::buy_marketing(&mut candidate.pro).map_err(CommandRejection::Economy)
             }
+            Intent::BuyAutoClipper => {
+                economy::buy_auto_clipper(&mut candidate.pro).map_err(CommandRejection::Economy)
+            }
         };
+        if outcome.is_ok() {
+            match command.intent {
+                Intent::BuyWire => {
+                    let message = format!("Wire spool purchased at ${}.", candidate.pro.wire_quote);
+                    economy::push_console_message(&mut candidate.pro, message);
+                }
+                Intent::BuyMarketing => {
+                    let message = format!(
+                        "Marketing level {} purchased.",
+                        candidate.pro.marketing_level
+                    );
+                    economy::push_console_message(&mut candidate.pro, message);
+                }
+                _ => {}
+            }
+            economy::observe_auto_clipper_reveal(&mut candidate.pro);
+        }
         let result = match outcome {
             Ok(()) => {
                 self.state = candidate;
@@ -862,12 +890,27 @@ mod tests {
         Arc<FakeClock>,
         RuntimeDatabase,
     ) {
+        persistent_runtime_with_producers(label, 0)
+    }
+
+    fn persistent_runtime_with_producers(
+        label: &str,
+        producers: i128,
+    ) -> (
+        GameRuntime,
+        RuntimeHandle,
+        crate::persistence::RuntimePersistence,
+        Arc<FakeClock>,
+        RuntimeDatabase,
+    ) {
         use crate::persistence::{RuntimePersistence, SnapshotStore};
         use crate::snapshot::Snapshot;
 
         let database = RuntimeDatabase::new(label);
         let mut state = GameState::fresh(GameRng::from_test_seed([23_u8; 32]));
         state.pro.wire = Amount::parse("100").unwrap().nonnegative().unwrap();
+        state.pro.auto_clippers = crate::game::amount::IntegralAmount::from_i128(producers);
+        state.pro.auto_clipper_revealed = producers > 0;
         let initial = Snapshot::capture(&state, 0).unwrap();
         let (store, stored) = SnapshotStore::open_or_initialize(&database.0, &initial).unwrap();
         let clock = Arc::new(FakeClock::new());
@@ -958,7 +1001,8 @@ mod tests {
     async fn persistence_blocking_does_not_stop_runtime_and_valid_commit_recovers_health() {
         use crate::health::{PersistenceFailure, PersistencePhase};
 
-        let (runtime, handle, persistence, clock, database) = persistent_runtime("blocking");
+        let (runtime, handle, persistence, clock, database) =
+            persistent_runtime_with_producers("blocking", 1);
         let blocker = rusqlite::Connection::open(&database.0).unwrap();
         blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
         clock.advance(Duration::from_secs(30));
@@ -976,10 +1020,15 @@ mod tests {
         let receipt = handle.execute(command(7_777)).await.unwrap();
         assert_eq!(receipt.result, Ok(()));
         clock.advance(Duration::from_millis(10));
-        let live = wait_for(&handle, |view| view.game.clock.update_count() >= 3_001).await;
+        let live = wait_for(&handle, |view| view.game.clock.update_count() == 3_001).await;
         assert!(live.revision > receipt.revision);
-        assert_eq!(live.game.pro.wire.to_string(), "99");
-        assert_eq!(live.game.pro.lifetime_clips.to_string(), "1");
+        assert_eq!(live.game.pro.wire.to_string(), "68.99");
+        assert_eq!(live.game.pro.lifetime_clips.to_string(), "31.01");
+        assert_eq!(live.game.pro.auto_clippers.to_string(), "1");
+        assert_eq!(live.game.pro.auto_clipper_rate.to_string(), "1");
+        eprintln!(
+            "G03/PERSIST-SNAPSHOT-30S-NONBLOCK: one producer continued through real SQLite busy capture; 30.01 automatic + one manual clip reaches exact update 3,001"
+        );
         clock.advance(Duration::from_secs(30));
         let still_degraded = wait_for_health(&persistence, |health| {
             health.latest_captured_revision >= Some(6_000)
@@ -1104,6 +1153,236 @@ mod tests {
             before_rejected.rng_state_hex()
         );
         assert_eq!(handle.view().revision, 1);
+        runtime.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn r1_update_90_purchase_accrues_only_owned_ticks_and_full_later_second() {
+        let mut state = GameState::fresh(GameRng::from_test_seed([90u8; 32]));
+        state.clock =
+            crate::game::clock::ClockState::from_snapshot_parts(90, 0, 90, 90, 4_000_000, 56)
+                .unwrap();
+        state.pro.funds = Amount::from_i128(5);
+        state.pro.auto_clipper_revealed = true;
+        state.pro.wire = Amount::parse("100").unwrap().nonnegative().unwrap();
+        let (runtime, handle, clock) = test_runtime_with_state(state);
+        let receipt = handle
+            .execute(Command::buy_auto_clipper(CommandId::new(9_090).unwrap()))
+            .await
+            .unwrap();
+        assert_eq!(receipt.result, Ok(()));
+        let purchased = wait_for(&handle, |view| view.process.applied_commands == 1).await;
+        assert_eq!(purchased.game.clock.update_count(), 90);
+        assert_eq!(purchased.game.pro.lifetime_clips.to_string(), "0");
+        assert_eq!(purchased.game.pro.auto_clipper_rate.to_string(), "0");
+
+        clock.advance(Duration::from_millis(100));
+        let boundary = wait_for(&handle, |view| view.game.clock.update_count() == 100).await;
+        eprintln!(
+            "R1 update 90 -> 100 ownership=10 ticks: lifetime={} wire={} rate={}",
+            boundary.game.pro.lifetime_clips,
+            boundary.game.pro.wire,
+            boundary.game.pro.auto_clipper_rate
+        );
+        assert_eq!(boundary.game.pro.lifetime_clips.to_string(), "0.1");
+        assert_eq!(boundary.game.pro.wire.to_string(), "99.9");
+        assert_eq!(boundary.game.pro.auto_clipper_rate.to_string(), "0.1");
+        for ledger in [
+            &boundary.game.pro.lifetime_clips,
+            &boundary.game.pro.unsold_clips,
+            &boundary.game.pro.unused_clips,
+        ] {
+            assert_eq!(ledger.to_string(), "0.1");
+        }
+
+        // The following complete owned second contributes exactly one more clip.
+        clock.advance(Duration::from_secs(1));
+        let full_second = wait_for(&handle, |view| view.game.clock.update_count() == 200).await;
+        assert_eq!(full_second.game.pro.lifetime_clips.to_string(), "1.1");
+        assert_eq!(full_second.game.pro.wire.to_string(), "98.9");
+        assert_eq!(full_second.game.pro.auto_clipper_rate.to_string(), "1");
+        runtime.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn r1_lagged_command_starts_production_only_after_its_writer_execution_tick() {
+        let mut state = GameState::fresh(GameRng::from_test_seed([91u8; 32]));
+        state.pro.funds = Amount::from_i128(5);
+        state.pro.auto_clipper_revealed = true;
+        state.pro.wire = Amount::parse("100").unwrap().nonnegative().unwrap();
+        let (runtime, handle, clock) = test_runtime_with_state(state);
+        // Prove the idle writer is waiting, then make the command pending before
+        // the one-second gap. The ordinary turn processes ten updates first.
+        wait_for(&handle, |view| view.process.writer_turns >= 1).await;
+        let pending = handle
+            .try_submit(Command::buy_auto_clipper(CommandId::new(9_091).unwrap()))
+            .unwrap();
+        clock.advance(Duration::from_secs(1));
+        let receipt = pending.wait().await.unwrap();
+        assert_eq!(receipt.result, Ok(()));
+        assert_eq!(
+            receipt.revision, 11,
+            "the lag turn executes ten updates before this one purchase"
+        );
+        // The writer may have drained the rest of the gap when this future is
+        // scheduled again; the latest watch value is not the execution-time View.
+        let boundary = wait_for(&handle, |view| view.game.clock.update_count() == 100).await;
+        eprintln!(
+            "R1 lagged purchase update=10 -> 100 ownership=90 ticks: lifetime={} wire={} rate={}",
+            boundary.game.pro.lifetime_clips,
+            boundary.game.pro.wire,
+            boundary.game.pro.auto_clipper_rate
+        );
+        assert_eq!(boundary.game.pro.lifetime_clips.to_string(), "0.9");
+        assert_eq!(boundary.game.pro.wire.to_string(), "99.1");
+        assert_eq!(boundary.game.pro.auto_clipper_rate.to_string(), "0.9");
+        runtime.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn r1_restore_preserves_partial_second_production_without_offline_backfill() {
+        let mut state = GameState::fresh(GameRng::from_test_seed([93u8; 32]));
+        state.clock =
+            crate::game::clock::ClockState::from_snapshot_parts(90, 0, 90, 90, 4_000_000, 56)
+                .unwrap();
+        state.pro.funds = Amount::from_i128(5);
+        state.pro.auto_clipper_revealed = true;
+        state.pro.wire = Amount::parse("100").unwrap().nonnegative().unwrap();
+        let (runtime, handle, clock) = test_runtime_with_state(state);
+        assert_eq!(
+            handle
+                .execute(Command::buy_auto_clipper(CommandId::new(9_093).unwrap()))
+                .await
+                .unwrap()
+                .result,
+            Ok(())
+        );
+        clock.advance(Duration::from_millis(400));
+        let saved = wait_for(&handle, |view| view.game.clock.update_count() == 130).await;
+        assert_eq!(saved.game.pro.lifetime_clips.to_string(), "0.4");
+        assert_eq!(saved.game.pro.auto_clipper_rate.to_string(), "0.1");
+        assert_eq!(
+            saved
+                .game
+                .pro
+                .auto_clipper_production_accumulator
+                .to_string(),
+            "0.3"
+        );
+        let snapshot = crate::snapshot::Snapshot::capture(&saved.game, saved.revision).unwrap();
+        let restored = crate::snapshot::Snapshot::from_canonical_bytes(
+            &snapshot.to_canonical_bytes().unwrap(),
+        )
+        .unwrap()
+        .restore()
+        .unwrap();
+        assert_eq!(restored.state.pro, saved.game.pro);
+        runtime.shutdown().await.unwrap();
+
+        let (resumed, resumed_handle, resumed_clock) = test_runtime_with_state(restored.state);
+        let initial = resumed_handle.view();
+        assert_eq!(initial.game.clock.update_count(), 130);
+        assert_eq!(initial.game.pro.lifetime_clips.to_string(), "0.4");
+        assert_eq!(
+            initial
+                .game
+                .pro
+                .auto_clipper_production_accumulator
+                .to_string(),
+            "0.3"
+        );
+        assert_eq!(initial.process.lag_debt_nanos, 0);
+        assert_ne!(initial.run_id, saved.run_id);
+
+        resumed_clock.advance(Duration::from_millis(70));
+        let partial = wait_for(&resumed_handle, |view| {
+            view.game.clock.update_count() == 137
+        })
+        .await;
+        assert_eq!(partial.game.pro.lifetime_clips.to_string(), "0.47");
+        assert_eq!(partial.game.pro.auto_clipper_rate.to_string(), "0.1");
+        assert_eq!(
+            partial
+                .game
+                .pro
+                .auto_clipper_production_accumulator
+                .to_string(),
+            "0.37"
+        );
+        resumed_clock.advance(Duration::from_millis(630));
+        let complete = wait_for(&resumed_handle, |view| {
+            view.game.clock.update_count() == 200
+        })
+        .await;
+        assert_eq!(complete.game.pro.lifetime_clips.to_string(), "1.1");
+        assert_eq!(complete.game.pro.auto_clipper_rate.to_string(), "1");
+        assert_eq!(
+            complete
+                .game
+                .pro
+                .auto_clipper_production_accumulator
+                .to_string(),
+            "0"
+        );
+        eprintln!(
+            "R1 mid-window restore: update 130 lifetime 0.4/accumulator 0.3 resumed to 0.47 at 137 and 1.1/rate 1 at 200; zero startup backfill"
+        );
+        resumed.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn auto_clipper_writer_execution_and_same_id_replay_preserve_stored_costs() {
+        let mut first = GameState::fresh(GameRng::from_test_seed([43u8; 32]));
+        first.pro.funds = Amount::from_i128(5);
+        first.pro.auto_clipper_revealed = true;
+        let (runtime, handle, _clock) = test_runtime_with_state(first);
+        let first_command = Command::buy_auto_clipper(CommandId::new(501).unwrap());
+        let receipt = handle.execute(first_command.clone()).await.unwrap();
+        assert_eq!(receipt.revision, 1);
+        assert_eq!(receipt.result, Ok(()));
+        let bought = handle.view();
+        assert_eq!(bought.game.pro.funds, Amount::zero());
+        assert_eq!(bought.game.pro.auto_clippers.to_string(), "1");
+        assert_eq!(bought.game.pro.auto_clipper_cost.to_string(), "6.1");
+
+        let before_rejection = bought.game.clone();
+        let insufficient = handle
+            .execute(Command::buy_auto_clipper(CommandId::new(502).unwrap()))
+            .await
+            .unwrap();
+        assert_eq!(insufficient.revision, 1);
+        assert_eq!(
+            insufficient.result,
+            Err(CommandRejection::Economy(EconomyError::InsufficientFunds))
+        );
+        assert_eq!(handle.view().game.pro, before_rejection.pro);
+        assert_eq!(handle.view().revision, 1);
+
+        // Let later logical state advance before replay: the stored receipt is
+        // still the first terminal result and cannot buy another producer.
+        _clock.advance(Duration::from_millis(10));
+        wait_for(&handle, |view| view.game.clock.update_count() == 1).await;
+        let replay = handle.execute(first_command).await.unwrap();
+        assert_eq!(replay, receipt);
+        let after_replay = handle.view();
+        assert_eq!(after_replay.game.pro.auto_clippers.to_string(), "1");
+        assert_eq!(after_replay.game.pro.auto_clipper_cost.to_string(), "6.1");
+        runtime.shutdown().await.unwrap();
+
+        let mut second = GameState::fresh(GameRng::from_test_seed([44u8; 32]));
+        second.pro.funds = Amount::from_i128(20);
+        second.pro.auto_clipper_revealed = true;
+        second.pro.auto_clippers = crate::game::amount::IntegralAmount::from_i128(1);
+        second.pro.auto_clipper_cost = Amount::parse("6.1").unwrap();
+        let (runtime, handle, _clock) = test_runtime_with_state(second);
+        let successor = handle
+            .execute(Command::buy_auto_clipper(CommandId::new(503).unwrap()))
+            .await
+            .unwrap();
+        assert_eq!(successor.result, Ok(()));
+        assert_eq!(handle.view().game.pro.funds.to_string(), "13.9");
+        assert_eq!(handle.view().game.pro.auto_clippers.to_string(), "2");
+        assert_eq!(handle.view().game.pro.auto_clipper_cost.to_string(), "6.21");
         runtime.shutdown().await.unwrap();
     }
 

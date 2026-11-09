@@ -73,10 +73,12 @@ STORED_PRO_FIELDS = {
     "wire_price_counter", "wire_purchase_count", "wire_inactivity_ticks",
     "trust", "processors", "memory", "computing_hidden", "projects_hidden",
     "auto_clipper_revealed", "auto_clippers", "auto_clipper_cost",
+    "auto_clipper_rate", "auto_clipper_production_accumulator", "console_messages",
 }
 INTERNAL_PRO_FIELDS = {
     "marketing_effectiveness", "demand_boost", "prestige_u", "wire_base_price",
     "wire_price_counter", "wire_purchase_count", "wire_inactivity_ticks",
+    "auto_clipper_production_accumulator",
 }
 
 
@@ -91,7 +93,8 @@ def assert_stored_pro(pro: dict[str, Any]) -> dict[str, Any]:
     for field in ("wire_price_counter", "wire_purchase_count", "wire_inactivity_ticks"):
         value = pro[field]
         assert type(value) is int and 0 <= value <= api.SAFE_INTEGER
-    for field in ("marketing_effectiveness", "demand_boost", "wire_base_price"):
+    for field in ("marketing_effectiveness", "demand_boost", "wire_base_price",
+                  "auto_clipper_production_accumulator"):
         value = pro[field]
         assert isinstance(value, str) and re.fullmatch(
             r"(?:0|[1-9][0-9]*)(?:\.[0-9]*[1-9])?", value
@@ -113,7 +116,7 @@ AMOUNT_SCALE = 10**18
 TEMPORAL_PRO_FIELDS = {
     "unsold_clips", "funds", "wire_quote", "clips_sold", "income",
     "last_sale_revenue", "wire_base_price", "wire_price_counter",
-    "wire_inactivity_ticks",
+    "wire_inactivity_ticks", "auto_clipper_production_accumulator",
 }
 
 
@@ -282,9 +285,9 @@ def read_snapshot(database: Path) -> dict[str, Any]:
     connection = sqlite3.connect(f"{database.resolve().as_uri()}?mode=ro", uri=True)
     try:
         schema = connection.execute("PRAGMA user_version").fetchone()[0]
-        # Product storage is now schema/snapshot 2. Historical V1 input is
+        # Product storage is schema/snapshot 3. Historical V1/V2 input is
         # migrated by the application and remains covered by its strict tests.
-        assert schema == 2
+        assert schema == 3
         rows = connection.execute(
             "SELECT slot, snapshot_version, revision, capture_sequence, payload, checksum "
             "FROM game_snapshot"
@@ -293,13 +296,13 @@ def read_snapshot(database: Path) -> dict[str, Any]:
         connection.close()
     assert len(rows) == 1 and rows[0][0] == "default"
     _, version, revision, sequence, payload, checksum = rows[0]
-    assert version == 2
+    assert version == 3
     assert type(revision) is int and 0 <= revision <= api.SAFE_INTEGER
     assert type(sequence) is int and 0 <= sequence <= api.SAFE_INTEGER
     raw_payload = payload.encode("utf-8")
     snapshot = api.checked_json(raw_payload)
     assert set(snapshot) == {"snapshot_version", "revision", "pro", "clock", "rng_state"}
-    assert type(snapshot["snapshot_version"]) is int and snapshot["snapshot_version"] == 2
+    assert type(snapshot["snapshot_version"]) is int and snapshot["snapshot_version"] == 3
     assert type(snapshot["revision"]) is int and snapshot["revision"] == revision
     assert_stored_pro(snapshot["pro"])
     assert set(snapshot["clock"]) == {
@@ -456,13 +459,13 @@ def check_sqlite_fault_and_health(binary: Path, temporary: Path) -> None:
         process.force_stop()
 
 
-def check_v2_conservation_startup_rejection(binary: Path, temporary: Path) -> None:
+def check_current_conservation_startup_rejection(binary: Path, temporary: Path) -> None:
     """Exercise a private tampered media copy, not a remote command attack."""
     database = temporary / "conservation-healthy.sqlite3"
     process, port, client = launch(binary, database, temporary, "conservation-healthy")
     try:
         for index in range(8):
-            status, body = client.make(f"v2-conservation-real-production-{index}")
+            status, body = client.make(f"current-conservation-real-production-{index}")
             assert status == 200 and api.checked_json(body)["status"] == "applied"
         healthy_view = api.checked_json(client.get()[1])
         assert healthy_view["game"]["lifetime_clips"] == "8"
@@ -495,7 +498,7 @@ def check_v2_conservation_startup_rejection(binary: Path, temporary: Path) -> No
         connection.commit()
     finally:
         connection.close()
-    # Startup must reject this fully canonical/checksum-matching V2 ledger.
+    # Startup must reject this fully canonical/checksum-matching current ledger.
     damaged_bytes = damaged.read_bytes()
     completed = subprocess.run(
         [str(binary), "--listen-addr", "127.0.0.1:0", "--database-path", str(damaged)],
@@ -523,7 +526,7 @@ def check_v2_conservation_startup_rejection(binary: Path, temporary: Path) -> No
     finally:
         reopened_client.close()
         reopened.force_stop()
-    print("process startup: checksum-valid V2 sales-ledger mismatch rejected; original row preserved; healthy reopen passed")
+    print("process startup: checksum-valid current sales-ledger mismatch rejected; original row preserved; healthy reopen passed")
 
 
 def check_real_kill_and_repeated_restart(binary: Path, temporary: Path) -> None:
@@ -611,7 +614,7 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="paperclip-game-persistence-check-") as temporary_name:
         temporary = Path(temporary_name)
         check_corrupt_startup(binary, temporary)
-        check_v2_conservation_startup_rejection(binary, temporary)
+        check_current_conservation_startup_rejection(binary, temporary)
         check_sqlite_fault_and_health(binary, temporary)
         check_real_kill_and_repeated_restart(binary, temporary)
     print(f"persistence process checks passed in {time.perf_counter() - started:.3f}s")

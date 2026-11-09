@@ -1,5 +1,6 @@
 use paperclip_game::api::{GameView, MAX_COMMAND_BODY_BYTES, MAX_COMMAND_ID_BYTES, serve};
-use paperclip_game::game::amount::Amount;
+use paperclip_game::game::amount::{Amount, IntegralAmount, NonNegativeAmount};
+use paperclip_game::game::state::GameState;
 use paperclip_game::health::PersistenceHealth;
 use paperclip_game::runtime::GameRuntime;
 use serde_json::{Value, json};
@@ -21,6 +22,10 @@ struct TestServer {
 
 impl TestServer {
     fn start() -> Self {
+        Self::start_with_state(|_| {})
+    }
+
+    fn start_with_state(configure: impl FnOnce(&mut GameState) + Send + 'static) -> Self {
         let (address_tx, address_rx) = mpsc::sync_channel(0);
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let handle = thread::spawn(move || {
@@ -30,7 +35,14 @@ impl TestServer {
                 .build()
                 .map_err(|_| "test Tokio runtime failed".to_owned())?;
             runtime.block_on(async {
-                let game = GameRuntime::start().map_err(|_| "test game failed".to_owned())?;
+                let seed = GameRuntime::start().map_err(|_| "test seed game failed".to_owned())?;
+                let mut state = seed.handle().view().game;
+                seed.shutdown()
+                    .await
+                    .map_err(|_| "test seed shutdown failed".to_owned())?;
+                configure(&mut state);
+                let game = GameRuntime::start_from_snapshot(state, 0)
+                    .map_err(|_| "test game failed".to_owned())?;
                 let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
                     .await
                     .map_err(|_| "test listener failed".to_owned())?;
@@ -171,10 +183,12 @@ fn assert_fresh_view(response: &HttpResponse) -> GameView {
             .collect::<BTreeSet<_>>(),
         [
             "auto_clipper_cost",
+            "auto_clipper_rate",
             "auto_clipper_revealed",
             "auto_clippers",
             "clips_sold",
             "computing_hidden",
+            "console_messages",
             "demand",
             "funds",
             "income",
@@ -216,12 +230,18 @@ fn assert_fresh_view(response: &HttpResponse) -> GameView {
         "memory",
         "auto_clippers",
         "auto_clipper_cost",
+        "auto_clipper_rate",
     ] {
         assert!(
             object["game"][field].is_string(),
             "{field} must be exact text"
         );
     }
+    assert_eq!(
+        object["game"]["console_messages"],
+        json!(["", "", "", "", ""]),
+        "fresh five-line console history"
+    );
     let view = response.view();
     assert_eq!(view.game.wire.to_string(), "1000");
     assert_eq!(view.game.funds.to_string(), "0");
@@ -245,6 +265,11 @@ fn assert_fresh_view(response: &HttpResponse) -> GameView {
     assert!(!view.game.auto_clipper_revealed);
     assert_eq!(view.game.auto_clippers.to_string(), "0");
     assert_eq!(view.game.auto_clipper_cost.to_string(), "5");
+    assert_eq!(view.game.auto_clipper_rate.to_string(), "0");
+    assert_eq!(
+        view.game.console_messages,
+        std::array::from_fn(|_| String::new())
+    );
     view
 }
 
@@ -442,6 +467,130 @@ fn independent_http_clients_apply_two_legal_intents_and_coalesce_retries() {
     assert_eq!(final_view.game.unsold_clips.to_string(), "2");
     assert_eq!(final_view.game.unused_clips.to_string(), "2");
     server.stop();
+}
+
+#[test]
+fn auto_clipper_commands_charge_stored_cost_replay_and_reject_tampering() {
+    fn auto_command(id: &str) -> Vec<u8> {
+        serde_json::to_vec(&json!({
+            "command_id": id,
+            "type": "buy_auto_clipper",
+            "arguments": {}
+        }))
+        .unwrap()
+    }
+
+    let first_server = TestServer::start_with_state(|state| {
+        state.pro.wire = NonNegativeAmount::zero();
+        state.pro.funds = Amount::from_i128(5);
+        state.pro.auto_clipper_revealed = true;
+    });
+    let first = post(first_server.address, auto_command("first-auto-threshold"));
+    assert_eq!(first.status, 200);
+    assert_eq!(first.json(), json!({"status":"applied","revision":1}));
+    let first_view = get(first_server.address).view();
+    assert_eq!(first_view.game.funds, Amount::zero());
+    assert_eq!(first_view.game.auto_clippers.to_string(), "1");
+    assert_eq!(first_view.game.auto_clipper_cost.to_string(), "6.1");
+    assert_eq!(first_view.game.auto_clipper_rate.to_string(), "0");
+    assert_eq!(first_view.game.wire, NonNegativeAmount::zero());
+    assert_eq!(first_view.game.lifetime_clips, NonNegativeAmount::zero());
+    assert_eq!(
+        get(first_server.address).json()["game"]["auto_clipper_cost"],
+        "6.1"
+    );
+    eprintln!("G03 real HTTP exact threshold: 5 charged, Funds 0/count 1/next canonical 6.1");
+
+    let successor_server = TestServer::start_with_state(|state| {
+        state.pro.wire = NonNegativeAmount::zero();
+        state.pro.funds = Amount::from_i128(20);
+        state.pro.auto_clipper_revealed = true;
+        state.pro.auto_clippers = IntegralAmount::from_i128(1);
+        state.pro.auto_clipper_cost = Amount::parse("6.1").unwrap();
+    });
+    let successor = post(
+        successor_server.address,
+        auto_command("second-auto-successor"),
+    );
+    assert_eq!(successor.status, 200);
+    let successor_view = get(successor_server.address).view();
+    assert_eq!(successor_view.game.funds.to_string(), "13.9");
+    assert_eq!(successor_view.game.auto_clippers.to_string(), "2");
+    assert_eq!(successor_view.game.auto_clipper_cost.to_string(), "6.21");
+    assert_eq!(
+        successor_view.game.lifetime_clips,
+        NonNegativeAmount::zero()
+    );
+    eprintln!("G03 real HTTP successor: 20-6.1=13.9/count 2/next canonical 6.21");
+
+    let rejected_server = TestServer::start_with_state(|state| {
+        state.pro.wire = NonNegativeAmount::zero();
+        state.pro.funds = Amount::parse("4.99").unwrap();
+        state.pro.auto_clipper_revealed = true;
+    });
+    let before = get(rejected_server.address).view();
+    let rejection = post(rejected_server.address, auto_command("below-auto-cost"));
+    assert_eq!(rejection.status, 422);
+    assert_eq!(rejection.json()["reason"], "insufficient_funds");
+    assert_eq!(
+        post(rejected_server.address, auto_command("below-auto-cost")),
+        rejection
+    );
+    let after = get(rejected_server.address).view();
+    assert_eq!(after.game.funds.to_string(), "4.99");
+    assert_eq!(after.game.lifetime_clips, before.game.lifetime_clips);
+    assert_eq!(after.game.unsold_clips, before.game.unsold_clips);
+    assert_eq!(after.game.unused_clips, before.game.unused_clips);
+    assert_eq!(after.game.wire, before.game.wire);
+    assert_eq!(after.game.auto_clippers, before.game.auto_clippers);
+    assert_eq!(after.game.auto_clipper_cost, before.game.auto_clipper_cost);
+    assert_eq!(after.game.auto_clipper_rate, before.game.auto_clipper_rate);
+    assert!(after.game.auto_clipper_revealed);
+    assert_eq!(after.game.console_messages, before.game.console_messages);
+
+    // The replay of the original threshold command remains byte-identical even
+    // after other independent servers and commands have run; no second charge.
+    assert_eq!(
+        post(first_server.address, auto_command("first-auto-threshold")),
+        first
+    );
+    assert_eq!(
+        get(first_server.address)
+            .view()
+            .game
+            .auto_clippers
+            .to_string(),
+        "1"
+    );
+
+    for bad_arguments in [
+        json!({"cost":"5"}),
+        json!({"funds":"5"}),
+        json!({"count":1}),
+        json!({"price":5.0}),
+    ] {
+        let id = format!("auto-forgery-{}", bad_arguments);
+        let response = post(
+            rejected_server.address,
+            serde_json::to_vec(&json!({
+                "command_id": id,
+                "type": "buy_auto_clipper",
+                "arguments": bad_arguments,
+            }))
+            .unwrap(),
+        );
+        assert_eq!(response.status, 400);
+        assert_eq!(response.json()["reason"], "invalid_arguments");
+        // Structural forgery never binds its ID; the legal empty intent can
+        // subsequently bind and receive the ordinary below-cost rejection.
+        let legal = post(rejected_server.address, auto_command(&id));
+        assert_eq!(legal.status, 422);
+        assert_eq!(legal.json()["reason"], "insufficient_funds");
+    }
+
+    first_server.stop();
+    successor_server.stop();
+    rejected_server.stop();
 }
 
 #[test]
