@@ -253,13 +253,48 @@ mod tests {
             "updates coalesced to later state"
         );
 
+        let expected_run_id = handle.view().run_id.clone();
+        let mut published_views = handle.subscribe();
         let receipt = handle
             .execute(Command::make_paperclip(CommandId::new(77).unwrap()))
             .await
             .unwrap();
         assert_eq!(receipt.result, Ok(()));
-        assert_eq!(handle.view().game.pro.lifetime_clips.to_string(), "1");
-        assert!(handle.view().revision > previous);
+        // Command receipt publication precedes the full watch View at the end
+        // of the real writer turn. Subscribe before execution so that update
+        // cannot be missed, then require the actual published state to catch
+        // the receipt without inventing a tick or another client command.
+        let published = timeout(Duration::from_secs(3), async {
+            loop {
+                let candidate = {
+                    let candidate = published_views.borrow_and_update();
+                    (candidate.run_id == expected_run_id && candidate.revision >= receipt.revision)
+                        .then(|| candidate.clone())
+                };
+                if let Some(candidate) = candidate {
+                    break candidate;
+                }
+                published_views
+                    .changed()
+                    .await
+                    .expect("writer must continue publishing the accepted command");
+            }
+        })
+        .await
+        .expect("bounded full-View publication reaches the command receipt");
+        assert_eq!(published.run_id, expected_run_id);
+        assert!(published.revision >= receipt.revision);
+        assert!(published.revision > previous);
+        assert_eq!(published.game.pro.lifetime_clips.to_string(), "1");
+        assert_eq!(published.game.pro.unsold_clips.to_string(), "1");
+        assert_eq!(published.game.pro.unused_clips.to_string(), "1");
+        assert_eq!(published.game.pro.wire.to_string(), "9999");
+        assert_eq!(published.game.pro.funds, Amount::zero());
+        assert_eq!(published.game.pro.auto_clippers.to_string(), "0");
+        eprintln!(
+            "command receipt revision {} observed through same-run full View revision {}: exact three-ledger +1 and Wire 9999",
+            receipt.revision, published.revision
+        );
         drop(updates);
         drop(guard);
         assert_eq!(broadcast.active_connections(), 0);
