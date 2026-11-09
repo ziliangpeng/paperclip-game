@@ -200,9 +200,12 @@ def _permissions(text: str) -> dict[str, str] | None:
     for line in lines[start + 1:]:
         if line and not line.startswith((" ", "#")):
             break
-        match = re.match(r" {2}([A-Za-z0-9_-]+):\s*([^#\s]+)", line)
+        match = re.fullmatch(r" {2}([A-Za-z0-9_-]+):\s*([^#\s]+)\s*(?:#.*)?", line)
         if match:
             result[match.group(1)] = match.group(2)
+        elif line.strip() and not line.lstrip().startswith("#"):
+            # Preserve unsupported non-comment content as an invalid entry instead of dropping it.
+            result["<unsupported-permission-entry>"] = "unsupported"
     return result
 
 
@@ -1207,6 +1210,21 @@ def _base_mutations(healthy: str) -> list[tuple[str, str, str]]:
         healthy + "\ndefaults :\n  run:\n    shell: bash -c 'exit 0' {0}\n",
         "workflow-default-shell",
     ))
+
+    for suffix, entry in (
+        ("double-quoted", '  "actions": write'),
+        ("single-quoted", "  'actions': write"),
+        ("space-before-colon", "  actions : write"),
+    ):
+        cases.append((
+            f"permissions-actions-write-{suffix}",
+            _replace_once(
+                healthy,
+                "permissions:\n  contents: read\n",
+                "permissions:\n  contents: read\n" + entry + "\n",
+            ),
+            "workflow-permissions",
+        ))
     return cases
 
 
@@ -1611,6 +1629,22 @@ def _controls_fixtures(healthy: str) -> list[dict[str, object]]:
         "workflow-permissions",
         "duplicate top-level permissions",
     ))
+
+    for suffix, entry in (
+        ("double-quoted", '  "actions": write'),
+        ("single-quoted", "  'actions': write"),
+        ("space-before-colon", "  actions : write"),
+    ):
+        fixtures.append(case(
+            f"controls-permissions-actions-write-{suffix}",
+            _replace_once(
+                healthy,
+                "permissions:\n  contents: read\n",
+                "permissions:\n  contents: read\n" + entry + "\n",
+            ),
+            "workflow-permissions",
+            "read-only",
+        ))
     return fixtures
 
 
@@ -1814,6 +1848,9 @@ def _static_self_test(script: Path, workflow: Path, root: Path) -> tuple[int, li
         "global-default-spaced-key": "top-level defaults",
         "permissions-duplicate-write": "duplicate top-level permissions",
         "permissions-duplicate-read": "duplicate top-level permissions",
+        "permissions-actions-write-double-quoted": "read-only",
+        "permissions-actions-write-single-quoted": "read-only",
+        "permissions-actions-write-space-before-colon": "read-only",
         "trigger-pr-direct-event-sequence": "unsupported Rust trigger structure",
     }
     expected_auxiliary_codes = {
