@@ -15,11 +15,13 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass, field
 from pathlib import Path
+import hashlib
 import re
 import shlex
 import subprocess
 import sys
 import tempfile
+import time
 
 MAX_WORKFLOW_BYTES = 256 * 1024
 CHECKOUT = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
@@ -50,6 +52,7 @@ class Step:
     shell: str | None = None
     with_values: dict[str, str] = field(default_factory=dict)
     unsupported_metadata: list[str] = field(default_factory=list)
+    name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -157,6 +160,8 @@ def parse_steps(text: str) -> tuple[list[Step], list[Finding]]:
                     continue
                 if key == "run":
                     step.run = _scalar(raw_value)
+                elif key == "name":
+                    step.name = _scalar(raw_value)
                 elif key == "uses":
                     step.uses = _scalar(raw_value)
                 elif key == "shell":
@@ -485,6 +490,8 @@ def _check_native_processes(steps: list[Step]) -> list[Finding]:
 
 
 BROWSER_COMMAND = "python3 -B scripts/check_browser_stream.py target/debug/paperclip-game --require-browser"
+NATIVE_UI_STEP_NAME = "Check real native two-page browser UI"
+NATIVE_UI_COMMAND = "python3 -B scripts/run_browser_tests.py target/debug/paperclip-game --require-browser"
 
 
 def _check_browser_contract(steps: list[Step]) -> list[Finding]:
@@ -511,6 +518,32 @@ def _check_browser_contract(steps: list[Step]) -> list[Finding]:
     if persistence_positions and public_positions:
         if browser_position != persistence_positions[0] + 1 or browser_position >= min(public_positions):
             findings.append(Finding("workflow-browser-contract", "browser stream must run immediately after persistence and before public validation"))
+
+    native_ui_matches = [step for step in steps if step.name == NATIVE_UI_STEP_NAME]
+    if len(native_ui_matches) != 1:
+        findings.append(Finding(
+            "workflow-browser-contract",
+            f"independent native UI step {NATIVE_UI_STEP_NAME} must appear exactly once with its own command, found {len(native_ui_matches)}",
+        ))
+        return findings
+    native_ui = native_ui_matches[0]
+    if native_ui.unsupported_metadata:
+        findings.append(Finding("workflow-browser-contract", f"unsupported execution metadata cannot hide the independent UI step at line {native_ui.line}"))
+    if native_ui.uses is not None or native_ui.with_values:
+        findings.append(Finding("workflow-browser-contract", "independent native UI must be a direct run step, not an action wrapper"))
+    if native_ui.run is None or native_ui.run.strip() != NATIVE_UI_COMMAND:
+        findings.append(Finding(
+            "workflow-browser-contract",
+            f"independent native UI must execute the exact command {NATIVE_UI_COMMAND}; target and flag are mandatory",
+        ))
+    if native_ui.condition is not None or native_ui.continue_on_error not in {None, "false"}:
+        findings.append(Finding("workflow-browser-contract", "independent native UI step must be unconditional and propagate failure"))
+    native_ui_position = steps.index(native_ui)
+    if public_positions and (
+        native_ui_position != browser_position + 1
+        or native_ui_position >= min(public_positions)
+    ):
+        findings.append(Finding("workflow-browser-contract", "independent native UI must run immediately after browser stream and before public validation"))
     return findings
 
 
@@ -1228,6 +1261,63 @@ def _base_mutations(healthy: str) -> list[tuple[str, str, str]]:
     return cases
 
 
+def _native_ui_mutations(healthy: str) -> list[tuple[str, str, str]]:
+    """Build bounded negative fixtures from both actual independent browser steps."""
+    browser_block = _step_block(healthy, "Check real browser stream and recovery contracts")
+    native_ui_block = _step_block(healthy, NATIVE_UI_STEP_NAME)
+    if healthy.count(" --require-browser") != 2:
+        raise RuntimeError("native browser fixtures require exactly two independent browser flags")
+    if browser_block.count(" --require-browser") != 1 or native_ui_block.count(" --require-browser") != 1:
+        raise RuntimeError("each browser fixture step must contain its own required flag")
+
+    cases: list[tuple[str, str, str]] = []
+
+    def add(name: str, document: str) -> None:
+        cases.append((f"native-ui-{name}", document, "workflow-browser-contract"))
+
+    def edit_ui(name: str, old: str, new: str) -> None:
+        updated = _replace_once(native_ui_block, old, new)
+        add(name, _replace_once(healthy, native_ui_block, updated))
+
+    add("step-removed", _replace_once(healthy, native_ui_block, ""))
+    edit_ui("required-flag-removed", " --require-browser", "")
+    edit_ui("if-false", "        run:", "        if: ${{ false }}" + chr(10) + "        run:")
+    edit_ui("continue-on-error", "        run:", "        continue-on-error: true" + chr(10) + "        run:")
+    add("duplicate", _replace_once(healthy, native_ui_block, native_ui_block + native_ui_block))
+    add("before-stream", _replace_once(
+        healthy,
+        browser_block + native_ui_block,
+        native_ui_block + browser_block,
+    ))
+    native_ui_removed = _replace_once(healthy, native_ui_block, "")
+    public_block = _step_block(healthy, "Validate public repository hygiene")
+    add("after-public-validation", _replace_once(
+        native_ui_removed,
+        public_block,
+        public_block + native_ui_block,
+    ))
+    combined = _replace_once(
+        native_ui_block,
+        NATIVE_UI_COMMAND,
+        BROWSER_COMMAND + " && " + NATIVE_UI_COMMAND,
+    )
+    add("combined-step", _replace_once(healthy, browser_block + native_ui_block, combined))
+    edit_ui("unsupported-metadata", "        run:", "        timeout-minutes: 10" + chr(10) + "        run:")
+    edit_ui("wrong-binary", "target/debug/paperclip-game", "target/debug/other-tool")
+    edit_ui(
+        "action-wrapper",
+        "        run: " + NATIVE_UI_COMMAND,
+        chr(10).join([
+            "        uses: " + CHECKOUT,
+            "        with:",
+            "          fetch-depth: 1",
+            "          persist-credentials: false",
+            "",
+        ]),
+    )
+    return cases
+
+
 def _mutations(healthy: str) -> list[tuple[str, str, str]]:
     cases = _base_mutations(healthy)
     blocks = {
@@ -1335,6 +1425,8 @@ def _mutations(healthy: str) -> list[tuple[str, str, str]]:
         healthy.replace(_step_block(healthy, "Validate the complete execution plan"), "", 1),
         "workflow-public-contract",
     ))
+    cases.extend(_native_ui_mutations(healthy))
+
     return cases
 
 
@@ -1648,7 +1740,72 @@ def _controls_fixtures(healthy: str) -> list[dict[str, object]]:
     return fixtures
 
 
-def _controls_self_test(script: Path, workflow: Path, root: Path) -> int:
+def _controls_native_ui_self_test(script: Path, workflow: Path, root: Path) -> tuple[int, list[dict[str, object]]]:
+    """Run real Rust CLI checks for independent native UI workflow fixtures."""
+    source_hash = hashlib.sha256(script.read_bytes()).hexdigest()
+    healthy = _read_workflow(workflow)
+    stream_block = _step_block(healthy, "Check real browser stream and recovery contracts")
+    stream_bad = _replace_once(
+        healthy,
+        stream_block,
+        _replace_once(stream_block, " --require-browser", ""),
+    )
+    cases = [("native-ui-healthy", healthy, 0, None)]
+    cases.extend((name, document, 1, "workflow-browser-contract") for name, document, _ in _native_ui_mutations(healthy))
+    cases.append(("native-ui-stream-required-flag-removed", stream_bad, 1, "workflow-browser-contract"))
+    details = {
+        "native-ui-step-removed": "independent native UI",
+        "native-ui-required-flag-removed": "--require-browser",
+        "native-ui-if-false": "unconditional",
+        "native-ui-continue-on-error": "unconditional",
+        "native-ui-stream-required-flag-removed": "--require-browser",
+    }
+    directory = root / "native-ui-fixtures"
+    directory.mkdir(parents=True, exist_ok=True)
+    observations: list[dict[str, object]] = []
+    for name, document, expected_exit, expected_code in cases:
+        path = directory / f"{name}.yml"
+        path.write_text(document, encoding="utf-8")
+        argv = [sys.executable, "-B", str(script), "--workflow", str(path)]
+        started = time.monotonic()
+        completed = _run_cli(argv)
+        duration = time.monotonic() - started
+        output = completed.stdout + completed.stderr
+        passed, record = _case_result(name, expected_exit, expected_code, details.get(name), completed)
+        if expected_exit == 0:
+            passed = passed and "workflow validation passed" in output.lower()
+        else:
+            passed = passed and "validation failed" in output.lower()
+        record.update({
+            "kind": "controls-native-ui",
+            "argv": argv,
+            "stdout": completed.stdout,
+            "stderr": completed.stderr,
+            "source_checker_sha256": source_hash,
+            "input_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            "duration_s": duration,
+        })
+        record["passed"] = passed
+        observations.append(record)
+        state = "PASS" if passed else "FAIL"
+        code = expected_code or "healthy"
+        print(f"{state} controls-native-ui {name}: expected={expected_exit} actual={completed.returncode} code={code}")
+        for suffix, text in [("stdout", completed.stdout), ("stderr", completed.stderr)]:
+            (directory / f"{name}.{suffix}").write_text(text)
+        (directory / f"{name}.status").write_text(str(completed.returncode) + chr(10))
+    if hashlib.sha256(script.read_bytes()).hexdigest() != source_hash:
+        raise RuntimeError("checker changed during native UI self-test")
+    failed = [row["name"] for row in observations if not row["passed"]]
+    if failed:
+        print("Controls native UI self-test failed: " + ", ".join(failed), file=sys.stderr)
+        return 1, observations
+    healthy_count = sum(row["expected_exit"] == 0 and row["passed"] for row in observations)
+    rejected = sum(row["expected_exit"] != 0 and row["passed"] for row in observations)
+    print(f"Controls native UI fixtures passed: {healthy_count} healthy document and {rejected} rejected mutations")
+    return 0, observations
+
+
+def _controls_self_test(script: Path, workflow: Path, root: Path, rust_workflow: Path | None = None) -> int:
     if not workflow.exists():
         print("Controls self-test failed: [workflow-read] missing controls document", file=sys.stderr)
         return 1
@@ -1692,7 +1849,10 @@ def _controls_self_test(script: Path, workflow: Path, root: Path) -> int:
         print("Controls self-test failed: " + ", ".join(failures), file=sys.stderr)
         return 1
     print(f"Controls document self-test passed: {passed} healthy document and {rejected} rejected mutations")
-    return 0
+    if rust_workflow is None:
+        rust_workflow = Path(__file__).resolve().parents[1] / ".github/workflows/rust.yml"
+    native_status, _ = _controls_native_ui_self_test(script, rust_workflow, root)
+    return native_status
 
 
 def _static_self_test(script: Path, workflow: Path, root: Path) -> tuple[int, list[dict[str, object]]]:
@@ -1852,10 +2012,22 @@ def _static_self_test(script: Path, workflow: Path, root: Path) -> tuple[int, li
         "permissions-actions-write-single-quoted": "read-only",
         "permissions-actions-write-space-before-colon": "read-only",
         "trigger-pr-direct-event-sequence": "unsupported Rust trigger structure",
+        "native-ui-step-removed": "independent native UI",
+        "native-ui-required-flag-removed": "--require-browser",
+        "native-ui-if-false": "unconditional",
+        "native-ui-continue-on-error": "unconditional",
+        "native-ui-duplicate": "exactly once",
+        "native-ui-before-stream": "immediately after browser stream",
+        "native-ui-after-public-validation": "before public validation",
+        "native-ui-combined-step": "exact command",
+        "native-ui-unsupported-metadata": "unsupported execution metadata",
+        "native-ui-wrong-binary": "target/debug/paperclip-game",
+        "native-ui-action-wrapper": "direct run step",
     }
     expected_auxiliary_codes = {
         "step-cargo-custom-noop-shell": ["workflow-step-contract"],
         "step-browser-custom-noop-shell": ["workflow-step-contract"],
+        "native-ui-unsupported-metadata": ["workflow-step-contract"],
         "bootstrap-custom-noop-shell": ["workflow-step-contract"],
     }
     for name, text, code in _mutations(healthy):
@@ -2008,7 +2180,7 @@ def self_test(script: Path, workflow: Path) -> int:
             root = Path(temporary)
             static_status, static_results = _static_self_test(script, workflow, root)
             runtime_status, runtime_results = _runtime_self_test(script, root)
-            controls_status = _controls_self_test(script, Path(__file__).resolve().parents[1] / ".github/workflows/workflow-controls.yml", root)
+            controls_status = _controls_self_test(script, Path(__file__).resolve().parents[1] / ".github/workflows/workflow-controls.yml", root, workflow)
         results = static_results + runtime_results
         for record in results:
             state = "PASS" if record["passed"] else "FAIL"
