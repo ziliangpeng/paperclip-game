@@ -1257,7 +1257,7 @@ def _mutations(healthy: str) -> list[tuple[str, str, str]]:
     browser_title = "Check real browser stream and recovery contracts"
     browser_block = _step_block(healthy, browser_title)
     cases.append(("missing-browser-phase", healthy.replace(browser_block, "", 1), "workflow-browser-contract"))
-    cases.append(("browser-missing-required-flag", _replace_once(healthy, " --require-browser", ""), "workflow-browser-contract"))
+    cases.append(("browser-missing-required-flag", _replace_once(healthy, browser_block, _replace_once(browser_block, " --require-browser", "")), "workflow-browser-contract"))
     cases.append((
         "browser-continue-on-error",
         _replace_once(
