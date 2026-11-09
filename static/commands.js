@@ -2,14 +2,19 @@
 // No command result is a View or a source of resource mutations.
 import {parseTransportJson as parseSharedTransportJson} from "./stream.js";
 
-const COMMAND_TYPE = "make_paperclip";
+const COMMAND_TYPES = Object.freeze([
+  "make_paperclip", "buy_wire", "lower_price", "raise_price", "buy_marketing",
+]);
 const MAX_COMMAND_ID_BYTES = 128;
 const MAX_RESPONSE_BYTES = 16 * 1024;
+const REJECTION_REASONS = [
+  "insufficient_wire", "insufficient_funds", "conversion_rejected", "conflicting_retry",
+  "price_at_minimum", "counter_limit", "numeric_decision_domain",
+  "numeric_evaluation_rejected", "resource_limit", "invalid_state",
+];
 
-// Validation failures are distinct from failures to obtain or read a Response.
 class ResponseValidationError extends TypeError {}
 
-// Preserve the command boundary's private error classification with one shared parser.
 export function parseTransportJson(text) {
   return parseSharedTransportJson(text, ResponseValidationError);
 }
@@ -29,17 +34,18 @@ export function createCommandId() {
   return globalThis.crypto.randomUUID();
 }
 
-export function makePaperclipCommand(commandId) {
+export function createCommand(type, commandId) {
+  if (!COMMAND_TYPES.includes(type)) throw new TypeError("unsupported command type");
   if (typeof commandId !== "string" || commandId.length === 0 ||
       textEncoder.encode(commandId).length > MAX_COMMAND_ID_BYTES ||
       /[\u0000-\u001f\u007f]/.test(commandId)) {
     throw new TypeError("invalid opaque command ID");
   }
-  return Object.freeze({
-    command_id: commandId,
-    type: COMMAND_TYPE,
-    arguments: Object.freeze({}),
-  });
+  return Object.freeze({command_id: commandId, type, arguments: Object.freeze({})});
+}
+
+export function makePaperclipCommand(commandId) {
+  return createCommand("make_paperclip", commandId);
 }
 
 // Preserve every numeric JSON primitive as parsed with its lexical integer rule.
@@ -87,7 +93,7 @@ function parseOutcome(httpStatus, payload) {
   }
   if (httpStatus === 422 && hasExactFields(payload, ["status", "revision", "reason"]) &&
       payload.status === "rule_rejected" && validRevision(payload.revision) &&
-      ["insufficient_wire", "conversion_rejected", "conflicting_retry"].includes(payload.reason)) {
+      REJECTION_REASONS.includes(payload.reason)) {
     return {kind: "rule_rejected", revision: payload.revision, reason: payload.reason};
   }
   if (httpStatus === 409 && hasExactFields(payload, ["status"]) && payload.status === "conflict") {
@@ -107,14 +113,12 @@ function parseOutcome(httpStatus, payload) {
   return {kind: "invalid_response"};
 }
 
-export async function postMakePaperclip(command, options = {}) {
-  // Callers can only provide this closed command shape. No Amount, quantity,
-  // timestamp, actor, world, observed revision, or resource field is accepted.
+export async function postGameCommand(command, options = {}) {
   if (!hasExactFields(command, ["command_id", "type", "arguments"]) ||
-      command.type !== COMMAND_TYPE || !hasExactFields(command.arguments, [])) {
-    throw new TypeError("only a typed make_paperclip command is accepted");
+      !COMMAND_TYPES.includes(command.type) || !hasExactFields(command.arguments, [])) {
+    throw new TypeError("only a closed, empty-argument game command is accepted");
   }
-  const checked = makePaperclipCommand(command.command_id);
+  const checked = createCommand(command.type, command.command_id);
   const fetchFunction = options.fetch ?? globalThis.fetch;
   const timeoutMs = options.timeoutMs ?? 10_000;
   const controller = new AbortController();
@@ -139,8 +143,18 @@ export async function postMakePaperclip(command, options = {}) {
   }
 }
 
-export class MakePaperclipCommandRunner {
-  constructor(onChange = () => {}, options = {}) {
+export async function postMakePaperclip(command, options = {}) {
+  if (!hasExactFields(command, ["command_id", "type", "arguments"]) ||
+      command.type !== "make_paperclip" || !hasExactFields(command.arguments, [])) {
+    throw new TypeError("only a typed make_paperclip command is accepted");
+  }
+  return postGameCommand(command, options);
+}
+
+export class GameCommandRunner {
+  constructor(type, onChange = () => {}, options = {}) {
+    if (!COMMAND_TYPES.includes(type)) throw new TypeError("unsupported command type");
+    this.type = type;
     this.onChange = onChange;
     this.options = options;
     this.pending = false;
@@ -155,7 +169,7 @@ export class MakePaperclipCommandRunner {
     if (this.pending) return {kind: "pending"};
     let command;
     try {
-      command = this.retryCommand ?? makePaperclipCommand(createCommandId());
+      command = this.retryCommand ?? createCommand(this.type, createCommandId());
     } catch (error) {
       const outcome = {kind: "local_error", message: String(error)};
       this.onChange(outcome);
@@ -166,17 +180,22 @@ export class MakePaperclipCommandRunner {
     this.onChange({kind: "pending", command});
     let outcome;
     try {
-      outcome = await postMakePaperclip(command, this.options);
+      outcome = await postGameCommand(command, this.options);
     } catch (error) {
       outcome = {kind: error instanceof ResponseValidationError ? "invalid_response" : "network_error", message: String(error)};
     }
     if (["network_error", "unavailable", "invalid_response"].includes(outcome.kind)) {
-      // The accepted/disconnected window is ambiguous. Only an explicit later
-      // activation retries, and it sends the exact same ID and normalized body.
+      // Only explicit reactivation retries this exact normalized payload.
       this.retryCommand = command;
     }
     this.pending = false;
     this.onChange({...outcome, command, retryAvailable: this.retryAvailable});
     return outcome;
+  }
+}
+
+export class MakePaperclipCommandRunner extends GameCommandRunner {
+  constructor(onChange = () => {}, options = {}) {
+    super("make_paperclip", onChange, options);
   }
 }

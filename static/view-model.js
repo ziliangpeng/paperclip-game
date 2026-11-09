@@ -27,7 +27,7 @@ export function createViewModel(view) {
   const model = {};
   for (const [field, raw] of Object.entries(view.game)) {
     if (typeof raw === "string") {
-      const currency = ["funds", "wire_quote", "price_per_clip", "auto_clipper_cost"].includes(field);
+      const currency = ["funds", "wire_quote", "price_per_clip", "auto_clipper_cost", "income", "last_sale_revenue", "marketing_cost"].includes(field);
       model[field] = {
         canonical: formatAmount(raw),
         display: formatAmountForDisplay(raw, {currency}),
@@ -53,6 +53,11 @@ const ELEMENT_FIELDS = {
   wire_quote: "wire-quote",
   price_per_clip: "price-per-clip",
   marketing_level: "marketing-level",
+  demand: "demand",
+  marketing_cost: "marketing-cost",
+  clips_sold: "clips-sold",
+  income: "income",
+  last_sale_revenue: "last-sale-revenue",
   trust: "trust",
   processors: "processors",
   memory: "memory",

@@ -1,10 +1,10 @@
-use paperclip_game::game::amount::Amount;
+use paperclip_game::game::amount::{Amount, NonNegativeAmount, SafeU64};
 use paperclip_game::health::{PersistenceHealth, PersistencePhase};
 use paperclip_game::persistence::{
     DEFAULT_SNAPSHOT_INTERVAL, LoadOrigin, PersistenceWorker, SnapshotStore, StorageError,
     WorkerOptions,
 };
-use paperclip_game::snapshot::{SnapshotError, SnapshotV1};
+use paperclip_game::snapshot::{Snapshot, SnapshotError};
 use paperclip_game::startup::{self, StartupSnapshot};
 use rusqlite::{Connection, OpenFlags};
 use sha2::{Digest, Sha256};
@@ -45,15 +45,15 @@ fn open(path: &Path) -> StartupSnapshot {
     startup::load_or_initialize(path).expect("open valid persistence fixture")
 }
 
-fn snapshot(startup: &StartupSnapshot, revision: u64) -> SnapshotV1 {
+fn snapshot(startup: &StartupSnapshot, revision: u64) -> Snapshot {
     state_snapshot(&startup.state, revision)
 }
 
-fn state_snapshot(state: &paperclip_game::game::state::GameState, revision: u64) -> SnapshotV1 {
-    SnapshotV1::capture(state, revision).unwrap()
+fn state_snapshot(state: &paperclip_game::game::state::GameState, revision: u64) -> Snapshot {
+    Snapshot::capture(state, revision).unwrap()
 }
 
-fn changed_snapshot(startup: &StartupSnapshot, revision: u64, funds: &str) -> SnapshotV1 {
+fn changed_snapshot(startup: &StartupSnapshot, revision: u64, funds: &str) -> Snapshot {
     changed_state_snapshot(&startup.state, revision, funds)
 }
 
@@ -61,10 +61,10 @@ fn changed_state_snapshot(
     state: &paperclip_game::game::state::GameState,
     revision: u64,
     funds: &str,
-) -> SnapshotV1 {
+) -> Snapshot {
     let mut state = state.clone();
     state.pro.funds = Amount::parse(funds).unwrap();
-    SnapshotV1::capture(&state, revision).unwrap()
+    Snapshot::capture(&state, revision).unwrap()
 }
 
 fn payload(path: &Path) -> String {
@@ -176,7 +176,7 @@ impl Drop for PermissionRestorer {
 
 fn assert_rejected_without_mutation(
     directory: &TestDirectory,
-    initial: &SnapshotV1,
+    initial: &Snapshot,
     expected: StorageError,
 ) {
     let path = directory.database();
@@ -199,7 +199,7 @@ fn real_sqlite_full_row_commit_and_repeated_restore_do_not_reapply_progress() {
     assert_eq!(startup.revision, 0);
     let original_payload = payload(&path);
     assert_eq!(
-        SnapshotV1::from_canonical_bytes(original_payload.as_bytes()).unwrap(),
+        Snapshot::from_canonical_bytes(original_payload.as_bytes()).unwrap(),
         snapshot(&startup, 0)
     );
     let expected = changed_snapshot(&startup, 2, "9007199254740993.000000000000000001");
@@ -225,7 +225,7 @@ fn real_sqlite_full_row_commit_and_repeated_restore_do_not_reapply_progress() {
     let user_version: i64 = connection
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(user_version, 1);
+    assert_eq!(user_version, 2);
     let payload_type: String = connection
         .query_row("SELECT typeof(payload) FROM game_snapshot", [], |row| {
             row.get(0)
@@ -253,12 +253,12 @@ fn strict_stored_payload_negative_table_preserves_existing_raw_database() {
         (
             "unsupported snapshot",
             SnapshotError::UnsupportedSnapshotVersion,
-            |text: &str| text.replacen("\"snapshot_version\":1", "\"snapshot_version\":2", 1),
+            |text: &str| text.replacen("\"snapshot_version\":2", "\"snapshot_version\":3", 1),
         ),
         ("duplicate", SnapshotError::DuplicateField, |text: &str| {
             text.replacen(
-                "\"snapshot_version\":1",
-                "\"snapshot_version\":1,\"snapshot_version\":1",
+                "\"snapshot_version\":2",
+                "\"snapshot_version\":2,\"snapshot_version\":2",
                 1,
             )
         }),
@@ -347,13 +347,13 @@ fn checksum_metadata_utf8_and_schema_faults_are_explicit_and_non_mutating() {
             |path: &Path| {
                 Connection::open(path)
                     .unwrap()
-                    .pragma_update(None, "user_version", 2)
+                    .pragma_update(None, "user_version", 3)
                     .unwrap();
             },
         ),
         (
             "unsupported row version",
-            StorageError::UnsupportedSnapshotVersion,
+            StorageError::Snapshot(SnapshotError::UnsupportedSnapshotVersion),
             |path: &Path| {
                 let connection = Connection::open(path).unwrap();
                 connection
@@ -362,6 +362,9 @@ fn checksum_metadata_utf8_and_schema_faults_are_explicit_and_non_mutating() {
                 connection
                     .execute("UPDATE game_snapshot SET snapshot_version = 2", [])
                     .unwrap();
+                let future =
+                    payload(path).replacen("\"snapshot_version\":2", "\"snapshot_version\":3", 1);
+                replace_payload(path, &future);
             },
         ),
         (
@@ -771,6 +774,215 @@ fn normal_shutdown_joins_and_commits_latest_pending_full_snapshot() {
     assert_eq!(restored.capture_sequence, 1);
 }
 
+fn legacy_v1_bytes(snapshot: &Snapshot) -> Vec<u8> {
+    assert_eq!(snapshot.snapshot_version, 2);
+    let mut historical = String::from_utf8(snapshot.to_canonical_bytes().unwrap()).unwrap();
+    historical = historical.replacen("\"snapshot_version\":2", "\"snapshot_version\":1", 1);
+    let p = &snapshot.pro;
+    for (name, value) in [
+        (
+            "marketing_effectiveness",
+            serde_json::to_string(&p.marketing_effectiveness).unwrap(),
+        ),
+        (
+            "demand_boost",
+            serde_json::to_string(&p.demand_boost).unwrap(),
+        ),
+        ("prestige_u", serde_json::to_string(&p.prestige_u).unwrap()),
+        ("demand", serde_json::to_string(&p.demand).unwrap()),
+        ("clips_sold", serde_json::to_string(&p.clips_sold).unwrap()),
+        ("income", serde_json::to_string(&p.income).unwrap()),
+        (
+            "last_sale_revenue",
+            serde_json::to_string(&p.last_sale_revenue).unwrap(),
+        ),
+        (
+            "wire_base_price",
+            serde_json::to_string(&p.wire_base_price).unwrap(),
+        ),
+        (
+            "wire_price_counter",
+            serde_json::to_string(&p.wire_price_counter).unwrap(),
+        ),
+        (
+            "wire_purchase_count",
+            serde_json::to_string(&p.wire_purchase_count).unwrap(),
+        ),
+        (
+            "wire_inactivity_ticks",
+            serde_json::to_string(&p.wire_inactivity_ticks).unwrap(),
+        ),
+    ] {
+        let member = format!(",\"{name}\":{value}");
+        assert_eq!(
+            historical.matches(&member).count(),
+            1,
+            "history member {name}"
+        );
+        historical = historical.replacen(&member, "", 1);
+    }
+    historical.into_bytes()
+}
+
+fn actual_legacy_state() -> Snapshot {
+    let bootstrap = TestDirectory::new();
+    let startup = open(&bootstrap.database());
+    let mut snapshot = state_snapshot(&startup.state, 77);
+    // A valid historical-state fixture, not additional product mutation APIs.
+    snapshot.pro.lifetime_clips = NonNegativeAmount::from_i128(8).unwrap();
+    snapshot.pro.unsold_clips = NonNegativeAmount::from_i128(8).unwrap();
+    snapshot.pro.unused_clips = NonNegativeAmount::from_i128(8).unwrap();
+    snapshot.pro.wire = NonNegativeAmount::from_i128(992).unwrap();
+    snapshot.clock.update_count = SafeU64::new(1).unwrap();
+    snapshot.clock.fast_phase = 1;
+    snapshot.clock.second_phase = 1;
+    snapshot.clock.slow_phase = 1;
+    snapshot.clock.combat_remainder_nanos = 10_000_000;
+    snapshot.clock.combat_pulses = SafeU64::new(0).unwrap();
+    Snapshot::from_canonical_bytes(&snapshot.to_canonical_bytes().unwrap()).unwrap()
+}
+
+fn write_actual_schema_one(directory: &TestDirectory, snapshot: &Snapshot, extra: &str) -> Vec<u8> {
+    // Exact table definition from base c4ce301:src/persistence.rs:26-38.
+    let historical = String::from_utf8(legacy_v1_bytes(snapshot)).unwrap();
+    let connection = Connection::open(directory.database()).unwrap();
+    connection
+        .execute_batch(
+            "PRAGMA user_version = 1;
+         PRAGMA journal_mode = WAL;
+         PRAGMA synchronous = FULL;
+         CREATE TABLE game_snapshot (
+             slot TEXT PRIMARY KEY CHECK (slot = 'default'),
+             snapshot_version INTEGER NOT NULL CHECK (snapshot_version = 1),
+             revision INTEGER NOT NULL CHECK (
+                 revision >= 0 AND revision <= 9007199254740991
+             ),
+             capture_sequence INTEGER NOT NULL CHECK (
+                 capture_sequence >= 0 AND capture_sequence <= 9007199254740991
+             ),
+             payload TEXT NOT NULL,
+             checksum TEXT NOT NULL CHECK (length(checksum) = 64)
+         );",
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO game_snapshot (
+             slot, snapshot_version, revision, capture_sequence, payload, checksum
+         ) VALUES ('default', 1, 77, 3, ?1, ?2)",
+            rusqlite::params![historical, digest(historical.as_bytes())],
+        )
+        .unwrap();
+    connection.execute_batch(extra).unwrap();
+    drop(connection);
+    std::fs::read(directory.database()).unwrap()
+}
+
+#[test]
+fn actual_schema_one_migration_is_complete_idempotent_and_has_no_inferred_sales() {
+    let directory = TestDirectory::new();
+    let expected = actual_legacy_state();
+    write_actual_schema_one(&directory, &expected, "");
+    let first = open(&directory.database());
+    assert_eq!(first.origin, LoadOrigin::Migrated);
+    assert_eq!(first.revision, 77);
+    assert_eq!(first.capture_sequence, 3);
+    assert_eq!(first.state.pro.lifetime_clips.to_string(), "8");
+    assert_eq!(first.state.pro.wire.to_string(), "992");
+    assert_eq!(first.state.rng_state_hex(), expected.rng_state);
+    assert_eq!(first.state.pro.clips_sold.to_string(), "0");
+    assert_eq!(first.state.pro.income, Amount::zero());
+    assert_eq!(first.state.pro.funds, Amount::zero());
+    assert_eq!(first.state.pro.last_sale_revenue, Amount::zero());
+    assert_eq!(first.state.pro.wire_base_price.to_string(), "20");
+    assert_eq!(first.state.pro.wire_price_counter.get(), 0);
+    assert_eq!(first.state.pro.wire_purchase_count.get(), 0);
+    assert_eq!(first.state.pro.wire_inactivity_ticks.get(), 0);
+    assert_eq!(first.state.clock.update_count(), 1);
+    assert_eq!(state_snapshot(&first.state, 77), expected);
+    let first_bytes = std::fs::read(directory.database()).unwrap();
+    let upgraded = payload(&directory.database());
+    assert!(upgraded.starts_with("{\"snapshot_version\":2,"));
+    let connection = Connection::open(directory.database()).unwrap();
+    let versions: (i64, i64, i64) = connection
+        .query_row(
+            "SELECT snapshot_version, revision, capture_sequence FROM game_snapshot",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(versions, (2, 77, 3));
+    let schema: i64 = connection
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(schema, 2);
+    drop(connection);
+    for _ in 0..2 {
+        let restored = open(&directory.database());
+        assert_eq!(restored.origin, LoadOrigin::Restored);
+        assert_eq!(restored.capture_sequence, 3);
+        assert_eq!(state_snapshot(&restored.state, 77), expected);
+        assert_eq!(std::fs::read(directory.database()).unwrap(), first_bytes);
+    }
+    eprintln!(
+        "actual schema 1 migration: retained revision 77, clock 1, RNG, eight produced clips and no offline sales; version 2 repeat opens byte-identical"
+    );
+}
+
+#[test]
+fn legacy_tampering_and_migration_transaction_failure_leave_original_bytes_unchanged() {
+    let expected = actual_legacy_state();
+    for case in ["unknown-field", "migration-ddl-conflict"] {
+        let directory = TestDirectory::new();
+        let extra = if case == "migration-ddl-conflict" {
+            "CREATE TABLE game_snapshot_migration_source (slot TEXT);"
+        } else {
+            ""
+        };
+        let before = write_actual_schema_one(&directory, &expected, extra);
+        if case == "unknown-field" {
+            let historical = String::from_utf8(legacy_v1_bytes(&expected)).unwrap();
+            let tampered = historical.replacen("\"pro\":{", "\"pro\":{\"private_marker\":0,", 1);
+            replace_payload(&directory.database(), &tampered);
+        }
+        let before = if case == "unknown-field" {
+            std::fs::read(directory.database()).unwrap()
+        } else {
+            before
+        };
+        let error =
+            SnapshotStore::open_or_initialize(&directory.database(), &expected).unwrap_err();
+        match case {
+            "unknown-field" => {
+                assert_eq!(error, StorageError::Snapshot(SnapshotError::UnknownField))
+            }
+            _ => assert_eq!(error, StorageError::TransactionFailed),
+        }
+        assert_eq!(
+            std::fs::read(directory.database()).unwrap(),
+            before,
+            "{case}"
+        );
+        assert!(
+            !payload(&directory.database()).contains("snapshot_version\":2"),
+            "{case}"
+        );
+        if case == "migration-ddl-conflict" {
+            let connection = Connection::open(directory.database()).unwrap();
+            connection
+                .execute_batch("DROP TABLE game_snapshot_migration_source;")
+                .unwrap();
+            drop(connection);
+            let restored = open(&directory.database());
+            assert_eq!(restored.origin, LoadOrigin::Migrated);
+            assert_eq!(state_snapshot(&restored.state, 77), expected);
+        }
+        eprintln!(
+            "legacy rejection {case}: typed, original DB bytes unchanged; cleanup permits legitimate migration"
+        );
+    }
+}
+
 const CRASH_DATABASE_ENV: &str = "PAPERCLIP_GAME_TEST_CRASH_DATABASE";
 const CRASH_MODE_ENV: &str = "PAPERCLIP_GAME_TEST_CRASH_MODE";
 
@@ -845,7 +1057,7 @@ fn real_process_sigkill_before_and_after_commit_recovers_only_complete_rows() {
         let mut child = CrashChild(child);
         wait_for_commit_marker(&marker, &mut child.0);
         let expected_bytes = std::fs::read(&marker).unwrap();
-        let expected = SnapshotV1::from_canonical_bytes(&expected_bytes).unwrap();
+        let expected = Snapshot::from_canonical_bytes(&expected_bytes).unwrap();
 
         child.0.kill().expect("send actual child process kill");
         let status = child.0.wait().expect("reap killed crash fixture child");

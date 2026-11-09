@@ -1,4 +1,5 @@
 use paperclip_game::api::{GameView, MAX_COMMAND_BODY_BYTES, MAX_COMMAND_ID_BYTES, serve};
+use paperclip_game::game::amount::Amount;
 use paperclip_game::health::PersistenceHealth;
 use paperclip_game::runtime::GameRuntime;
 use serde_json::{Value, json};
@@ -172,9 +173,14 @@ fn assert_fresh_view(response: &HttpResponse) -> GameView {
             "auto_clipper_cost",
             "auto_clipper_revealed",
             "auto_clippers",
+            "clips_sold",
             "computing_hidden",
+            "demand",
             "funds",
+            "income",
+            "last_sale_revenue",
             "lifetime_clips",
+            "marketing_cost",
             "marketing_level",
             "memory",
             "price_per_clip",
@@ -199,6 +205,11 @@ fn assert_fresh_view(response: &HttpResponse) -> GameView {
         "wire_spool_length",
         "wire_quote",
         "price_per_clip",
+        "marketing_cost",
+        "demand",
+        "clips_sold",
+        "income",
+        "last_sale_revenue",
         "marketing_level",
         "trust",
         "processors",
@@ -220,6 +231,11 @@ fn assert_fresh_view(response: &HttpResponse) -> GameView {
     assert_eq!(view.game.wire_spool_length.to_string(), "1000");
     assert_eq!(view.game.wire_quote.to_string(), "20");
     assert_eq!(view.game.price_per_clip.to_string(), "0.25");
+    assert_eq!(view.game.marketing_cost.to_string(), "100");
+    assert_eq!(view.game.demand.to_string(), "3.2");
+    assert_eq!(view.game.clips_sold.to_string(), "0");
+    assert_eq!(view.game.income.to_string(), "0");
+    assert_eq!(view.game.last_sale_revenue.to_string(), "0");
     assert_eq!(view.game.marketing_level.to_string(), "1");
     assert_eq!(view.game.trust.to_string(), "2");
     assert_eq!(view.game.processors.to_string(), "1");
@@ -425,5 +441,81 @@ fn independent_http_clients_apply_two_legal_intents_and_coalesce_retries() {
     assert_eq!(final_view.game.lifetime_clips.to_string(), "2");
     assert_eq!(final_view.game.unsold_clips.to_string(), "2");
     assert_eq!(final_view.game.unused_clips.to_string(), "2");
+    server.stop();
+}
+
+#[test]
+fn closed_business_commands_and_original_key_retries_use_real_rules() {
+    let server = TestServer::start();
+    let initial = assert_fresh_view(&get(server.address));
+    for (kind, expected_status, expected_result) in [
+        ("lower_price", 200, "applied"),
+        ("raise_price", 200, "applied"),
+        ("buy_wire", 422, "rule_rejected"),
+        ("buy_marketing", 422, "rule_rejected"),
+    ] {
+        let id = format!("business-{kind}");
+        let raw = serde_json::to_vec(&json!({"command_id":id,"type":kind,"arguments":{}})).unwrap();
+        let first = post(server.address, &raw);
+        assert_eq!(first.status, expected_status, "{kind}");
+        assert_eq!(first.json()["status"], expected_result, "{kind}");
+        if expected_status == 422 {
+            assert_eq!(first.json()["reason"], "insufficient_funds");
+            assert!(first.json()["revision"].is_u64());
+        }
+        let reordered = post(
+            server.address,
+            format!(r#"{{ "type" : "{kind}", "command_id" : "{id}", "arguments" : {{ }} }}"#),
+        );
+        assert_eq!(reordered, first, "terminal original-ID retry: {kind}");
+        let conflicting = post(
+            server.address,
+            serde_json::to_vec(&json!({"command_id":id,"type":"make_paperclip","arguments":{}}))
+                .unwrap(),
+        );
+        assert_eq!(conflicting.status, 409);
+        assert_eq!(conflicting.json(), json!({"status":"conflict"}));
+
+        let bad_id = format!("business-bad-{kind}");
+        let bad = post(
+            server.address,
+            serde_json::to_vec(
+                &json!({"command_id":bad_id,"type":kind,"arguments":{"cost":"20","funds":"100"}}),
+            )
+            .unwrap(),
+        );
+        assert_eq!(bad.status, 400);
+        assert_eq!(bad.json()["reason"], "invalid_arguments");
+        let good = post(
+            server.address,
+            serde_json::to_vec(&json!({"command_id":bad_id,"type":kind,"arguments":{}})).unwrap(),
+        );
+        assert_eq!(
+            good.status, expected_status,
+            "bad shape must not bind {kind}"
+        );
+        assert_eq!(good.json()["status"], expected_result);
+        if expected_status == 422 {
+            assert_eq!(good.json()["reason"], "insufficient_funds");
+        }
+    }
+    let later = get(server.address).view();
+    assert_eq!(later.run_id, initial.run_id);
+    assert_eq!(later.game.price_per_clip.to_string(), "0.25");
+    assert_eq!(later.game.funds, Amount::zero());
+    assert_eq!(later.game.wire.to_string(), "1000");
+    assert_eq!(later.game.marketing_level.to_string(), "1");
+    for iteration in 0..70 {
+        let response = post(server.address, serde_json::to_vec(&json!({"command_id":format!("price-boundary-{iteration}"),"type":"lower_price","arguments":{}})).unwrap());
+        // Unique-ID command names intentionally use the same source action.
+        if response.status != 200 {
+            assert_eq!(response.status, 422);
+            assert_eq!(response.json()["status"], "rule_rejected");
+            assert_eq!(response.json()["reason"], "price_at_minimum");
+            break;
+        }
+    }
+    let at_floor = get(server.address).view();
+    assert_eq!(at_floor.game.price_per_clip.to_string(), "0.01");
     server.stop();
 }

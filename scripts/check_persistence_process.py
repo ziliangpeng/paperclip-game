@@ -7,10 +7,12 @@
 from __future__ import annotations
 
 import argparse
+from decimal import Decimal
 import hashlib
 import http.client
 import json
 from pathlib import Path
+import re
 import sqlite3
 import subprocess
 import sys
@@ -60,13 +62,67 @@ def stop_checked(
     check_logs(process, port, temporary, label)
 
 
+
+STORED_PRO_FIELDS = {
+    "lifetime_clips", "unsold_clips", "unused_clips", "wire", "funds",
+    "wire_spool_length", "wire_quote", "price_per_clip", "marketing_level",
+    "marketing_effectiveness", "demand_boost", "prestige_u", "demand",
+    "clips_sold", "income", "last_sale_revenue", "wire_base_price",
+    "wire_price_counter", "wire_purchase_count", "wire_inactivity_ticks",
+    "trust", "processors", "memory", "computing_hidden", "projects_hidden",
+    "auto_clipper_revealed", "auto_clippers", "auto_clipper_cost",
+}
+INTERNAL_PRO_FIELDS = {
+    "marketing_effectiveness", "demand_boost", "prestige_u", "wire_base_price",
+    "wire_price_counter", "wire_purchase_count", "wire_inactivity_ticks",
+}
+
+
+def assert_stored_pro(pro: dict[str, Any]) -> dict[str, Any]:
+    """Validate stored authority and return its exact public projection.
+
+    Marketing cost is intentionally derived from the stored level and is not
+    duplicated in ProSnapshot. The remaining internal parameters stay private
+    to storage rather than being silently admitted into the public View.
+    """
+    assert set(pro) == STORED_PRO_FIELDS
+    for field in ("wire_price_counter", "wire_purchase_count", "wire_inactivity_ticks"):
+        value = pro[field]
+        assert type(value) is int and 0 <= value <= api.SAFE_INTEGER
+    for field in ("marketing_effectiveness", "demand_boost", "wire_base_price"):
+        value = pro[field]
+        assert isinstance(value, str) and re.fullmatch(
+            r"(?:0|[1-9][0-9]*)(?:\.[0-9]*[1-9])?", value
+        )
+    assert Decimal(pro["wire_base_price"]) > 0
+    assert isinstance(pro["prestige_u"], str) and re.fullmatch(
+        r"0|[1-9][0-9]*", pro["prestige_u"]
+    )
+    public = {key: value for key, value in pro.items() if key not in INTERNAL_PRO_FIELDS}
+    supplied = {key: public[key] for key in api.ECONOMIC_VIEW_FIELDS if key != "marketing_cost"}
+    api.assert_production(
+        {"game": public}, public["wire"], public["lifetime_clips"], supplied,
+        stored_model=True,
+    )
+    return public
+
+
+def assert_view_matches_stored(pro: dict[str, Any], view: dict[str, Any]) -> None:
+    api.assert_view_schema(view)
+    expected = dict(view["game"])
+    # This is the sole display-derived field that ProState does not persist.
+    expected.pop("marketing_cost")
+    assert assert_stored_pro(pro) == expected
+
 def read_snapshot(database: Path) -> dict[str, Any]:
     # Only call this for a known-valid database. Startup corruption is tested
     # against original bytes without allowing SQLite to mutate the source file.
     connection = sqlite3.connect(f"{database.resolve().as_uri()}?mode=ro", uri=True)
     try:
         schema = connection.execute("PRAGMA user_version").fetchone()[0]
-        assert schema == 1
+        # Product storage is now schema/snapshot 2. Historical V1 input is
+        # migrated by the application and remains covered by its strict tests.
+        assert schema == 2
         rows = connection.execute(
             "SELECT slot, snapshot_version, revision, capture_sequence, payload, checksum "
             "FROM game_snapshot"
@@ -75,14 +131,15 @@ def read_snapshot(database: Path) -> dict[str, Any]:
         connection.close()
     assert len(rows) == 1 and rows[0][0] == "default"
     _, version, revision, sequence, payload, checksum = rows[0]
-    assert version == 1
+    assert version == 2
     assert type(revision) is int and 0 <= revision <= api.SAFE_INTEGER
     assert type(sequence) is int and 0 <= sequence <= api.SAFE_INTEGER
     raw_payload = payload.encode("utf-8")
     snapshot = api.checked_json(raw_payload)
     assert set(snapshot) == {"snapshot_version", "revision", "pro", "clock", "rng_state"}
-    assert type(snapshot["snapshot_version"]) is int and snapshot["snapshot_version"] == 1
+    assert type(snapshot["snapshot_version"]) is int and snapshot["snapshot_version"] == 2
     assert type(snapshot["revision"]) is int and snapshot["revision"] == revision
+    assert_stored_pro(snapshot["pro"])
     assert set(snapshot["clock"]) == {
         "update_count", "fast_phase", "second_phase", "slow_phase",
         "combat_remainder_nanos", "combat_pulses",
@@ -225,7 +282,7 @@ def check_sqlite_fault_and_health(binary: Path, temporary: Path) -> None:
         post_stop_view = api.checked_json(client.get()[1])
         stop_checked(process, client, port, temporary, "fault")
         saved = read_snapshot(database)
-        assert saved["pro"] == post_stop_view["game"]
+        assert_view_matches_stored(saved["pro"], post_stop_view)
         assert saved["revision"] >= recovered["last_committed_revision"]
         resynchronized.close()
         print("process health: active SSE + real SQLite busy/503 continued; valid commit/final stop restored storage")
@@ -251,14 +308,14 @@ def check_real_kill_and_repeated_restart(binary: Path, temporary: Path) -> None:
         first_client.close()
         first.force_stop()
     saved = read_snapshot(database)
-    assert saved["pro"] == saved_view["game"]
+    assert_view_matches_stored(saved["pro"], saved_view)
 
     second, second_port, second_client = launch(binary, database, temporary, "crash-loss")
     try:
         restored_second = api.checked_json(second_client.get()[1])
         run_ids.append(restored_second["run_id"])
         assert restored_second["run_id"] != saved_view["run_id"]
-        assert restored_second["game"] == saved["pro"]
+        assert_view_matches_stored(saved["pro"], restored_second)
         unsaved = second_client.make("crash-unsaved-command")
         assert unsaved[0] == 200 and api.checked_json(unsaved[1])["status"] == "applied"
         assert api.checked_json(second_client.get()[1])["game"]["lifetime_clips"] == "2"
@@ -278,7 +335,7 @@ def check_real_kill_and_repeated_restart(binary: Path, temporary: Path) -> None:
         restored_third = api.checked_json(third_client.get()[1])
         run_ids.append(restored_third["run_id"])
         assert restored_third["run_id"] != restored_second["run_id"]
-        assert restored_third["game"] == saved["pro"], "the unsaved command must roll back"
+        assert_view_matches_stored(saved["pro"], restored_third), "the unsaved command must roll back"
         # A new process has no old retry map: clients may resynchronize/reissue.
         replayed = third_client.make("crash-unsaved-command")
         assert replayed[0] == 200 and api.checked_json(replayed[1])["status"] == "applied"
@@ -290,14 +347,14 @@ def check_real_kill_and_repeated_restart(binary: Path, temporary: Path) -> None:
         third_client.close()
         third.force_stop()
     committed_third = read_snapshot(database)
-    assert committed_third["pro"] == third_view["game"]
+    assert_view_matches_stored(committed_third["pro"], third_view)
     assert committed_third["rng_state"] == saved["rng_state"]
 
     fourth, fourth_port, fourth_client = launch(binary, database, temporary, "crash-restore-again")
     try:
         restored_fourth = api.checked_json(fourth_client.get()[1])
         run_ids.append(restored_fourth["run_id"])
-        assert restored_fourth["game"] == committed_third["pro"]
+        assert_view_matches_stored(committed_third["pro"], restored_fourth)
         assert api.assert_ready(fourth_client)["ready"] is True
         stop_checked(fourth, fourth_client, fourth_port, temporary, "crash-restore-again")
     finally:

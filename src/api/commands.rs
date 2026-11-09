@@ -1,6 +1,8 @@
 //! Strict command transport and process-lifetime retry coordination.
 
 use crate::game::conversion::ConversionError;
+use crate::game::economy::EconomyError;
+use crate::game::evaluator::EvaluatorError;
 use crate::runtime::{
     Command, CommandId, CommandRejection, PendingCommand, RuntimeHandle, SubmitError,
 };
@@ -80,6 +82,10 @@ fn submit_error(error: SubmitError) -> StoredResponse {
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum NormalizedPayload {
     MakePaperclip,
+    BuyWire,
+    LowerPrice,
+    RaisePrice,
+    BuyMarketing,
     // Unknown actions remain fully normalized for conflict checks, but can
     // never become an executable runtime intent.
     Unsupported {
@@ -92,6 +98,10 @@ impl NormalizedPayload {
     fn runtime_command(&self, id: CommandId) -> Option<Command> {
         match self {
             Self::MakePaperclip => Some(Command::make_paperclip(id)),
+            Self::BuyWire => Some(Command::buy_wire(id)),
+            Self::LowerPrice => Some(Command::lower_price(id)),
+            Self::RaisePrice => Some(Command::raise_price(id)),
+            Self::BuyMarketing => Some(Command::buy_marketing(id)),
             Self::Unsupported { .. } => None,
         }
     }
@@ -125,16 +135,26 @@ fn decode_command(bytes: &[u8]) -> Result<NormalizedCommand, StoredResponse> {
     let StrictValue::Object(arguments) = &envelope.arguments else {
         return Err(schema_error("invalid_arguments"));
     };
-    let payload = if envelope.action_type == "make_paperclip" {
-        if !arguments.is_empty() {
+    let payload = match envelope.action_type.as_str() {
+        "make_paperclip" | "buy_wire" | "lower_price" | "raise_price" | "buy_marketing"
+            if arguments.is_empty() =>
+        {
+            match envelope.action_type.as_str() {
+                "make_paperclip" => NormalizedPayload::MakePaperclip,
+                "buy_wire" => NormalizedPayload::BuyWire,
+                "lower_price" => NormalizedPayload::LowerPrice,
+                "raise_price" => NormalizedPayload::RaisePrice,
+                "buy_marketing" => NormalizedPayload::BuyMarketing,
+                _ => unreachable!(),
+            }
+        }
+        "make_paperclip" | "buy_wire" | "lower_price" | "raise_price" | "buy_marketing" => {
             return Err(schema_error("invalid_arguments"));
         }
-        NormalizedPayload::MakePaperclip
-    } else {
-        NormalizedPayload::Unsupported {
+        _ => NormalizedPayload::Unsupported {
             action_type: envelope.action_type,
             arguments: envelope.arguments,
-        }
+        },
     };
     Ok(NormalizedCommand {
         id: envelope.command_id,
@@ -454,6 +474,15 @@ fn rejection_reason(rejection: CommandRejection) -> &'static str {
     match rejection {
         CommandRejection::Conversion(ConversionError::InsufficientWire) => "insufficient_wire",
         CommandRejection::Conversion(_) => "conversion_rejected",
+        CommandRejection::Economy(EconomyError::InsufficientFunds) => "insufficient_funds",
+        CommandRejection::Economy(EconomyError::PriceAtMinimum) => "price_at_minimum",
+        CommandRejection::Economy(EconomyError::CounterLimit) => "counter_limit",
+        CommandRejection::Economy(EconomyError::Evaluator(
+            EvaluatorError::OutsideDecisionDomain,
+        )) => "numeric_decision_domain",
+        CommandRejection::Economy(EconomyError::Evaluator(_)) => "numeric_evaluation_rejected",
+        CommandRejection::Economy(EconomyError::ExponentResourceLimit) => "resource_limit",
+        CommandRejection::Economy(EconomyError::InvalidState) => "invalid_state",
         CommandRejection::ConflictingRetry => "conflicting_retry",
     }
 }

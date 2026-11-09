@@ -510,7 +510,7 @@ def proxy_handler(state: ProxyState) -> type[BaseHTTPRequestHandler]:
                               "contentType": self.headers.get("Content-Type"),
                               "json": json.loads(raw), "forwarded": 0, "dropped": False}
                     state.command_records.append(record)
-                    assert len(state.command_records) <= 2000
+                    assert len(state.command_records) <= 12000
                     state.command_arrived.notify_all()
                 if state.hold_commands:
                     assert state.command_release.wait(10), "bounded command barrier"
@@ -533,6 +533,7 @@ def proxy_handler(state: ProxyState) -> type[BaseHTTPRequestHandler]:
                     "POST", self.path, raw, self.headers.get("Content-Type"))
                 record["response_status"] = status
                 record["response_body"] = json.loads(response_body)
+                record["responseBodyHex"] = response_body.hex()
                 record["forwarded"] += 1
                 if state.drop_next_response:
                     state.drop_next_response = False
@@ -619,6 +620,11 @@ def dom_state(page: Cdp) -> dict[str, Any]:
       wireQuote: document.getElementById('wire-quote').dataset.canonical,
       price: document.getElementById('price-per-clip').dataset.canonical,
       marketingLevel: document.getElementById('marketing-level').dataset.canonical,
+      demand: document.getElementById('demand').dataset.canonical,
+      marketingCost: document.getElementById('marketing-cost').dataset.canonical,
+      clipsSold: document.getElementById('clips-sold').dataset.canonical,
+      income: document.getElementById('income').dataset.canonical,
+      lastSaleRevenue: document.getElementById('last-sale-revenue').dataset.canonical,
       trust: document.getElementById('trust').dataset.canonical,
       processors: document.getElementById('processors').dataset.canonical,
       memory: document.getElementById('memory').dataset.canonical,
@@ -628,10 +634,22 @@ def dom_state(page: Cdp) -> dict[str, Any]:
       autoClipperCost: document.getElementById('auto-clipper-cost').dataset.canonical,
       status: document.getElementById('command-status').textContent,
       button: document.getElementById('make-paperclip').textContent,
+      controls: [...document.querySelectorAll('button')].map(button => ({id:button.id, disabled:button.disabled, ariaDisabled:button.getAttribute('aria-disabled')})),
       disabled: document.getElementById('make-paperclip').disabled,
       ariaDisabled: document.getElementById('make-paperclip').getAttribute('aria-disabled'),
       focus: document.activeElement && document.activeElement.id
     })""")
+
+
+def stock_ledger_visible(value: dict[str, Any], clips: int, wire: str) -> bool:
+    if value.get("viewState") != "ready":
+        return False
+    sold = int(value["clipsSold"])
+    remaining = clips - sold
+    # In this scope sales move Unsold into Sold. Unused remains equal to
+    # Lifetime; there is no AutoClipper purchase or other consumer of it.
+    return (0 <= sold <= clips and value["lifetime"] == value["unused"] == str(clips) and
+            value["unsold"] == str(remaining) and value["wire"] == wire)
 
 
 def wait_dom(page: Cdp, expression: str, expected: Any, description: str, timeout: float = 10) -> Any:
@@ -639,12 +657,12 @@ def wait_dom(page: Cdp, expression: str, expected: Any, description: str, timeou
                     description, timeout)
 
 
-def exact_command(record: dict[str, Any]) -> dict[str, Any]:
+def exact_command(record: dict[str, Any], kind: str = "make_paperclip") -> dict[str, Any]:
     body = record["json"]
     assert record["method"] == "POST" and record["path"] == "/api/game/commands"
     assert record["contentType"] == "application/json"
     assert set(body) == {"command_id", "type", "arguments"}
-    assert body["type"] == "make_paperclip" and body["arguments"] == {}
+    assert body["type"] == kind and body["arguments"] == {}
     assert isinstance(body["command_id"], str) and 0 < len(body["command_id"].encode()) <= 128
     assert not any(ord(character) < 32 or ord(character) == 127 for character in body["command_id"])
     return body
@@ -658,6 +676,14 @@ def fixture_view(template: dict[str, Any], run_id: str, revision: int,
     view["clock"]["update_count"] = revision * 100
     view["game"].update(changes)
     return view
+
+
+def assert_only_wire_quote_can_advance(actual: dict[str, Any], expected: dict[str, Any]) -> None:
+    """Protect genuine resources from fixture writes while market time can advance."""
+    api.assert_production({"game": actual}, actual["wire"], actual["lifetime_clips"], actual)
+    unchanged = dict(expected)
+    unchanged["wire_quote"] = actual["wire_quote"]
+    assert actual == unchanged, (actual, unchanged)
 
 
 def raw_counter_frame(view: dict[str, Any], field: str, token: str) -> tuple[str, int, bytes]:
@@ -704,7 +730,7 @@ def check_assets_and_negative_commands(page: Cdp, port: int) -> None:
 
     # Exercise the command factory and closed-envelope guard in the page itself.
     result = page.evaluate("""(async () => {
-      const {makePaperclipCommand, postMakePaperclip} = await import('/static/commands.js');
+      const {makePaperclipCommand, postMakePaperclip, createCommand, postGameCommand} = await import('/static/commands.js');
       const id = 'browser-negative-fixed-id';
       const good = makePaperclipCommand(id);
       if (JSON.stringify(good) !== '{"command_id":"browser-negative-fixed-id","type":"make_paperclip","arguments":{}}') throw new Error('bad exact envelope');
@@ -724,6 +750,22 @@ def check_assets_and_negative_commands(page: Cdp, port: int) -> None:
         let rejected = false;
         try { makePaperclipCommand(invalidId); } catch (error) { rejected = error instanceof TypeError && error.message === 'invalid opaque command ID'; }
         if (!rejected) throw new Error('command id guard');
+      }
+      const closedKinds = ["buy_wire", "lower_price", "raise_price", "buy_marketing"];
+      let closedRejected = 0;
+      for (const kind of closedKinds) {
+        const command = createCommand(kind, 'browser-business-' + kind);
+        if (Object.keys(command).sort().join() !== 'arguments,command_id,type') throw new Error('business envelope field closure');
+        for (const field of ["funds", "cost", "count"]) {
+          let rejected = false;
+          try {
+            await postGameCommand({...command, arguments: {[field]: "1"}}, {fetch: () => { fetches += 1; throw new Error('must not fetch'); }});
+          } catch (error) {
+            rejected = error instanceof TypeError && error.message === 'only a closed, empty-argument game command is accepted';
+          }
+          if (!rejected) throw new Error('business argument rejection: ' + kind + '/' + field);
+          closedRejected += 1;
+        }
       }
       const headers = {"Content-Type": "application/json"};
       let oversizeReason = null;
@@ -748,11 +790,11 @@ def check_assets_and_negative_commands(page: Cdp, port: int) -> None:
       if (timeoutOutcome.kind !== 'network_error' || !timeoutRunner.retryAvailable || timeoutElapsed > 2000) {
         throw new Error('bounded pending fetch/same-intent retry guard: ' + JSON.stringify({kind: timeoutOutcome.kind, retry: timeoutRunner.retryAvailable, timeoutElapsed}));
       }
-      return {badEnvelopes: bad.length, invalidIds: 3, fetches, oversizeRejected: true,
+      return {badEnvelopes: bad.length, closedRejected, invalidIds: 3, fetches, oversizeRejected: true,
         wrongContentTypeRejected: true, invalidAppliedShapeRejected: true,
         timeoutBounded: true, timeoutRetainsRetry: true};
     })()""")
-    assert result == {"badEnvelopes": 8, "invalidIds": 3, "fetches": 0,
+    assert result == {"badEnvelopes": 8, "closedRejected": 12, "invalidIds": 3, "fetches": 0,
                       "oversizeRejected": True, "wrongContentTypeRejected": True,
                       "invalidAppliedShapeRejected": True, "timeoutBounded": True,
                       "timeoutRetainsRetry": True}, result
@@ -793,11 +835,12 @@ def check_accessibility_and_keyboard_order(page: Cdp) -> None:
     assert structure["header"] == structure["nav"] == structure["main"] == structure["footer"] == 1
     visible = [heading for heading in structure["headings"] if not heading["hidden"]]
     assert visible[0]["level"] == 1 and all(h["level"] <= previous + 1 for h, previous in zip(visible[1:], [h["level"] for h in visible[:-1]]))
-    assert structure["fakeControls"] == 0 and structure["buttons"] == ["Make Paperclip"]
+    assert structure["fakeControls"] == 0
+    assert structure["buttons"] == ["Make Paperclip", "Lower Price", "Raise Price", "Buy Marketing", "Buy Wire"]
     assert structure["amountsOutsideLive"] and structure["statusLive"] == "polite" and structure["statusAtomic"] == "true"
     assert structure["labels"] and abs(structure["contrast"] - 21) < 1e-9 and abs(structure["buttonContrast"] - 21) < 1e-9, structure
     assert structure["computingHidden"] and structure["autoHidden"]
-    for forbidden in ("Feed", "Teach", "Clad", "Debug", "Reset", "New world", "Buy Wire", "Buy Auto"):
+    for forbidden in ("Feed", "Teach", "Clad", "Debug", "Reset", "New world", "Buy Auto"):
         assert forbidden not in structure["forbidden"]
     ax = page.call("Accessibility.getFullAXTree")["nodes"]
     roles = {node.get("role", {}).get("value") for node in ax if not node.get("ignored")}
@@ -817,6 +860,12 @@ def check_accessibility_and_keyboard_order(page: Cdp) -> None:
     assert focused[0] == "Skip to game controls", focused
     assert focused[1:4] == ["Production", "Business", "Manufacturing"], focused
     assert focused[4] == "make-paperclip", focused
+    for _ in range(4):
+        page.key("keyDown", "Tab", "Tab", 9)
+        page.key("keyUp", "Tab", "Tab", 9)
+        focused.append(page.evaluate("document.activeElement.id"))
+    assert focused[4:] == ["make-paperclip", "lower-price", "raise-price", "buy-marketing", "buy-wire"], focused
+    page.evaluate("document.getElementById('make-paperclip').focus()")
 
 
 def drain_render_tasks(page: Cdp) -> None:
@@ -955,13 +1004,13 @@ def run_startup_feedback_and_cleanup(binary: Path, executable: str, version: str
             # insufficient-wire 422 on a third fresh page before its first View.
             public = api.Client(backend_port)
             current = api.checked_json(public.get()[1])
-            api.assert_production(current, "998", "2")
+            api.assert_production(current, "998", "2", current["game"])
             remaining_wire = int(current["game"]["wire"])
             for index in range(remaining_wire):
                 status, response_body = public.make(f"m1-startup-stock-{index}")
                 assert status == 200, (index, status, response_body)
             exhausted = api.checked_json(public.get()[1])
-            api.assert_production(exhausted, "0", "1000")
+            api.assert_production(exhausted, "0", "1000", exhausted["game"])
             public.close()
             rejected_page = activate_before_baseline()
             wait_commands(state, 3)
@@ -1049,6 +1098,317 @@ def run_startup_feedback_and_cleanup(binary: Path, executable: str, version: str
             err.close()
 
 
+def run_business_flow(browser: Browser, state: ProxyState, agent: api.Client,
+                      page1: Cdp, page2: Cdp) -> dict[str, Any]:
+    """Genuine native controls, production, stochastic sales and procurement."""
+    from decimal import Decimal
+    import time as clock
+
+    started = clock.monotonic()
+    labels = {"make_paperclip": "Make Paperclip", "buy_wire": "Buy Wire",
+              "buy_marketing": "Buy Marketing", "lower_price": "Lower Price",
+              "raise_price": "Raise Price"}
+    rejection_text = {
+        "insufficient_funds": "not enough Funds at the current server quote/cost",
+        "price_at_minimum": "price is already at its minimum",
+    }
+
+    def current() -> dict[str, Any]:
+        view = api.checked_json(agent.get()[1])
+        api.assert_production(view, view["game"]["wire"],
+                              view["game"]["lifetime_clips"], view["game"])
+        return view
+
+    def wait_feedback(page: Cdp, kind: str, record: dict[str, Any]) -> None:
+        body = record["response_body"]
+        revision = body["revision"]
+        assert type(revision) is int
+        if body["status"] == "applied":
+            if kind == "make_paperclip":
+                message = (f"Server applied the command at revision {revision}. "
+                           "Displayed resources come from the newest full server View.")
+            else:
+                message = (f"Server applied {labels[kind]} at revision {revision}. "
+                           "Resources come from the newest complete server View.")
+        else:
+            assert body["status"] == "rule_rejected"
+            message = f"Server rejected {labels[kind]}: {rejection_text[body['reason']]}. This request made no resource change."
+        wait_for(lambda: dom_state(page), lambda value:
+                 value["status"] == message and int(value["revision"]) >= revision,
+                 f"native {kind} feedback and server View")
+
+    def press(kind: str, page: Cdp = page1, expected_status: int = 200,
+              allow_drop: bool = False) -> dict[str, Any]:
+        count = len(state.command_records)
+        page.call("Page.bringToFront")
+        page.evaluate(f"document.getElementById({kind.replace('_', '-')!r}).focus()")
+        page.press("Enter")
+        record = wait_commands(state, count + 1)[-1]
+        exact_command(record, kind)
+        wait_for(lambda: record.get("response_body"), lambda value: isinstance(value, dict),
+                 f"actual {kind} response")
+        assert record["response_status"] == expected_status and record["forwarded"] == 1, record
+        assert set(record["response_body"]) == ({"status", "revision", "reason"}
+            if expected_status == 422 else {"status", "revision"})
+        if expected_status == 200:
+            assert record["response_body"]["status"] == "applied"
+        else:
+            assert record["response_body"]["status"] == "rule_rejected"
+        if record["dropped"]:
+            assert allow_drop and expected_status == 200, record
+        else:
+            wait_feedback(page, kind, record)
+        return record
+
+    def assert_both_pages(predicate: Callable[[dict[str, Any]], bool], description: str) -> None:
+        for page in (page1, page2):
+            wait_for(lambda page=page: dom_state(page), predicate, description)
+
+    def replay_rejection(record: dict[str, Any]) -> None:
+        count = len(state.command_records)
+        connection = http.client.HTTPConnection("127.0.0.1", browser.origin_port, timeout=8)
+        try:
+            connection.request("POST", "/api/game/commands", body=record["raw"],
+                               headers={"Content-Type": record["contentType"]})
+            response = connection.getresponse()
+            raw = response.read(16 * 1024 + 1)
+            assert len(raw) <= 16 * 1024 and response.status == 422
+        finally:
+            connection.close()
+        duplicate = wait_commands(state, count + 1)[-1]
+        assert duplicate["raw"] == record["raw"] and duplicate["json"] == record["json"]
+        assert duplicate["forwarded"] == record["forwarded"] == 1
+        assert duplicate["response_status"] == record["response_status"] == 422
+        assert api.checked_json(raw) == duplicate["response_body"] == record["response_body"]
+        assert raw.hex() == duplicate["responseBodyHex"] == record["responseBodyHex"]
+
+    # No Funds are preloaded. At empty stock there can be no sales revenue, so
+    # both purchases are genuine server-side insufficient_funds rejections.
+    assert current()["game"]["lifetime_clips"] == "0"
+    assert_both_pages(lambda value: value.get("viewState") == "ready" and
+                      value["lifetime"] == "0" and value["wire"] == "1000",
+                      "loaded genuine business command forms before first activation")
+    failed_wire = press("buy_wire", page1, 422)
+    failed_marketing = press("buy_marketing", page2, 422)
+    for record in (failed_wire, failed_marketing):
+        assert record["response_body"]["reason"] == "insufficient_funds"
+        replay_rejection(record)
+
+    # A held lower form cannot duplicate its ID; the other page can independently
+    # raise the price. The eventual serialized lower+raise restores .25 exactly.
+    initial = current()["game"]
+    state.hold_commands = True
+    state.command_release.clear()
+    count = len(state.command_records)
+    page1.evaluate("document.getElementById('lower-price').focus()")
+    page1.press("Enter")
+    first_held = wait_commands(state, count + 1)[-1]
+    exact_command(first_held, "lower_price")
+    wait_for(lambda: dom_state(page1), lambda value:
+             next(button for button in value["controls"]
+                  if button["id"] == "lower-price")["ariaDisabled"] == "true",
+             "independent lower-price pending")
+    page1.press("Enter", repeat_too=True)
+    settle_dom(page1)
+    assert len(state.command_records) == count + 1
+    page2.evaluate("document.getElementById('raise-price').focus()")
+    page2.press("Enter")
+    second_held = wait_commands(state, count + 2)[-1]
+    exact_command(second_held, "raise_price")
+    assert first_held["json"]["command_id"] != second_held["json"]["command_id"]
+    assert next(button for button in dom_state(page2)["controls"]
+                if button["id"] == "buy-wire")["ariaDisabled"] == "false"
+    state.hold_commands = False
+    state.command_release.set()
+    for record, page, kind in ((first_held, page1, "lower_price"),
+                               (second_held, page2, "raise_price")):
+        wait_for(lambda record=record: record.get("response_body"),
+                 lambda value: isinstance(value, dict), "real released business response")
+        assert record["response_status"] == 200 and record["forwarded"] == 1
+        exact_command(record, kind)
+        wait_feedback(page, kind, record)
+    expected_revision = max(first_held["response_body"]["revision"],
+                            second_held["response_body"]["revision"])
+    assert_both_pages(lambda value: value["price"] == "0.25" and
+                      value["demand"] == initial["demand"] and
+                      int(value["revision"]) >= expected_revision,
+                      "serialized price cancellation on both pages")
+
+    # Two actual Make commands precede exactly 998 additional public API commands.
+    press("make_paperclip", page1)
+    press("make_paperclip", page2)
+    before_production = current()["game"]
+    assert before_production["wire"] == "998"
+    production_uids = 0
+
+    def produce(count: int) -> None:
+        nonlocal production_uids
+        assert 1 <= count <= 1000 and production_uids + count <= 9000
+        for _ in range(count):
+            uid = f"native-business-production-{production_uids}"
+            status, body = agent.make(uid)
+            assert status == 200 and api.checked_json(body)["status"] == "applied"
+            production_uids += 1
+
+    produce(int(before_production["wire"]))
+    assert production_uids == 998
+    produced = wait_for(current, lambda view: view["game"]["lifetime_clips"] == "1000",
+                        "the initial 1000 actual player-made clips", timeout=20)
+    assert produced["game"]["wire"] == "0"
+    assert_both_pages(lambda value: stock_ledger_visible(value, 1000, "0"),
+                      "both pages reflect actual production and any real sales")
+    print("native commerce: 2 native + 998 API production commands, Wire exhausted", flush=True)
+
+    lower_records = [press("lower_price") for _ in range(21)]
+    assert_both_pages(lambda value: value["price"] == "0.04" and value["marketingCost"] == "100",
+                      "21 genuine lower-price commands on both pages")
+    for _ in range(3):
+        lower_records.append(press("lower_price"))
+    minimum = press("lower_price", expected_status=422)
+    assert minimum["response_body"]["reason"] == "price_at_minimum"
+    assert_both_pages(lambda value: value["price"] == "0.01" and value["demand"] == "80",
+                      "exact minimum price and Demand on both pages")
+    raise_records = [press("raise_price") for _ in range(3)]
+    assert_both_pages(lambda value: value["price"] == "0.04",
+                      "native raise-price controls return to the working price")
+
+    # With zero purchases Wire base never grows: initial 20 plus +/-6 and ceiling
+    # gives a first-price upper budget of 26. Every dollar comes from real sales.
+    funded = wait_for(current, lambda view:
+                       Decimal(view["game"]["funds"]) >= Decimal("26") and
+                       Decimal(view["game"]["income"]) > 0 and
+                       int(view["game"]["clips_sold"]) > 0,
+                       "genuine stochastic sales fund the first Wire quote", timeout=120)
+    print(f"native commerce: real sales Funds={funded['game']['funds']} sold={funded['game']['clips_sold']}", flush=True)
+
+    wire_purchases = 0
+    wire_charges: list[str] = []
+    same_uuid_wire_retries = 0
+
+    def buy_wire() -> None:
+        nonlocal wire_purchases, same_uuid_wire_retries
+        before = current()["game"]
+        if wire_purchases == 0:
+            state.drop_next_response = True
+        receipt = press("buy_wire", page1, allow_drop=wire_purchases == 0)
+        if wire_purchases == 0:
+            # The first accepted response is really dropped after the server applied
+            # it. The same native form then repeats the exact original opaque ID/bytes.
+            assert receipt["dropped"] and receipt["forwarded"] == 1
+            wait_for(lambda: page1.evaluate("document.getElementById('buy-wire').textContent"),
+                     lambda value: value == "Retry Buy Wire", "real native Wire retry feedback")
+            wait_for(lambda: page1.evaluate("document.getElementById('command-status').textContent"),
+                     lambda value: "unknown network outcome" in value and "no local credit" in value,
+                     "unknown Wire outcome does not grant local credit")
+            duplicate = press("buy_wire", page1)
+            assert duplicate["raw"] == receipt["raw"]
+            assert duplicate["responseBodyHex"] == receipt["responseBodyHex"]
+            assert duplicate["response_body"] == receipt["response_body"]
+            same_uuid_wire_retries += 1
+            receipt = duplicate
+        after = wait_for(current, lambda view:
+                         int(view["game"]["wire"]) == int(before["wire"]) + 1000,
+                         "exactly one purchased spool, never one per retry")
+        sale_delta = Decimal(after["game"]["income"]) - Decimal(before["income"])
+        charge = Decimal(before["funds"]) + sale_delta - Decimal(after["game"]["funds"])
+        assert charge > 0 and charge == int(charge)
+        assert charge <= Decimal("26" if wire_purchases == 0 else "27")
+        wire_purchases += 1
+        wire_charges.append(str(charge))
+        assert after["game"]["lifetime_clips"] == str(1000 + production_uids - 998)
+        print(f"native commerce: spool={wire_purchases} charge={charge} "
+              f"server quote before={before['wire_quote']} after={after['game']['wire_quote']}", flush=True)
+
+    buy_wire()
+    assert_both_pages(lambda value: stock_ledger_visible(value, 1000, "1000"),
+                      "first real spool reaches two independently sourced SSE pages")
+
+    # The bounded purchasing policy retains a $13 reserve per new spool; this is
+    # not a command argument. The server alone chooses every executable quote/cost.
+    rounds = 0
+    while Decimal(current()["game"]["funds"]) < Decimal("100"):
+        rounds += 1
+        assert rounds <= 20 and wire_purchases <= 8, "bounded native production/procurement loop"
+        snapshot = current()["game"]
+        assert Decimal(snapshot["price_per_clip"]) == Decimal("0.04")
+        available_wire = int(snapshot["wire"])
+        if available_wire:
+            assert available_wire <= 1000
+            produce(available_wire)
+            expected_lifetime = 1000 + production_uids - 998
+            wait_for(current, lambda view: view["game"]["lifetime_clips"] == str(expected_lifetime),
+                     "complete public production batch", timeout=20)
+            print(f"native commerce: {production_uids} additional API makes; total clips={expected_lifetime}", flush=True)
+            continue
+        potential = Decimal(snapshot["funds"]) + Decimal(snapshot["unsold_clips"]) * Decimal("0.04")
+        if potential >= Decimal("100"):
+            print(f"native commerce: selling current inventory toward Marketing; Funds={snapshot['funds']} "
+                  f"Unsold={snapshot['unsold_clips']} sold={snapshot['clips_sold']}", flush=True)
+            wait_for(current, lambda view: Decimal(view["game"]["funds"]) >= Decimal("100"),
+                     "existing real inventory can fund Marketing without another spool", timeout=180)
+        else:
+            latest = wait_for(current, lambda view:
+                               Decimal(view["game"]["funds"]) >= Decimal("100") or
+                               Decimal(view["game"]["funds"]) >= Decimal(view["game"]["wire_quote"]) + Decimal("13"),
+                               "actual sales accumulate the next procurement reserve", timeout=120)
+            if Decimal(latest["game"]["funds"]) < Decimal("100"):
+                buy_wire()
+
+    marketing_before = current()["game"]
+    assert Decimal(marketing_before["funds"]) >= Decimal("100")
+    marketing_receipt = press("buy_marketing", page2)
+    marketing_after = wait_for(current, lambda view: view["game"]["marketing_level"] == "2",
+                               "the first real Marketing purchase")
+    sale_delta = Decimal(marketing_after["game"]["income"]) - Decimal(marketing_before["income"])
+    marketing_charge = Decimal(marketing_before["funds"]) + sale_delta - Decimal(marketing_after["game"]["funds"])
+    assert marketing_charge == Decimal("100")
+    assert Decimal(marketing_after["game"]["demand"]) > Decimal(marketing_before["demand"])
+    assert_both_pages(lambda value: value["marketingLevel"] == "2" and
+                      value["marketingCost"] == "200" and
+                      value["demand"] == marketing_after["game"]["demand"],
+                      "actual Marketing level 2, cost and Demand on both pages")
+
+    final = current()
+    assert final["game"]["wire_spool_length"] == "1000"
+    assert final["game"]["lifetime_clips"] == str(1000 + production_uids - 998)
+    assert int(final["game"]["wire"]) == wire_purchases * 1000 - (production_uids - 998)
+    assert Decimal(final["game"]["funds"]) + Decimal("100") + sum(map(Decimal, wire_charges)) == Decimal(final["game"]["income"])
+    assert Decimal(final["game"]["clips_sold"]) > 0
+    assert Decimal(final["game"]["last_sale_revenue"]) > 0
+    assert same_uuid_wire_retries == 1
+    assert len(state.stream_baselines) >= 2 and not state.errors, state.errors[:10]
+    return {
+        "nativeControls": ["make_paperclip", "lower_price", "raise_price", "buy_wire", "buy_marketing"],
+        "productionThroughNativeUI": 2, "additionalProductionThroughPublicAPI": production_uids,
+        "finalLifetimeClips": final["game"]["lifetime_clips"],
+        "independentPending": True, "rejectedOriginalUuidByteReplays": 2,
+        "acceptedWireOriginalUuidBrowserRetry": True, "wirePurchases": wire_purchases,
+        "wireChargesFromFundsAndIncome": wire_charges,
+        "salesFundedMarketing": True, "marketingCharge": str(marketing_charge),
+        # The independently held lower/raise pair each applied once. Include
+        # that successful lower in the count as well as the later 24 lowers.
+        "lowerApplications": len(lower_records) + 1, "raiseApplications": len(raise_records) + 1,
+        "priceMinimumRejections": 1, "clipsSold": final["game"]["clips_sold"],
+        "income": final["game"]["income"], "funds": final["game"]["funds"],
+        "wireRemaining": final["game"]["wire"], "price": final["game"]["price_per_clip"],
+        "demand": final["game"]["demand"], "marketingCost": final["game"]["marketing_cost"],
+        "twoIndependentPages": True, "nativeCommandCountThroughProxy": len(state.command_records),
+        "durationSeconds": round(clock.monotonic() - started, 3),
+    }
+
+
+def run_business_native_evidence(binary: Path, executable: str, version: str) -> dict[str, Any]:
+    with isolated_r2_browser(binary, executable, version, "m1-g02-business") as case:
+        browser: Browser = case["browser"]
+        page1, context1, _ = browser.new_page("/")
+        page2, context2, _ = browser.new_page("/")
+        assert context1 != context2
+        result = run_business_flow(browser, case["state"], case["client"], page1, page2)
+    return {**result, "browser": version, "realBackend": True,
+            "chromeExit": case["chromeExit"], "backendExit": case["backendExit"],
+            "prefundedOrClientAuthority": False}
+
+
 def run_main_ui(browser: Browser, state: ProxyState, backend_port: int, page1: Cdp, page2: Cdp) -> dict[str, Any]:
     check_assets_and_negative_commands(page1, browser.origin_port)
     first = wait_for(lambda: dom_state(page1), lambda value: value.get("viewState") == "ready", "page one baseline")
@@ -1058,14 +1418,15 @@ def run_main_ui(browser: Browser, state: ProxyState, backend_port: int, page1: C
     initial_view = api.checked_json(initial_client.get()[1])
     initial_client.close()
     assert initial_view["run_id"] == first["runId"]
-    assert initial_view["game"] == {
+    assert_only_wire_quote_can_advance(initial_view["game"], {
         "auto_clipper_cost": "5", "auto_clipper_revealed": False, "auto_clippers": "0",
         "computing_hidden": True, "funds": "0", "lifetime_clips": "0",
-        "marketing_level": "1", "memory": "1", "price_per_clip": "0.25",
+        "demand": "3.2", "marketing_cost": "100", "clips_sold": "0",
+        "income": "0", "last_sale_revenue": "0", "marketing_level": "1", "memory": "1", "price_per_clip": "0.25",
         "processors": "1", "projects_hidden": True, "trust": "2",
         "unsold_clips": "0", "unused_clips": "0", "wire": "1000",
         "wire_quote": "20", "wire_spool_length": "1000",
-    }
+    })
     for baseline in (first, second):
         assert baseline["headlineText"] == "0" and baseline["headlineTooltip"] == "0"
         assert baseline["unsold"] == baseline["unused"] == "0"
@@ -1093,9 +1454,8 @@ def run_main_ui(browser: Browser, state: ProxyState, backend_port: int, page1: C
     assert len(state.command_records) == 1, "pending activation is deduplicated without losing focus"
     state.command_release.set()
     def first_clip_rendered(value: dict[str, Any]) -> bool:
-        return (value["lifetime"] == value["unsold"] == value["unused"] == "1" and
-                value["headlineText"] == value["headlineTooltip"] == "1" and
-                value["wire"] == "999" and value["funds"] == "0")
+        return (stock_ledger_visible(value, 1, "999") and
+                value["headlineText"] == value["headlineTooltip"] == "1")
     first_applied = wait_for(lambda: dom_state(page1),
                              lambda value: first_clip_rendered(value) and "applied" in value["status"],
                              "page one applied View and all three ledgers")
@@ -1106,7 +1466,7 @@ def run_main_ui(browser: Browser, state: ProxyState, backend_port: int, page1: C
     after_one = api.checked_json(after_one_client.get()[1])
     after_one_client.close()
     assert after_one["run_id"] == initial_view["run_id"]
-    assert after_one["game"]["lifetime_clips"] == after_one["game"]["unsold_clips"] == after_one["game"]["unused_clips"] == "1"
+    api.assert_production(after_one, "999", "1", after_one["game"])
     assert after_one["game"]["wire"] == "999" and after_one["game"]["funds"] == "0"
     for field in ("wire_spool_length", "wire_quote", "price_per_clip", "marketing_level",
                   "trust", "processors", "memory", "auto_clippers", "auto_clipper_cost"):
@@ -1123,9 +1483,8 @@ def run_main_ui(browser: Browser, state: ProxyState, backend_port: int, page1: C
     assert second_command["command_id"] != first_command["command_id"]
     for page in (page1, page2):
         wait_for(lambda page=page: dom_state(page),
-                 lambda value: (value["lifetime"] == value["unsold"] == value["unused"] == "2" and
+                 lambda value: (stock_ledger_visible(value, 2, "998") and
                                 value["headlineText"] == value["headlineTooltip"] == "2" and
-                                value["wire"] == "998" and
                                 value["runId"] == initial_view["run_id"]),
                  "two-page second command convergence")
 
@@ -1153,7 +1512,7 @@ def run_main_ui(browser: Browser, state: ProxyState, backend_port: int, page1: C
         exact_command(record)
     assert len({record["json"]["command_id"] for record in held}) == 2
     for page in (page1, page2):
-        wait_for(lambda page=page: dom_state(page), lambda value: value["lifetime"] == "5" and value["wire"] == "995", "simultaneous Agent/browser convergence")
+        wait_for(lambda page=page: dom_state(page), lambda value: stock_ledger_visible(value, 5, "995"), "simultaneous Agent/browser convergence")
     agent_view = api.checked_json(agent_client.get()[1])
     assert agent_view["game"]["lifetime_clips"] == "5" and agent_view["game"]["wire"] == "995"
 
@@ -1170,12 +1529,12 @@ def run_main_ui(browser: Browser, state: ProxyState, backend_port: int, page1: C
     retry_command = exact_command(dropped)
     wait_for(lambda: dom_state(page1), lambda value: "Network outcome is unknown" in value["status"] and value["button"] == "Retry Make Paperclip" and not value["disabled"], "ambiguous retry feedback")
     assert dropped["forwarded"] == 1 and dropped["dropped"] and dropped["response_status"] == 200
-    wait_for(lambda: dom_state(page1), lambda value: value["lifetime"] == "6" and value["wire"] == "994", "SSE after dropped applied response")
+    wait_for(lambda: dom_state(page1), lambda value: stock_ledger_visible(value, 6, "994"), "SSE after dropped applied response")
     page1.press("Enter")
     retry_records = wait_commands(state, before_retry_count + 2)
     replay = retry_records[-1]
     assert replay["raw"] == dropped["raw"] and exact_command(replay)["command_id"] == retry_command["command_id"]
-    wait_for(lambda: dom_state(page1), lambda value: value["lifetime"] == "6" and value["wire"] == "994" and "applied" in value["status"], "same-ID retry no duplicate effect")
+    wait_for(lambda: dom_state(page1), lambda value: stock_ledger_visible(value, 6, "994") and "applied" in value["status"], "same-ID retry no duplicate effect")
     assert replay["response_body"] == dropped["response_body"]
 
     # A typed proxy conflict exercises product feedback while the subsequent
@@ -1219,7 +1578,7 @@ def run_main_ui(browser: Browser, state: ProxyState, backend_port: int, page1: C
     rejected_id = exact_command(rejection_record)["command_id"]
     assert agent_client.make(rejected_id) == (422, json_bytes(rejection_record["response_body"]))
     after_rejection = api.checked_json(agent_client.get()[1])
-    assert after_rejection["game"] == exhausted["game"]
+    assert_only_wire_quote_can_advance(after_rejection["game"], exhausted["game"])
     agent_client.close()
 
     return {"commandsThroughUIProxy": len(state.command_records), "twoPageConvergedClips": "1000",
@@ -1454,6 +1813,9 @@ def run_numeric_and_ordering(browser: Browser, state: ProxyState, template: dict
             "auto_clipper_revealed": True, "auto_clipper_cost": "6.1",
             "computing_hidden": False, "marketing_level": "0", "trust": "0",
             "processors": "0", "memory": "0",
+            "demand": "9007199254740993", "marketing_cost": "9007199254740994",
+            "clips_sold": "9007199254740995", "income": "0.000000000000000001",
+            "last_sale_revenue": "0.123",
         }),
         fixture_view(template, run_id, 4, {
             "auto_clipper_revealed": True, "auto_clipper_cost": "6.331",
@@ -1518,6 +1880,11 @@ def run_numeric_and_ordering(browser: Browser, state: ProxyState, template: dict
         "unused-clips": "340282366920938463463374607431768211457",
         "wire": "0.000000000000000001",
         "funds": "-41117.99",
+        "demand": "9007199254740993",
+        "marketing-cost": "9007199254740994",
+        "clips-sold": "9007199254740995",
+        "income": "0.000000000000000001",
+        "last-sale-revenue": "0.123",
     }
     for element, canonical in expected.items():
         actual = amount(element)
@@ -1525,7 +1892,7 @@ def run_numeric_and_ordering(browser: Browser, state: ProxyState, template: dict
         if element == "funds":
             assert actual["display"] == "-41,117.99"
         else:
-            assert actual["display"].replace(",", "") == canonical, (element, actual)
+            assert actual["display"].replace(",", "").removesuffix(".00") == canonical, (element, actual)
     state.fixture_release[2].set()
 
     assert state.fixture_sent[3].wait(8)
@@ -1738,7 +2105,8 @@ def run_r2_response_and_get(binary: Path, executable: str, version: str) -> dict
             "real JSON View with ordinary parameters")
         assert len(state.get_override_records) == 1
         first_probe = state.get_override_records[0]
-        assert first_probe["upstreamStatus"] == 200 and first_probe["upstreamBody"]["game"] == template["game"], first_probe
+        assert first_probe["upstreamStatus"] == 200, first_probe
+        assert_only_wire_quote_can_advance(first_probe["upstreamBody"]["game"], template["game"])
         result["realJsonWithParameters"] = {"dom": positive_get, "record": first_probe}
 
         # A valid server JSON body under JSONP is not accepted as the initial View.
@@ -1839,7 +2207,7 @@ def run_r2_response_and_get(binary: Path, executable: str, version: str) -> dict
             assert exact_command(record) == expected_http_body
             assert record["raw"].decode() == json.dumps(expected_http_body, separators=(",", ":"))
             http_outcomes[name] = outcome
-        assert api.checked_json(client.get()[1])["game"] == after_retry_game
+        assert_only_wire_quote_can_advance(api.checked_json(client.get()[1])["game"], after_retry_game)
         result["realHttpInvalidBodies"] = http_outcomes
 
         # Malformed real GET arrives after a real baseline for the same two-real-UI-command world.
@@ -1855,7 +2223,8 @@ def run_r2_response_and_get(binary: Path, executable: str, version: str) -> dict
         assert state.gate_stream_after_baseline is None
         state.gate_stream_after_baseline = state.stream_connections
         assert baseline["lifetime"] == "2" and baseline["wire"] == "998"
-        assert state.get_record["body"]["game"] == after_retry_game and state.get_record["delivered"] is False
+        assert_only_wire_quote_can_advance(state.get_record["body"]["game"], after_retry_game)
+        assert state.get_record["delivered"] is False
         state.get_release.set()
         failed_get = wait_for(lambda: late_page.evaluate("document.getElementById('connection-status').textContent"),
             lambda value: "waiting for a live server baseline" in value, "visible delayed malformed GET", timeout=8)
@@ -1870,7 +2239,7 @@ def run_r2_response_and_get(binary: Path, executable: str, version: str) -> dict
             "three real later SSE revisions", timeout=12)
         connection = late_page.evaluate("document.getElementById('connection-status').textContent")
         assert connection == "Newest accepted server View displayed.", connection
-        assert api.checked_json(client.get()[1])["game"] == after_retry_game
+        assert_only_wire_quote_can_advance(api.checked_json(client.get()[1])["game"], after_retry_game)
         result["lateMalformedGet"] = {"upstreamCaptured": state.get_record["body"]["game"],
             "baseline": baseline, "failureText": failed_get, "heldRealFrame": True,
             "failedDom": failed_dom, "recoveredDom": recovered, "recoveredText": connection,
@@ -1909,7 +2278,7 @@ def run_r2_response_and_get(binary: Path, executable: str, version: str) -> dict
             assert int(rejected_dom["lifetime"]) == expected_lifetime - 1
             assert int(rejected_dom["wire"]) == expected_wire + 1
             assert "revision 7" not in rejected_dom["status"] and "revision 8" not in rejected_dom["status"]
-            assert api.checked_json(client.get()[1])["game"] == before_game, name
+            assert_only_wire_quote_can_advance(api.checked_json(client.get()[1])["game"], before_game)
 
             page.evaluate("document.getElementById('make-paperclip').focus()")
             page.press("Enter")
@@ -2208,7 +2577,7 @@ def run_r3_raw_counters_and_diagnostic(binary: Path, executable: str, version: s
         assert bad_get_history == [invalid_text], bad_get_history
         assert all("waiting for a live server baseline" not in item for item in bad_get_history)
         assert dom_state(page) == baseline
-        assert api.checked_json(client.get()[1])["game"] == template["game"]
+        assert_only_wire_quote_can_advance(api.checked_json(client.get()[1])["game"], template["game"])
         state.fixture_release[1].set()
         assert state.fixture_sent[2].wait(8)
         recovered2 = wait_for(lambda: dom_state(page),
@@ -2256,7 +2625,7 @@ def run_r3_raw_counters_and_diagnostic(binary: Path, executable: str, version: s
         actual_baseline = wait_for(lambda: dom_state(page),
             lambda value: value["runId"] == template["run_id"] and value["viewState"] == "ready" and
                 value["lifetime"] == "0" and value["wire"] == "1000", "real backend View after fixtures", timeout=12)
-        assert api.checked_json(client.get()[1])["game"] == template["game"]
+        assert_only_wire_quote_can_advance(api.checked_json(client.get()[1])["game"], template["game"])
         state.hold_commands = True
         state.command_release.clear()
         page.evaluate("document.getElementById('make-paperclip').focus()")
@@ -2712,6 +3081,9 @@ def main() -> int:
     print("NATIVE_R2_LIFECYCLE_EVIDENCE=" + json.dumps(lifecycle_result, separators=(",", ":")))
     r3_result = run_r3_raw_counters_and_diagnostic(binary, executable, version)
     print("NATIVE_R3_COUNTER_DIAGNOSTIC_EVIDENCE=" + json.dumps(r3_result, separators=(",", ":")))
+    business_result = run_business_native_evidence(binary, executable, version)
+    assert (business_result["chromeExit"], business_result["backendExit"]) == (0, 0)
+    print("NATIVE_G02_BUSINESS_EVIDENCE=" + json.dumps(business_result, separators=(",", ":")))
     worktree = Path(__file__).resolve().parent.parent
     started = time.perf_counter()
     with tempfile.TemporaryDirectory(prefix="paperclip-native-ui-browser-") as temporary_name:
@@ -2752,6 +3124,7 @@ def main() -> int:
                 "status": "pass", "browser": version, "independentBrowserContexts": 2,
                 "startup": startup_result, "main": main_result,
                 "numericOrdering": numeric_result, "recovery": recovery_result,
+                "g02NativeBusiness": business_result,
                 "r3CounterDiagnostic": r3_result,
                 "physicalReconnectLifecycle": physical_result,
                 "durationSeconds": round(time.perf_counter() - started, 3),

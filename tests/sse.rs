@@ -318,10 +318,9 @@ fn extreme_state(state: &mut GameState) {
     state.pro.price_per_clip = Amount::parse("0.000000000000000001").unwrap();
     state.pro.wire_quote =
         Amount::parse("30000000000000000000000000000000000000000000000000000001").unwrap();
-    state.pro.marketing_level = Amount::parse("9007199254740993")
-        .unwrap()
-        .integral()
-        .unwrap();
+    state.pro.marketing_level = Amount::parse("9000").unwrap().integral().unwrap();
+    state.pro.demand_boost = Amount::zero();
+    paperclip_game::game::economy::refresh_demand(&mut state.pro).unwrap();
 }
 
 fn assert_one_command_effect(view: &GameView) {
@@ -338,7 +337,12 @@ fn assert_one_command_effect(view: &GameView) {
 fn assert_extremes(view: &GameView) {
     assert_eq!(view.game.funds.to_string(), "-41117.99");
     assert_eq!(view.game.price_per_clip.to_string(), "0.000000000000000001");
-    assert_eq!(view.game.marketing_level.to_string(), "9007199254740993");
+    assert_eq!(view.game.marketing_level.to_string(), "9000");
+    assert_eq!(view.game.demand.to_string(), "0");
+    let expected_cost = Amount::from_i128(100)
+        .multiply_integer(&num_bigint::BigInt::from(2u8).pow(8_999))
+        .to_string();
+    assert_eq!(view.game.marketing_cost.to_string(), expected_cost);
     assert_eq!(
         view.game.wire_quote.to_string(),
         "30000000000000000000000000000000000000000000000000000001"

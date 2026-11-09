@@ -185,7 +185,7 @@ mod tests {
         );
         assert!(restored.capture_sequence >= 1, "final capture is committed");
         let snapshot =
-            paperclip_game::snapshot::SnapshotV1::capture(&restored.state, restored.revision)
+            paperclip_game::snapshot::Snapshot::capture(&restored.state, restored.revision)
                 .unwrap();
         let recovered = snapshot.restore().unwrap();
         assert_eq!(recovered.state.pro, restored.state.pro);

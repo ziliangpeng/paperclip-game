@@ -1,6 +1,6 @@
 //! Detached logical game state; process-local metadata lives in the runtime.
 
-use super::amount::{Amount, IntegralAmount, NonNegativeAmount};
+use super::amount::{Amount, IntegralAmount, NonNegativeAmount, SafeU64};
 use super::clock::ClockState;
 use super::rng::GameRng;
 use num_bigint::BigInt;
@@ -16,6 +16,17 @@ pub struct ProState {
     pub wire_quote: Amount,
     pub price_per_clip: Amount,
     pub marketing_level: IntegralAmount,
+    pub marketing_effectiveness: Amount,
+    pub demand_boost: Amount,
+    pub prestige_u: IntegralAmount,
+    pub demand: NonNegativeAmount,
+    pub clips_sold: NonNegativeAmount,
+    pub income: Amount,
+    pub last_sale_revenue: Amount,
+    pub wire_base_price: Amount,
+    pub wire_price_counter: SafeU64,
+    pub wire_purchase_count: SafeU64,
+    pub wire_inactivity_ticks: SafeU64,
     pub trust: IntegralAmount,
     pub processors: IntegralAmount,
     pub memory: IntegralAmount,
@@ -27,28 +38,16 @@ pub struct ProState {
 }
 
 impl ProState {
+    /// Whole-unit mantissa conversion used by exact integer structural fields.
+    pub(crate) fn integral_mantissa(value: &IntegralAmount) -> BigInt {
+        value.amount().mantissa() / Amount::from_i128(1).mantissa()
+    }
+
     /// Current Marketing cost in whole dollars, exactly derived from its stored level.
     /// The level is already persisted; keeping the derived cost avoids a second
     /// authority that could disagree after recovery.
     pub fn marketing_cost(&self) -> Option<Amount> {
-        let unit = Amount::from_i128(1);
-        let level = self.marketing_level.amount().mantissa() / unit.mantissa();
-        if level < BigInt::from(1u8) {
-            return None;
-        }
-        let mut exponent = level - BigInt::from(1u8);
-        let mut power = BigInt::from(1u8);
-        let mut base = BigInt::from(2u8);
-        while exponent > BigInt::from(0u8) {
-            if &exponent % BigInt::from(2u8) == BigInt::from(1u8) {
-                power *= &base;
-            }
-            exponent /= BigInt::from(2u8);
-            if exponent > BigInt::from(0u8) {
-                base = &base * &base;
-            }
-        }
-        Some(Amount::from_i128(100).multiply_integer(&power))
+        super::economy::marketing_cost_for_level(&self.marketing_level).ok()
     }
 
     pub(crate) fn fresh() -> Self {
@@ -62,6 +61,20 @@ impl ProState {
             wire_quote: Amount::from_i128(20),
             price_per_clip: Amount::parse("0.25").expect("valid initial clip price"),
             marketing_level: IntegralAmount::from_i128(1),
+            marketing_effectiveness: Amount::from_i128(1),
+            demand_boost: Amount::from_i128(1),
+            prestige_u: IntegralAmount::from_i128(0),
+            demand: Amount::parse("3.2")
+                .expect("valid initial demand")
+                .nonnegative()
+                .expect("nonnegative demand"),
+            clips_sold: NonNegativeAmount::zero(),
+            income: Amount::zero(),
+            last_sale_revenue: Amount::zero(),
+            wire_base_price: Amount::from_i128(20),
+            wire_price_counter: SafeU64::new(0).expect("zero is safe"),
+            wire_purchase_count: SafeU64::new(0).expect("zero is safe"),
+            wire_inactivity_ticks: SafeU64::new(0).expect("zero is safe"),
             trust: IntegralAmount::from_i128(2),
             processors: IntegralAmount::from_i128(1),
             memory: IntegralAmount::from_i128(1),
