@@ -45,7 +45,23 @@
         <tbody>
           <tr><th scope="row">Available Funds</th><td>$<data id="funds" class="amount currency" value="">Waiting for server</data></td></tr>
           <tr><th scope="row">Price per Clip</th><td>$<data id="price-per-clip" class="amount currency" value="">Waiting for server</data></td></tr>
+          <tr><th scope="row">Public Demand</th><td><data id="demand" class="amount" value="">Waiting for server</data></td></tr>
           <tr><th scope="row">Marketing Level</th><td><data id="marketing-level" class="amount" value="">Waiting for server</data></td></tr>
+          <tr><th scope="row">Next Marketing Cost</th><td>$<data id="marketing-cost" class="amount currency" value="">Waiting for server</data></td></tr>
+        </tbody>
+      </table>
+      <form id="lower-price-form"><button id="lower-price" type="submit">Lower Price</button></form>
+      <form id="raise-price-form"><button id="raise-price" type="submit">Raise Price</button></form>
+      <form id="buy-marketing-form"><button id="buy-marketing" type="submit">Buy Marketing</button></form>
+      <p>Price and Marketing commands ask the server for one exact action. They do not change the displayed figures locally.</p>
+
+      <h3>Sales ledger</h3>
+      <table>
+        <caption>Actual server-reported completed sales and revenue</caption>
+        <tbody>
+          <tr><th scope="row">Clips Sold</th><td><data id="clips-sold" class="amount" value="">Waiting for server</data></td></tr>
+          <tr><th scope="row">Income</th><td>$<data id="income" class="amount currency" value="">Waiting for server</data></td></tr>
+          <tr><th scope="row">Latest Sale Revenue</th><td>$<data id="last-sale-revenue" class="amount currency" value="">Waiting for server</data></td></tr>
         </tbody>
       </table>
     </section>
@@ -60,6 +76,8 @@
           <tr><th scope="row">Current Wire quote</th><td>$<data id="wire-quote" class="amount currency" value="">Waiting for server</data></td></tr>
         </tbody>
       </table>
+      <form id="buy-wire-form"><button id="buy-wire" type="submit">Buy Wire</button></form>
+      <p>Ask the server to buy exactly the displayed spool at its current quote. No automatic purchases.</p>
       <section id="auto-clippers-panel" aria-labelledby="auto-clippers-heading" hidden>
         <h3 id="auto-clippers-heading">AutoClippers</h3>
         <table>

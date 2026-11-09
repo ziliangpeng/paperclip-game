@@ -62,6 +62,11 @@ pub struct ProductionView {
     pub wire_quote: Amount,
     pub price_per_clip: Amount,
     pub marketing_level: IntegralAmount,
+    pub demand: NonNegativeAmount,
+    pub marketing_cost: Amount,
+    pub clips_sold: NonNegativeAmount,
+    pub income: Amount,
+    pub last_sale_revenue: Amount,
     pub trust: IntegralAmount,
     pub processors: IntegralAmount,
     pub memory: IntegralAmount,
@@ -92,7 +97,7 @@ impl GameView {
             run_id: snapshot.run_id.clone(),
             revision: SafeU64::new(snapshot.revision).map_err(|_| ViewLimitError)?,
             clock: ClockView::try_from(&snapshot.game.clock)?,
-            game: ProductionView::from(&snapshot.game.pro),
+            game: ProductionView::try_from(&snapshot.game.pro)?,
         })
     }
 }
@@ -142,9 +147,11 @@ impl TryFrom<&ClockState> for ClockView {
     }
 }
 
-impl From<&ProState> for ProductionView {
-    fn from(state: &ProState) -> Self {
-        Self {
+impl TryFrom<&ProState> for ProductionView {
+    type Error = ViewLimitError;
+
+    fn try_from(state: &ProState) -> Result<Self, Self::Error> {
+        Ok(Self {
             lifetime_clips: state.lifetime_clips.clone(),
             unsold_clips: state.unsold_clips.clone(),
             unused_clips: state.unused_clips.clone(),
@@ -154,6 +161,11 @@ impl From<&ProState> for ProductionView {
             wire_quote: state.wire_quote.clone(),
             price_per_clip: state.price_per_clip.clone(),
             marketing_level: state.marketing_level.clone(),
+            demand: state.demand.clone(),
+            marketing_cost: state.marketing_cost().ok_or(ViewLimitError)?,
+            clips_sold: state.clips_sold.clone(),
+            income: state.income.clone(),
+            last_sale_revenue: state.last_sale_revenue.clone(),
             trust: state.trust.clone(),
             processors: state.processors.clone(),
             memory: state.memory.clone(),
@@ -162,6 +174,6 @@ impl From<&ProState> for ProductionView {
             auto_clipper_revealed: state.auto_clipper_revealed,
             auto_clippers: state.auto_clippers.clone(),
             auto_clipper_cost: state.auto_clipper_cost.clone(),
-        }
+        })
     }
 }

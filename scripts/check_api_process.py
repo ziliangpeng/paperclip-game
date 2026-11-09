@@ -7,8 +7,10 @@
 from __future__ import annotations
 
 import argparse
+from decimal import Decimal
 import http.client
 import json
+import re
 from pathlib import Path
 import signal
 import socket
@@ -35,7 +37,16 @@ def checked_json(raw: bytes) -> dict[str, Any]:
     return value
 
 
-def assert_production(view: dict[str, Any], wire: str, clips: str) -> None:
+# Only these fields legitimately move with G02 time, pricing and commerce.
+ECONOMIC_VIEW_FIELDS = frozenset({
+    "unsold_clips", "funds", "wire_quote", "price_per_clip", "marketing_level",
+    "demand", "marketing_cost", "clips_sold", "income", "last_sale_revenue",
+})
+
+
+def assert_production(view: dict[str, Any], wire: str, clips: str,
+                      economic_values: dict[str, Any] | None = None,
+                      stored_model: bool = False) -> None:
     game = view["game"]
     expected = {
         "lifetime_clips": clips,
@@ -47,6 +58,11 @@ def assert_production(view: dict[str, Any], wire: str, clips: str) -> None:
         "wire_quote": "20",
         "price_per_clip": "0.25",
         "marketing_level": "1",
+        "demand": "3.2",
+        "marketing_cost": "100",
+        "clips_sold": "0",
+        "income": "0",
+        "last_sale_revenue": "0",
         "trust": "2",
         "processors": "1",
         "memory": "1",
@@ -56,6 +72,38 @@ def assert_production(view: dict[str, Any], wire: str, clips: str) -> None:
         "auto_clippers": "0",
         "auto_clipper_cost": "5",
     }
+    economic_fields = ECONOMIC_VIEW_FIELDS - {"marketing_cost"} if stored_model else ECONOMIC_VIEW_FIELDS
+    if economic_values is not None:
+        # This is a constrained captured expectation for temporal fields, never
+        # a way to override production authority or admit private View members.
+        # Only the documented stored model excludes the derived cost; every
+        # other economic field remains mandatory in the captured expectation.
+        supplied = {key: economic_values[key] for key in economic_fields}
+        expected.update(supplied)
+    if stored_model:
+        # ProSnapshot intentionally stores level rather than duplicating this
+        # View-only derived cost. HTTP View validation still requires it below.
+        assert "marketing_cost" not in game
+        expected.pop("marketing_cost")
+    amount_pattern = re.compile(r"^(?:0|-?[1-9][0-9]*)(?:\.[0-9]*[1-9])?$")
+    assert all(type(game[key]) is bool for key in (
+        "computing_hidden", "projects_hidden", "auto_clipper_revealed",
+    ))
+    amount_fields = (
+        "lifetime_clips", "unsold_clips", "unused_clips", "wire", "funds",
+        "wire_spool_length", "wire_quote", "price_per_clip", "marketing_level",
+        "demand", "marketing_cost", "clips_sold", "income", "last_sale_revenue",
+        "trust", "processors", "memory", "auto_clippers", "auto_clipper_cost",
+    )
+    if stored_model:
+        amount_fields = tuple(key for key in amount_fields if key != "marketing_cost")
+    assert all(isinstance(game[key], str) and amount_pattern.fullmatch(game[key]) for key in amount_fields), (
+        "every public Amount must remain an exact JSON string"
+    )
+    assert (Decimal(game["unsold_clips"]) + Decimal(game["clips_sold"])
+            == Decimal(clips)), (
+        "sales transfer only Unsold into the sold ledger", game
+    )
     assert game == expected, (game, expected)
 
 
@@ -129,7 +177,8 @@ def assert_view_schema(view: dict[str, Any]) -> None:
         "combat_remainder_nanos",
     ):
         assert isinstance(clock[field], int)
-    assert_production(view, "1000", "0")
+    game = view["game"]
+    assert_production(view, game["wire"], game["lifetime_clips"], game)
 
 
 class Client:
@@ -290,12 +339,12 @@ def drain_stock(client: Client) -> None:
         status, body = client.make(f"process-stock-{index}")
         assert status == 200, (index, status, body)
     view = checked_json(client.get()[1])
-    assert_production(view, "0", "1000")
+    assert_production(view, "0", "1000", view["game"])
 
     replay = client.make("process-first-command")
     assert replay == first, (replay, first)
     after_replay = checked_json(client.get()[1])
-    assert_production(after_replay, "0", "1000")
+    assert_production(after_replay, "0", "1000", after_replay["game"])
 
     rejection = client.make("process-after-stock")
     assert rejection[0] == 422
@@ -431,10 +480,10 @@ def main() -> int:
                 assert_view_schema(older)
                 assert older["run_id"] == stream_initial["run_id"]
                 assert stream_initial["revision"] + 1 <= older["revision"] < command_revision
-                assert_production(older, "1000", "0")
+                assert_production(older, "1000", "0", older["game"])
                 updated = stream.next_revision(command_revision)
                 assert updated["run_id"] == stream_initial["run_id"]
-                assert_production(updated, "999", "1")
+                assert_production(updated, "999", "1", updated["game"])
                 first_id = f"{stream_initial['run_id']}:{stream_initial['revision']}"
                 stream.close()
                 # Both absent and opaque Last-Event-ID values receive a fresh
@@ -445,7 +494,7 @@ def main() -> int:
                     assert baseline is not None
                     assert baseline["run_id"] == initial["run_id"]
                     assert baseline["revision"] >= updated["revision"]
-                    assert_production(baseline, "999", "1")
+                    assert_production(baseline, "999", "1", baseline["game"])
                     reconnected.close()
                 active_at_shutdown = SseClient(3000)
                 shutdown_baseline = active_at_shutdown.read_event()

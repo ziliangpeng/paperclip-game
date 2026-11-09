@@ -3,6 +3,7 @@
 use crate::game::amount::{BoundedIntegerError, MAX_SAFE_JSON_INTEGER};
 use crate::game::clock::{ClockError, UPDATE_QUANTUM_NANOS};
 use crate::game::conversion::{ConversionError, convert_one_wire};
+use crate::game::economy::{self, EconomyError};
 use crate::game::rng::GameRng;
 use crate::game::state::GameState;
 use std::collections::HashMap;
@@ -89,6 +90,10 @@ pub struct Command {
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum Intent {
     MakePaperclip,
+    BuyWire,
+    LowerPrice,
+    RaisePrice,
+    BuyMarketing,
 }
 
 impl Command {
@@ -100,6 +105,26 @@ impl Command {
         }
     }
 
+    pub fn buy_wire(id: CommandId) -> Self {
+        Self::intent(id, Intent::BuyWire)
+    }
+
+    pub fn lower_price(id: CommandId) -> Self {
+        Self::intent(id, Intent::LowerPrice)
+    }
+
+    pub fn raise_price(id: CommandId) -> Self {
+        Self::intent(id, Intent::RaisePrice)
+    }
+
+    pub fn buy_marketing(id: CommandId) -> Self {
+        Self::intent(id, Intent::BuyMarketing)
+    }
+
+    fn intent(id: CommandId, intent: Intent) -> Self {
+        Self { id, intent }
+    }
+
     pub fn id(&self) -> CommandId {
         self.id
     }
@@ -108,6 +133,7 @@ impl Command {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CommandRejection {
     Conversion(ConversionError),
+    Economy(EconomyError),
     ConflictingRetry,
 }
 
@@ -387,6 +413,7 @@ impl Error for RuntimeShutdownError {}
 pub enum RuntimeFailure {
     CounterLimit,
     LogicalClock(ClockError),
+    Economy(EconomyError),
 }
 
 impl fmt::Display for RuntimeFailure {
@@ -394,6 +421,9 @@ impl fmt::Display for RuntimeFailure {
         match self {
             Self::CounterLimit => formatter.write_str("checked runtime counter limit reached"),
             Self::LogicalClock(_) => formatter.write_str("checked logical clock limit reached"),
+            Self::Economy(_) => {
+                formatter.write_str("economy evaluation failed without a partial commit")
+            }
         }
     }
 }
@@ -515,10 +545,15 @@ impl<C: MonotonicClock> Writer<C> {
 
     fn advance_tick(&mut self) -> Result<(), RuntimeFailure> {
         let next_revision = next_revision(self.revision)?;
-        self.state
+        let mut candidate = self.state.clone();
+        let cadence = candidate
             .clock
             .advance()
             .map_err(RuntimeFailure::LogicalClock)?;
+        if cadence.fast_due {
+            economy::advance_fast_phase(&mut candidate).map_err(RuntimeFailure::Economy)?;
+        }
+        self.state = candidate;
         self.revision = next_revision;
         self.lag_debt_nanos -= UPDATE_QUANTUM_NANOS;
         Ok(())
@@ -526,18 +561,34 @@ impl<C: MonotonicClock> Writer<C> {
 
     fn execute_new(&mut self, command: Command) -> Result<CommandReceipt, RuntimeFailure> {
         let next_revision = next_revision(self.revision)?;
+        let mut candidate = self.state.clone();
         let outcome = match command.intent {
-            Intent::MakePaperclip => convert_one_wire(&mut self.state.pro),
+            Intent::MakePaperclip => convert_one_wire(&mut candidate.pro)
+                .map(|_| ())
+                .map_err(CommandRejection::Conversion),
+            Intent::BuyWire => {
+                economy::buy_wire(&mut candidate.pro).map_err(CommandRejection::Economy)
+            }
+            Intent::LowerPrice => {
+                economy::lower_price(&mut candidate.pro).map_err(CommandRejection::Economy)
+            }
+            Intent::RaisePrice => {
+                economy::raise_price(&mut candidate.pro).map_err(CommandRejection::Economy)
+            }
+            Intent::BuyMarketing => {
+                economy::buy_marketing(&mut candidate.pro).map_err(CommandRejection::Economy)
+            }
         };
         let result = match outcome {
-            Ok(_) => {
+            Ok(()) => {
+                self.state = candidate;
                 self.revision = next_revision;
                 increment(&mut self.status.applied_commands)?;
                 Ok(())
             }
             Err(error) => {
                 increment(&mut self.status.rejected_commands)?;
-                Err(CommandRejection::Conversion(error))
+                Err(error)
             }
         };
         let receipt = CommandReceipt {
@@ -689,7 +740,9 @@ async fn run_writer<C: MonotonicClock>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::game::amount::Amount;
+    use crate::game::amount::{Amount, NonNegativeAmount};
+    use crate::game::economy::{demand_ratio, refresh_demand};
+    use crate::game::evaluator::{DECISION_LIMIT, sale_request};
     use crate::game::state::ProState;
     use std::sync::{Arc, Mutex};
     use tokio::sync::Notify;
@@ -810,12 +863,12 @@ mod tests {
         RuntimeDatabase,
     ) {
         use crate::persistence::{RuntimePersistence, SnapshotStore};
-        use crate::snapshot::SnapshotV1;
+        use crate::snapshot::Snapshot;
 
         let database = RuntimeDatabase::new(label);
         let mut state = GameState::fresh(GameRng::from_test_seed([23_u8; 32]));
         state.pro.wire = Amount::parse("100").unwrap().nonnegative().unwrap();
-        let initial = SnapshotV1::capture(&state, 0).unwrap();
+        let initial = Snapshot::capture(&state, 0).unwrap();
         let (store, stored) = SnapshotStore::open_or_initialize(&database.0, &initial).unwrap();
         let clock = Arc::new(FakeClock::new());
         let runtime = GameRuntime::start_with_clock_at_revision(clock.clone(), state, 0).unwrap();
@@ -849,10 +902,10 @@ mod tests {
 
     fn restore_database(path: &std::path::Path) -> (u64, u64, GameState) {
         use crate::persistence::SnapshotStore;
-        use crate::snapshot::SnapshotV1;
+        use crate::snapshot::Snapshot;
 
         let candidate = GameState::fresh(GameRng::from_test_seed([24_u8; 32]));
-        let candidate = SnapshotV1::capture(&candidate, 0).unwrap();
+        let candidate = Snapshot::capture(&candidate, 0).unwrap();
         let (_store, stored) = SnapshotStore::open_or_initialize(path, &candidate).unwrap();
         let restored = stored.snapshot.restore().unwrap();
         (restored.revision, stored.capture_sequence, restored.state)
@@ -1055,6 +1108,162 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn concurrent_wire_purchases_share_one_funds_balance_atomically() {
+        let mut state = GameState::fresh(GameRng::from_test_seed([91u8; 32]));
+        state.pro.funds = Amount::parse("20").unwrap();
+        let (runtime, handle, _clock) = test_runtime_with_state(state);
+        let before = handle.view().game.clone();
+        let (first, second) = tokio::join!(
+            handle.execute(Command::buy_wire(CommandId::new(10_001).unwrap())),
+            handle.execute(Command::buy_wire(CommandId::new(10_002).unwrap()))
+        );
+        let receipts = [first.unwrap(), second.unwrap()];
+        assert_eq!(receipts.iter().filter(|r| r.result == Ok(())).count(), 1);
+        assert_eq!(
+            receipts
+                .iter()
+                .filter(
+                    |r| r.result == Err(CommandRejection::Economy(EconomyError::InsufficientFunds))
+                )
+                .count(),
+            1
+        );
+        let winner = receipts.iter().find(|r| r.result == Ok(())).unwrap();
+        let loser = receipts.iter().find(|r| r.result.is_err()).unwrap();
+        let view = handle.view();
+        assert_eq!(view.game.pro.funds, Amount::zero());
+        assert_eq!(view.game.pro.wire.to_string(), "2000");
+        assert_eq!(view.game.pro.wire_quote.to_string(), "20");
+        assert_eq!(view.game.pro.wire_base_price.to_string(), "20.05");
+        assert_eq!(view.game.pro.wire_purchase_count.get(), 1);
+        assert_eq!(view.game.pro.wire_price_counter.get(), 0);
+        assert_eq!(view.game.pro.wire_inactivity_ticks.get(), 0);
+        assert_eq!(view.game.pro.demand, before.pro.demand);
+        assert_eq!(view.game.clock, before.clock);
+        assert_eq!(view.game.rng_state_hex(), before.rng_state_hex());
+        assert_eq!(view.revision, 1);
+        for receipt in &receipts {
+            assert_eq!(receipt.revision, winner.revision.min(loser.revision));
+        }
+        runtime.shutdown().await.unwrap();
+        eprintln!(
+            "one-Funds concurrent Wire purchases: one applied, one typed insufficient_funds; one spool, one $20 charge and $.05 base increment"
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_business_families_are_serial_and_rejection_does_not_replace_state() {
+        let mut state = GameState::fresh(GameRng::from_test_seed([92u8; 32]));
+        state.pro.funds = Amount::parse("1000").unwrap();
+        let (runtime, handle, _clock) = test_runtime_with_state(state);
+        let (wire, marketing) = tokio::join!(
+            handle.execute(Command::buy_wire(CommandId::new(10_010).unwrap())),
+            handle.execute(Command::buy_marketing(CommandId::new(10_011).unwrap()))
+        );
+        assert_eq!(wire.unwrap().result, Ok(()));
+        assert_eq!(marketing.unwrap().result, Ok(()));
+        let view = handle.view();
+        assert_eq!(view.game.pro.funds.to_string(), "880");
+        assert_eq!(view.game.pro.wire.to_string(), "2000");
+        assert_eq!(view.game.pro.wire_base_price.to_string(), "20.05");
+        assert_eq!(view.game.pro.marketing_level.to_string(), "2");
+        assert_eq!(view.game.pro.marketing_cost().unwrap().to_string(), "200");
+        assert_eq!(view.game.pro.demand.to_string(), "3.52");
+        assert_eq!(view.revision, 2);
+        runtime.shutdown().await.unwrap();
+
+        let mut state = GameState::fresh(GameRng::from_test_seed([93u8; 32]));
+        state.pro.price_per_clip = Amount::parse("0.02").unwrap();
+        refresh_demand(&mut state.pro).unwrap();
+        let (runtime, handle, _clock) = test_runtime_with_state(state);
+        let (_, _) = tokio::join!(
+            handle.execute(Command::lower_price(CommandId::new(10_020).unwrap())),
+            handle.execute(Command::lower_price(CommandId::new(10_021).unwrap()))
+        );
+        let floor = handle.view();
+        assert_eq!(floor.game.pro.price_per_clip.to_string(), "0.01");
+        assert_eq!(floor.game.pro.demand.to_string(), "80");
+        assert_eq!(floor.revision, 1);
+        let retry = handle
+            .execute(Command::lower_price(CommandId::new(10_022).unwrap()))
+            .await
+            .unwrap();
+        assert_eq!(
+            retry.result,
+            Err(CommandRejection::Economy(EconomyError::PriceAtMinimum))
+        );
+        assert_eq!(retry.revision, floor.revision);
+        assert_eq!(handle.view().game.pro, floor.game.pro);
+        runtime.shutdown().await.unwrap();
+        eprintln!(
+            "legal concurrent Wire + Marketing charges total $120; successive lower-price commands reach $.01 exactly and return price_at_minimum without mutation"
+        );
+    }
+
+    #[tokio::test]
+    async fn product_sales_preserve_large_exact_quantities_and_decision_cutoff_is_atomic() {
+        let mut accepted = GameState::fresh(GameRng::from_test_seed([94u8; 32]));
+        let stock = NonNegativeAmount::from_i128(1_125_899_906_842_624).unwrap();
+        accepted.pro.lifetime_clips = stock.clone();
+        accepted.pro.unsold_clips = stock.clone();
+        accepted.pro.unused_clips = stock;
+        accepted.pro.demand_boost = Amount::parse("3125000000000").unwrap();
+        refresh_demand(&mut accepted.pro).unwrap();
+        let (runtime, handle, clock) = test_runtime_with_state(accepted);
+        clock.advance(Duration::from_millis(100));
+        let view = wait_for(&handle, |view| view.game.clock.update_count() >= 10).await;
+        assert_eq!(view.game.pro.demand.to_string(), "10000000000000");
+        let expected = sale_request(&demand_ratio(&view.game.pro).unwrap()).unwrap();
+        assert!(expected > 0 && expected < DECISION_LIMIT as u64);
+        assert_eq!(
+            view.game.pro.clips_sold,
+            NonNegativeAmount::from_i128(i128::from(expected)).unwrap()
+        );
+        assert!(view.game.pro.funds > Amount::zero());
+        assert!(view.game.pro.income > Amount::zero());
+        let expected_revenue = Amount::quantize_ratio(
+            &(num_bigint::BigInt::from(expected) * 25u8),
+            &num_bigint::BigInt::from(100u8),
+        )
+        .unwrap();
+        assert_eq!(view.game.pro.funds, expected_revenue);
+        assert_eq!(view.game.pro.income, expected_revenue);
+        assert_eq!(view.game.pro.last_sale_revenue, expected_revenue);
+        eprintln!(
+            "large full-product sale: D=10000000000000, request={expected}, sold={}, funds={}, income={}, all exact decimal Amount strings",
+            view.game.pro.clips_sold, view.game.pro.funds, view.game.pro.income
+        );
+        runtime.shutdown().await.unwrap();
+
+        let mut rejected = GameState::fresh(GameRng::from_test_seed([95u8; 32]));
+        rejected.pro.demand_boost = Amount::parse("351562500000000").unwrap();
+        refresh_demand(&mut rejected.pro).unwrap();
+        let (runtime, handle, clock) = test_runtime_with_state(rejected);
+        let before = handle.view();
+        clock.advance(Duration::from_millis(100));
+        let result = timeout(Duration::from_secs(3), runtime.wait_for_writer())
+            .await
+            .expect(
+                "bounded numeric rejection terminates the writer without shutdown winning the race",
+            );
+        assert!(matches!(
+            result,
+            Err(RuntimeShutdownError::Writer(RuntimeFailure::Economy(
+                EconomyError::Evaluator(
+                    crate::game::evaluator::EvaluatorError::OutsideDecisionDomain
+                )
+            )))
+        ));
+        let after = handle.view();
+        assert_eq!(after.game.pro, before.game.pro);
+        assert_eq!(after.game.clock, before.game.clock);
+        assert_eq!(after.game.rng_state_hex(), before.game.rng_state_hex());
+        assert_eq!(after.revision, before.revision);
+        eprintln!(
+            "full-product decision cutoff: sale request >= 2^50 returns typed evaluator failure; no partial state, clock or RNG commit"
+        );
+    }
+    #[tokio::test]
     async fn concurrent_retries_share_the_first_terminal_result() {
         let (runtime, handle, clock) = test_runtime_with_wire("1");
         let (a, b) = tokio::join!(handle.execute(command(44)), handle.execute(command(44)));
@@ -1194,8 +1403,24 @@ mod tests {
         assert_eq!(view.game.clock.slow_phase(), 0);
         assert_eq!(view.game.clock.combat_pulses(), 1_875);
         assert_eq!(view.game.clock.combat_remainder_nanos(), 0);
-        assert_eq!(view.game.pro, ProState::fresh());
-        assert_eq!(view.game.rng_state_hex(), initial_rng);
+        // Empty production preserves every non-economy ledger. The seeded Wire
+        // stream and inactivity counters nevertheless advance exactly 300 times.
+        assert_eq!(view.game.pro.lifetime_clips, NonNegativeAmount::zero());
+        assert_eq!(view.game.pro.unsold_clips, NonNegativeAmount::zero());
+        assert_eq!(view.game.pro.unused_clips, NonNegativeAmount::zero());
+        assert_eq!(view.game.pro.clips_sold, NonNegativeAmount::zero());
+        assert_eq!(
+            view.game.pro.wire,
+            NonNegativeAmount::from_i128(1000).unwrap()
+        );
+        assert_eq!(view.game.pro.funds, Amount::zero());
+        assert_eq!(
+            view.game.pro.wire_base_price,
+            Amount::parse("19.98").unwrap()
+        );
+        assert_eq!(view.game.pro.wire_inactivity_ticks.get(), 49);
+        assert_ne!(view.game.pro.wire_price_counter.get(), 0);
+        assert_ne!(view.game.rng_state_hex(), initial_rng);
         assert!(view.process.degraded);
         assert!(view.process.overload_turns > 0);
         runtime.shutdown().await.unwrap();

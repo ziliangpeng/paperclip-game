@@ -1,7 +1,7 @@
 // Presentation-only formatting and rendering for complete server Views.
 // Domain values remain canonical strings; no local economy exists here.
 
-import {assertCompleteGameView, formatAmount} from "/static/stream.js";
+import {assertCompleteGameView, formatAmount, parseAmount} from "/static/stream.js";
 
 function splitCanonical(amount) {
   const canonical = formatAmount(amount);
@@ -22,18 +22,24 @@ export function formatAmountForDisplay(amount, {currency = false, group = true} 
   return `${negative ? "-" : ""}${whole}${decimals ? `.${decimals}` : ""}`;
 }
 
+export function formatDemandPercent(amount) {
+  const scaled = formatAmount(parseAmount(amount).scaled * 10n);
+  return `${formatAmountForDisplay(scaled)}%`;
+}
+
 export function createViewModel(view) {
   assertCompleteGameView(view);
   const model = {};
   for (const [field, raw] of Object.entries(view.game)) {
     if (typeof raw === "string") {
-      const currency = ["funds", "wire_quote", "price_per_clip", "auto_clipper_cost"].includes(field);
+      const currency = ["funds", "wire_quote", "price_per_clip", "auto_clipper_cost", "income", "last_sale_revenue", "marketing_cost"].includes(field);
       model[field] = {
         canonical: formatAmount(raw),
         display: formatAmountForDisplay(raw, {currency}),
       };
     }
   }
+  model.demand.display = formatDemandPercent(view.game.demand);
   return {
     amounts: model,
     runId: view.run_id,
@@ -53,6 +59,11 @@ const ELEMENT_FIELDS = {
   wire_quote: "wire-quote",
   price_per_clip: "price-per-clip",
   marketing_level: "marketing-level",
+  demand: "demand",
+  marketing_cost: "marketing-cost",
+  clips_sold: "clips-sold",
+  income: "income",
+  last_sale_revenue: "last-sale-revenue",
   trust: "trust",
   processors: "processors",
   memory: "memory",
@@ -70,7 +81,7 @@ export function renderView(document, view) {
       element.value = amount.canonical;
       element.dataset.canonical = amount.canonical;
       element.textContent = amount.display;
-      element.title = amount.canonical;
+      element.title = field === "demand" ? amount.display : amount.canonical;
     }
   }
   document.getElementById("computational-resources").hidden = model.computingHidden;

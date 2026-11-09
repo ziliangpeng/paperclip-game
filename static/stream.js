@@ -23,13 +23,15 @@ const CLOCK_FIELDS = [
   "slow_phase", "update_count",
 ];
 const GAME_FIELDS = [
-  "auto_clipper_cost", "auto_clipper_revealed", "auto_clippers",
-  "computing_hidden", "funds", "lifetime_clips", "marketing_level", "memory",
+  "auto_clipper_cost", "auto_clipper_revealed", "auto_clippers", "clips_sold",
+  "computing_hidden", "demand", "funds", "income", "last_sale_revenue",
+  "lifetime_clips", "marketing_cost", "marketing_level", "memory",
   "price_per_clip", "processors", "projects_hidden", "trust", "unsold_clips",
   "unused_clips", "wire", "wire_quote", "wire_spool_length",
 ];
 const AMOUNT_FIELDS = [
-  "auto_clipper_cost", "auto_clippers", "funds", "lifetime_clips",
+  "auto_clipper_cost", "auto_clippers", "clips_sold", "demand", "funds",
+  "income", "last_sale_revenue", "lifetime_clips", "marketing_cost",
   "marketing_level", "memory", "price_per_clip", "processors", "trust",
   "unsold_clips", "unused_clips", "wire", "wire_quote", "wire_spool_length",
 ];
@@ -37,7 +39,8 @@ const BOOLEAN_FIELDS = [
   "auto_clipper_revealed", "computing_hidden", "projects_hidden",
 ];
 const NONNEGATIVE_FIELDS = [
-  "lifetime_clips", "unsold_clips", "unused_clips", "wire", "wire_spool_length",
+  "clips_sold", "demand", "lifetime_clips", "unsold_clips", "unused_clips",
+  "wire", "wire_spool_length",
 ];
 const INTEGRAL_FIELDS = [
   "auto_clippers", "marketing_level", "memory", "processors", "trust",

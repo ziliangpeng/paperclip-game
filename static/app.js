@@ -1,11 +1,9 @@
 // Native application wiring: server Views are the only resource authority.
 
 import {GameViewSynchronizer, assertCompleteGameView, parseTransportJson} from "/static/stream.js";
-import {MakePaperclipCommandRunner, readBoundedJson} from "/static/commands.js";
+import {GameCommandRunner, readBoundedJson} from "/static/commands.js";
 import {renderView} from "/static/view-model.js";
 
-const form = document.getElementById("command-form");
-const button = document.getElementById("make-paperclip");
 const commandStatus = document.getElementById("command-status");
 const connectionStatus = document.getElementById("connection-status");
 let renderQueued = false;
@@ -41,74 +39,98 @@ const synchronizer = new GameViewSynchronizer((view, decision) => {
     }
     if (!readyAnnounced) {
       readyAnnounced = true;
-      setCommandStatus("ready", "Ready. Make Paperclip sends one typed command to the server.");
+      setCommandStatus("ready", "Ready. Each control sends one closed command to the server.");
     }
   });
 });
 
+const COMMANDS = [
+  ["command-form", "make-paperclip", "make_paperclip", "Make Paperclip"],
+  ["buy-wire-form", "buy-wire", "buy_wire", "Buy Wire"],
+  ["lower-price-form", "lower-price", "lower_price", "Lower Price"],
+  ["raise-price-form", "raise-price", "raise_price", "Raise Price"],
+  ["buy-marketing-form", "buy-marketing", "buy_marketing", "Buy Marketing"],
+];
+const controls = [];
+
 function updateControls() {
-  // Keep focus during pending. The runner rejects duplicate activation; this
-  // ARIA state is feedback only and never represents Wire affordability.
-  button.setAttribute("aria-disabled", String(runner.pending));
-  button.textContent = runner.pending ? "Sending…" :
-    runner.retryAvailable ? "Retry Make Paperclip" : "Make Paperclip";
-  form.setAttribute("aria-busy", String(runner.pending));
+  for (const {button, form, runner, label} of controls) {
+    // Focus is retained. Pending is explicit feedback, never local resource authority.
+    button.setAttribute("aria-disabled", String(runner.pending));
+    button.textContent = runner.pending ? "Sending…" :
+      runner.retryAvailable ? `Retry ${label}` : label;
+    form.setAttribute("aria-busy", String(runner.pending));
+  }
 }
 
-const runner = new MakePaperclipCommandRunner((outcome) => {
-  // Any command outcome supersedes the one-time initial generic Ready message.
-  // Read-only transport recovery remains free to announce the first good View.
-  readyAnnounced = true;
-  switch (outcome.kind) {
-    case "pending":
-      setCommandStatus("pending", "Command pending. The page has not changed any resources.");
-      break;
-    case "applied":
-      setCommandStatus("ready", `Server applied the command at revision ${outcome.revision}. Displayed resources come from the newest full server View.`);
-      break;
-    case "rule_rejected": {
-      const reason = outcome.reason === "insufficient_wire" ?
-        "not enough Wire" : "the current game rule rejected it";
-      setCommandStatus("error", `Server rejected the command: ${reason}. This request made no resource change.`);
-      break;
+for (const [formId, buttonId, type, label] of COMMANDS) {
+  const form = document.getElementById(formId);
+  const button = document.getElementById(buttonId);
+  button.setAttribute("aria-describedby", "command-status");
+  const runner = new GameCommandRunner(type, (outcome) => {
+    readyAnnounced = true;
+    switch (outcome.kind) {
+      case "pending":
+        setCommandStatus("pending", type === "make_paperclip" ? "Command pending. The page has not changed any resources." : `${label} is pending. The page has not changed any resources.`);
+        break;
+      case "applied":
+        const appliedMessage = type === "make_paperclip" ?
+          `Server applied the command at revision ${outcome.revision}. Displayed resources come from the newest full server View.` :
+          `Server applied ${label} at revision ${outcome.revision}. Resources come from the newest complete server View.`;
+        setCommandStatus("ready", appliedMessage);
+        break;
+      case "rule_rejected": {
+        const reasons = {
+          insufficient_wire: "not enough Wire",
+          insufficient_funds: "not enough Funds at the current server quote/cost",
+          price_at_minimum: "price is already at its minimum",
+          numeric_decision_domain: "the finite integer-decision domain was exceeded",
+          numeric_evaluation_rejected: "numeric evaluation rejected the input",
+          counter_limit: "a checked counter reached its limit",
+          resource_limit: "the explicit evaluation resource limit was reached",
+          invalid_state: "the game state is invalid",
+        };
+        const reason = type === "make_paperclip" ?
+          (outcome.reason === "insufficient_wire" ? "not enough Wire" : "the current game rule rejected it") :
+          (reasons[outcome.reason] ?? "the current game rule rejected it");
+        const rejection = type === "make_paperclip" ?
+          `Server rejected the command: ${reason}. This request made no resource change.` :
+          `Server rejected ${label}: ${reason}. This request made no resource change.`;
+        setCommandStatus("error", rejection);
+        break;
+      }
+      case "conflict":
+        setCommandStatus("error", type === "make_paperclip" ? "Command ID conflict. The server did not apply this request. Activate again to start a new command." : `${label} had a command ID conflict. Activate again to start a new command.`);
+        break;
+      case "network_error":
+        setCommandStatus("error", type === "make_paperclip" ? "Network outcome is unknown. Retry sends the same command ID. No local resource credit was given." : `${label} has an unknown network outcome. Retry sends the same command ID; no local credit was given.`);
+        break;
+      case "unavailable":
+        setCommandStatus("error", type === "make_paperclip" ? "The server is temporarily unavailable and the outcome is not known. Retry sends the same command ID." : `${label} has an unknown outcome while the server is unavailable. Retry sends the same command ID.`);
+        break;
+      case "invalid_response":
+        setCommandStatus("error", type === "make_paperclip" ? "The server response could not be validated and the outcome is unknown. Retry sends the same command ID." : `${label} has an unknown outcome after an invalid server response. Retry sends the same command ID.`);
+        break;
+      case "schema_error":
+        setCommandStatus("error", type === "make_paperclip" ? "The server rejected an invalid command envelope. Activate again to create a new valid command." : `${label} had an invalid command envelope. No request was applied.`);
+        break;
+      case "unknown_command":
+        setCommandStatus("error", type === "make_paperclip" ? "The server does not support this command. No resource change was reported." : `The server does not support ${label}. No resource change was reported.`);
+        break;
+      default:
+        setCommandStatus("error", type === "make_paperclip" ? "This browser could not create a secure command ID. No request was sent." : `${label} could not create a secure command ID. No request was sent.`);
     }
-    case "conflict":
-      setCommandStatus("error", "Command ID conflict. The server did not apply this request. Activate again to start a new command.");
-      break;
-    case "network_error":
-      setCommandStatus("error", "Network outcome is unknown. Retry sends the same command ID. No local resource credit was given.");
-      break;
-    case "unavailable":
-      setCommandStatus("error", "The server is temporarily unavailable and the outcome is not known. Retry sends the same command ID.");
-      break;
-    case "invalid_response":
-      setCommandStatus("error", "The server response could not be validated and the outcome is unknown. Retry sends the same command ID.");
-      break;
-    case "schema_error":
-      setCommandStatus("error", "The server rejected an invalid command envelope. Activate again to create a new valid command.");
-      break;
-    case "unknown_command":
-      setCommandStatus("error", "The server does not support this command. No resource change was reported.");
-      break;
-    case "local_error":
-      setCommandStatus("error", "This browser could not create a secure command ID. No request was sent.");
-      break;
-    default:
-      setCommandStatus("error", "Command outcome is unknown. No local resource credit was given.");
-  }
-  updateControls();
-});
-
-form.addEventListener("submit", (event) => {
-  event.preventDefault();
-  void runner.run();
-});
-button.addEventListener("keydown", (event) => {
-  // Preserve native Enter/Space activation while suppressing auto-repeat clicks.
-  if (event.repeat && (event.key === "Enter" || event.key === " ")) {
+    updateControls();
+  });
+  controls.push({form, button, runner, label});
+  form.addEventListener("submit", (event) => {
     event.preventDefault();
-  }
-});
+    void runner.run();
+  });
+  button.addEventListener("keydown", (event) => {
+    if (event.repeat && (event.key === "Enter" || event.key === " ")) event.preventDefault();
+  });
+}
 updateControls();
 
 async function fetchCurrentView() {

@@ -26,6 +26,11 @@ fn view_json(run_id: &str, revision: u64, clips: &str) -> Value {
             "unused_clips": clips,
             "wire": "999",
             "funds": "-41117.99",
+            "demand": "3.2",
+            "marketing_cost": "100",
+            "clips_sold": "0",
+            "income": "0",
+            "last_sale_revenue": "0",
             "wire_spool_length": "1000",
             "wire_quote": "30000000000000000000000000000000000000000000000000000001",
             "price_per_clip": "0.000000000000000001",
@@ -200,6 +205,11 @@ fn complete_view_deserialization_rejects_bad_frames_and_preserves_exact_numeric_
         "0.000000000000000001"
     );
     assert_eq!(parsed.game.marketing_level.to_string(), "9007199254740993");
+    assert_eq!(parsed.game.marketing_cost.to_string(), "100");
+    assert_eq!(parsed.game.demand.to_string(), "3.2");
+    assert_eq!(parsed.game.clips_sold.to_string(), "0");
+    assert_eq!(parsed.game.income.to_string(), "0");
+    assert_eq!(parsed.game.last_sale_revenue.to_string(), "0");
     assert_eq!(
         parsed.game.wire_quote.to_string(),
         "30000000000000000000000000000000000000000000000000000001"

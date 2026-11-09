@@ -1,26 +1,33 @@
-//! Strict, deterministic snapshot version 1 for the complete current logical state.
+//! Strict snapshot payloads with explicit 1 -> 2 migration.
+//!
+//! Payload format versions and SQLite schema versions are independent concepts.
+//! Current capture always emits version 2; supported historical V1 payloads
+//! first retain their whole legacy state, then their migration is revalidated as V2.
 
 use crate::game::amount::{Amount, IntegralAmount, NonNegativeAmount, SafeU64};
 use crate::game::clock::ClockState;
+use crate::game::economy::refresh_demand;
+use crate::game::evaluator::DECISION_LIMIT;
 use crate::game::rng::{GameRng, RngStateError};
 use crate::game::state::{GameState, ProState};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::error::Error;
 use std::fmt;
 
-pub const SNAPSHOT_VERSION: u8 = 1;
+pub const SNAPSHOT_VERSION: u8 = 2;
 
-/// Every current `GameState` field has one statically typed representation.
-/// Process-local run identity, lag debt, retry records and subscriptions are absent.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct SnapshotV1 {
+pub struct Snapshot {
     pub snapshot_version: u8,
     pub revision: SafeU64,
     pub pro: ProSnapshot,
     pub clock: ClockSnapshot,
     pub rng_state: String,
 }
+
+pub type SnapshotV2 = Snapshot;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -34,6 +41,17 @@ pub struct ProSnapshot {
     pub wire_quote: Amount,
     pub price_per_clip: Amount,
     pub marketing_level: IntegralAmount,
+    pub marketing_effectiveness: Amount,
+    pub demand_boost: Amount,
+    pub prestige_u: IntegralAmount,
+    pub demand: NonNegativeAmount,
+    pub clips_sold: NonNegativeAmount,
+    pub income: Amount,
+    pub last_sale_revenue: Amount,
+    pub wire_base_price: Amount,
+    pub wire_price_counter: SafeU64,
+    pub wire_purchase_count: SafeU64,
+    pub wire_inactivity_ticks: SafeU64,
     pub trust: IntegralAmount,
     pub processors: IntegralAmount,
     pub memory: IntegralAmount,
@@ -61,7 +79,44 @@ pub struct RecoveredSnapshot {
     pub revision: u64,
 }
 
-impl SnapshotV1 {
+#[derive(Deserialize)]
+struct VersionEnvelope {
+    snapshot_version: u8,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct SnapshotV1 {
+    snapshot_version: u8,
+    revision: SafeU64,
+    pro: ProSnapshotV1,
+    clock: ClockSnapshot,
+    rng_state: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ProSnapshotV1 {
+    lifetime_clips: NonNegativeAmount,
+    unsold_clips: NonNegativeAmount,
+    unused_clips: NonNegativeAmount,
+    wire: NonNegativeAmount,
+    funds: Amount,
+    wire_spool_length: NonNegativeAmount,
+    wire_quote: Amount,
+    price_per_clip: Amount,
+    marketing_level: IntegralAmount,
+    trust: IntegralAmount,
+    processors: IntegralAmount,
+    memory: IntegralAmount,
+    computing_hidden: bool,
+    projects_hidden: bool,
+    auto_clipper_revealed: bool,
+    auto_clippers: IntegralAmount,
+    auto_clipper_cost: Amount,
+}
+
+impl Snapshot {
     pub fn capture(state: &GameState, revision: u64) -> Result<Self, SnapshotError> {
         let snapshot = Self {
             snapshot_version: SNAPSHOT_VERSION,
@@ -70,7 +125,6 @@ impl SnapshotV1 {
             clock: ClockSnapshot::from_state(&state.clock)?,
             rng_state: state.rng_state_hex(),
         };
-        // A read-only capture must never advance or otherwise mutate the RNG.
         debug_assert_eq!(state.rng_state_hex(), snapshot.rng_state);
         snapshot.validate()?;
         Ok(snapshot)
@@ -83,13 +137,19 @@ impl SnapshotV1 {
 
     pub fn from_canonical_bytes(bytes: &[u8]) -> Result<Self, SnapshotError> {
         let text = std::str::from_utf8(bytes).map_err(|_| SnapshotError::InvalidUtf8)?;
-        let snapshot: Self = serde_json::from_str(text).map_err(classify_json_error)?;
-        snapshot.validate()?;
-        let canonical = serde_json::to_vec(&snapshot).map_err(|_| SnapshotError::EncodingFailed)?;
-        if canonical != bytes {
-            return Err(SnapshotError::NonCanonicalPayload);
+        let envelope: VersionEnvelope = serde_json::from_str(text).map_err(classify_json_error)?;
+        match envelope.snapshot_version {
+            1 => {
+                let legacy: SnapshotV1 = decode_strict_canonical(text)?;
+                upgrade_v1(legacy)
+            }
+            2 => {
+                let snapshot: Self = decode_strict_canonical(text)?;
+                snapshot.validate()?;
+                Ok(snapshot)
+            }
+            _ => Err(SnapshotError::UnsupportedSnapshotVersion),
         }
-        Ok(snapshot)
     }
 
     pub fn restore(&self) -> Result<RecoveredSnapshot, SnapshotError> {
@@ -106,10 +166,86 @@ impl SnapshotV1 {
         if self.snapshot_version != SNAPSHOT_VERSION {
             return Err(SnapshotError::UnsupportedSnapshotVersion);
         }
-        self.pro.validate()?;
         self.clock.to_state()?;
         GameRng::import_hex(&self.rng_state).map_err(map_rng_error)?;
-        Ok(())
+        let state = self.pro.to_state()?;
+        validate_current_pro(&state)
+    }
+}
+
+fn decode_strict_canonical<T: DeserializeOwned + Serialize>(
+    text: &str,
+) -> Result<T, SnapshotError> {
+    let decoded: T = serde_json::from_str(text).map_err(classify_json_error)?;
+    let canonical = serde_json::to_vec(&decoded).map_err(|_| SnapshotError::EncodingFailed)?;
+    if canonical != text.as_bytes() {
+        return Err(SnapshotError::NonCanonicalPayload);
+    }
+    Ok(decoded)
+}
+
+fn upgrade_v1(legacy: SnapshotV1) -> Result<Snapshot, SnapshotError> {
+    let original = legacy.pro.to_state_partial()?;
+    let pro = ProSnapshot::from_state(&original);
+    upgrade_parts(legacy.revision, pro, legacy.clock, legacy.rng_state)
+}
+
+fn upgrade_parts(
+    revision: SafeU64,
+    mut pro: ProSnapshot,
+    clock: ClockSnapshot,
+    rng_state: String,
+) -> Result<Snapshot, SnapshotError> {
+    let mut state = pro.to_state()?;
+    refresh_demand(&mut state).map_err(|_| SnapshotError::DomainViolation)?;
+    pro.demand = state.demand;
+    let snapshot = Snapshot {
+        snapshot_version: SNAPSHOT_VERSION,
+        revision,
+        pro,
+        clock,
+        rng_state,
+    };
+    snapshot.validate()?;
+    Ok(snapshot)
+}
+
+impl ProSnapshotV1 {
+    fn to_state_partial(&self) -> Result<ProState, SnapshotError> {
+        for count in [
+            &self.marketing_level,
+            &self.trust,
+            &self.processors,
+            &self.memory,
+            &self.auto_clippers,
+        ] {
+            if count.amount().is_negative() {
+                return Err(SnapshotError::DomainViolation);
+            }
+        }
+        // Migration additions are initialized only after every old field is copied.
+        let mut state = ProState::fresh();
+        state.lifetime_clips = self.lifetime_clips.clone();
+        state.unsold_clips = self.unsold_clips.clone();
+        state.unused_clips = self.unused_clips.clone();
+        state.wire = self.wire.clone();
+        state.funds = self.funds.clone();
+        state.wire_spool_length = self.wire_spool_length.clone();
+        state.wire_quote = self.wire_quote.clone();
+        state.price_per_clip = self.price_per_clip.clone();
+        state.marketing_level = self.marketing_level.clone();
+        state.trust = self.trust.clone();
+        state.processors = self.processors.clone();
+        state.memory = self.memory.clone();
+        state.computing_hidden = self.computing_hidden;
+        state.projects_hidden = self.projects_hidden;
+        state.auto_clipper_revealed = self.auto_clipper_revealed;
+        state.auto_clippers = self.auto_clippers.clone();
+        state.auto_clipper_cost = self.auto_clipper_cost.clone();
+        state.clips_sold = NonNegativeAmount::zero();
+        state.income = Amount::zero();
+        state.last_sale_revenue = Amount::zero();
+        Ok(state)
     }
 }
 
@@ -125,6 +261,17 @@ impl ProSnapshot {
             wire_quote: state.wire_quote.clone(),
             price_per_clip: state.price_per_clip.clone(),
             marketing_level: state.marketing_level.clone(),
+            marketing_effectiveness: state.marketing_effectiveness.clone(),
+            demand_boost: state.demand_boost.clone(),
+            prestige_u: state.prestige_u.clone(),
+            demand: state.demand.clone(),
+            clips_sold: state.clips_sold.clone(),
+            income: state.income.clone(),
+            last_sale_revenue: state.last_sale_revenue.clone(),
+            wire_base_price: state.wire_base_price.clone(),
+            wire_price_counter: state.wire_price_counter,
+            wire_purchase_count: state.wire_purchase_count,
+            wire_inactivity_ticks: state.wire_inactivity_ticks,
             trust: state.trust.clone(),
             processors: state.processors.clone(),
             memory: state.memory.clone(),
@@ -136,23 +283,7 @@ impl ProSnapshot {
         }
     }
 
-    fn validate(&self) -> Result<(), SnapshotError> {
-        for count in [
-            &self.marketing_level,
-            &self.trust,
-            &self.processors,
-            &self.memory,
-            &self.auto_clippers,
-        ] {
-            if count.amount().is_negative() {
-                return Err(SnapshotError::DomainViolation);
-            }
-        }
-        Ok(())
-    }
-
     fn to_state(&self) -> Result<ProState, SnapshotError> {
-        self.validate()?;
         Ok(ProState {
             lifetime_clips: self.lifetime_clips.clone(),
             unsold_clips: self.unsold_clips.clone(),
@@ -163,6 +294,17 @@ impl ProSnapshot {
             wire_quote: self.wire_quote.clone(),
             price_per_clip: self.price_per_clip.clone(),
             marketing_level: self.marketing_level.clone(),
+            marketing_effectiveness: self.marketing_effectiveness.clone(),
+            demand_boost: self.demand_boost.clone(),
+            prestige_u: self.prestige_u.clone(),
+            demand: self.demand.clone(),
+            clips_sold: self.clips_sold.clone(),
+            income: self.income.clone(),
+            last_sale_revenue: self.last_sale_revenue.clone(),
+            wire_base_price: self.wire_base_price.clone(),
+            wire_price_counter: self.wire_price_counter,
+            wire_purchase_count: self.wire_purchase_count,
+            wire_inactivity_ticks: self.wire_inactivity_ticks,
             trust: self.trust.clone(),
             processors: self.processors.clone(),
             memory: self.memory.clone(),
@@ -173,6 +315,81 @@ impl ProSnapshot {
             auto_clipper_cost: self.auto_clipper_cost.clone(),
         })
     }
+}
+
+fn validate_current_pro(state: &ProState) -> Result<(), SnapshotError> {
+    for count in [
+        &state.marketing_level,
+        &state.trust,
+        &state.processors,
+        &state.memory,
+        &state.auto_clippers,
+        &state.prestige_u,
+    ] {
+        if count.amount().is_negative() {
+            return Err(SnapshotError::DomainViolation);
+        }
+    }
+    // These are conserved ledgers, not disjoint physical inventories: production
+    // increments all three, then sales transfer Unsold into ClipsSold.
+    // Equivalent to Unsold + ClipsSold == Lifetime, using checked nonnegative
+    // arithmetic rather than overflow-prone fixed-width addition.
+    let expected_sold = state
+        .lifetime_clips
+        .checked_sub(&state.unsold_clips)
+        .map_err(|_| SnapshotError::DomainViolation)?;
+    if state.unused_clips != state.lifetime_clips
+        || state.unsold_clips > state.unused_clips
+        || state.clips_sold > state.lifetime_clips
+        || expected_sold != state.clips_sold
+    {
+        #[cfg(test)]
+        eprintln!(
+            "snapshot production invariant: unused={} lifetime={} unsold={} sold={}",
+            state.unused_clips, state.lifetime_clips, state.unsold_clips, state.clips_sold
+        );
+        return Err(SnapshotError::DomainViolation);
+    }
+    if state.price_per_clip <= Amount::zero()
+        || state.wire_base_price <= Amount::zero()
+        || state.wire_quote <= Amount::zero()
+        || state.wire_quote.clone().integral().is_err()
+        || state.marketing_effectiveness < Amount::zero()
+        || state.demand_boost < Amount::zero()
+        || state.income.is_negative()
+        || state.last_sale_revenue.is_negative()
+    {
+        #[cfg(test)]
+        eprintln!(
+            "snapshot scalar domain: price={} base={} quote={} effectiveness={} boost={} income={} last={}",
+            state.price_per_clip,
+            state.wire_base_price,
+            state.wire_quote,
+            state.marketing_effectiveness,
+            state.demand_boost,
+            state.income,
+            state.last_sale_revenue
+        );
+        return Err(SnapshotError::DomainViolation);
+    }
+    if state.wire_base_price
+        >= Amount::from_mantissa(
+            num_bigint::BigInt::from(DECISION_LIMIT as u64) * Amount::from_i128(1).mantissa(),
+        )
+    {
+        return Err(SnapshotError::DomainViolation);
+    }
+    let mut expected = state.clone();
+    refresh_demand(&mut expected).map_err(|_| SnapshotError::DomainViolation)?;
+    if expected.demand != state.demand || expected.marketing_cost().is_none() {
+        #[cfg(test)]
+        eprintln!(
+            "snapshot derived mismatch: demand={} expected={} level={}",
+            state.demand, expected.demand, state.marketing_level
+        );
+        return Err(SnapshotError::DomainViolation);
+    }
+    Ok(())
 }
 
 impl ClockSnapshot {
@@ -292,6 +509,7 @@ mod tests {
     use crate::game::amount::MAX_SAFE_JSON_INTEGER;
     use crate::game::clock::UPDATE_QUANTUM_NANOS;
     use crate::game::conversion::convert_one_wire;
+    use crate::game::economy::advance_fast_phase;
 
     fn rich_state() -> GameState {
         let mut rng = GameRng::from_test_seed([0x5au8; 32]);
@@ -300,31 +518,33 @@ mod tests {
         let mut partial = [0u8; 13];
         rng.fill_bytes(&mut partial);
         let mut state = GameState::fresh(rng);
-        state.pro.lifetime_clips = Amount::parse("9007199254740993")
-            .unwrap()
-            .nonnegative()
+        state.pro.lifetime_clips = Amount::parse(
+            "30000000000000000000000000000000000000000000000000000001.000000000000000001",
+        )
+        .unwrap()
+        .nonnegative()
+        .unwrap();
+        state.pro.clips_sold = Amount::parse("42.5").unwrap().nonnegative().unwrap();
+        state.pro.unsold_clips = state
+            .pro
+            .lifetime_clips
+            .checked_sub(&state.pro.clips_sold)
             .unwrap();
-        state.pro.unsold_clips = Amount::parse("0.000000000000000001")
-            .unwrap()
-            .nonnegative()
-            .unwrap();
-        state.pro.unused_clips =
-            Amount::parse("30000000000000000000000000000000000000000000000000000001")
-                .unwrap()
-                .nonnegative()
-                .unwrap();
+        state.pro.unused_clips = Amount::parse(
+            "30000000000000000000000000000000000000000000000000000001.000000000000000001",
+        )
+        .unwrap()
+        .nonnegative()
+        .unwrap();
         state.pro.wire = Amount::parse("9007199254740995")
             .unwrap()
             .nonnegative()
             .unwrap();
         state.pro.funds = Amount::parse("-0.000000000000000001").unwrap();
         state.pro.wire_spool_length = NonNegativeAmount::zero();
-        state.pro.wire_quote = Amount::parse("-41117.99").unwrap();
+        state.pro.wire_quote = Amount::from_i128(20);
         state.pro.price_per_clip = Amount::parse("6.21").unwrap();
-        state.pro.marketing_level = Amount::parse("340282366920938463463374607431768211457")
-            .unwrap()
-            .integral()
-            .unwrap();
+        state.pro.marketing_level = Amount::parse("302").unwrap().integral().unwrap();
         state.pro.trust = IntegralAmount::from_i128(0);
         state.pro.processors = IntegralAmount::from_i128(2);
         state.pro.memory = IntegralAmount::from_i128(3);
@@ -333,6 +553,16 @@ mod tests {
         state.pro.auto_clipper_revealed = true;
         state.pro.auto_clippers = IntegralAmount::from_i128(7);
         state.pro.auto_clipper_cost = Amount::parse("6.21").unwrap();
+        state.pro.income = Amount::parse("456.789").unwrap();
+        state.pro.last_sale_revenue = Amount::parse("3.002").unwrap();
+        state.pro.wire_base_price = Amount::parse("19.876543210123456789").unwrap();
+        state.pro.wire_price_counter = SafeU64::new(17).unwrap();
+        state.pro.wire_purchase_count = SafeU64::new(9).unwrap();
+        state.pro.wire_inactivity_ticks = SafeU64::new(231).unwrap();
+        state.pro.marketing_effectiveness = Amount::parse("1.125").unwrap();
+        state.pro.demand_boost = Amount::parse("1.25").unwrap();
+        state.pro.prestige_u = IntegralAmount::from_i128(7);
+        refresh_demand(&mut state.pro).unwrap();
         state.clock = ClockState::from_snapshot_parts(251, 1, 51, 1, 14_000_000, 156).unwrap();
         state
     }
@@ -344,20 +574,20 @@ mod tests {
     }
 
     #[test]
-    fn complete_v1_roundtrip_restores_exact_state_and_uninterrupted_continuation() {
+    fn complete_v2_roundtrip_restores_exact_state_and_uninterrupted_continuation() {
         let original = rich_state();
         let before_capture = original.rng_state_hex();
-        let snapshot = SnapshotV1::capture(&original, MAX_SAFE_JSON_INTEGER).unwrap();
+        let snapshot = Snapshot::capture(&original, MAX_SAFE_JSON_INTEGER).unwrap();
         assert_eq!(original.rng_state_hex(), before_capture);
         let encoded = snapshot.to_canonical_bytes().unwrap();
         assert_eq!(encoded, snapshot.to_canonical_bytes().unwrap());
         assert_eq!(original.rng_state_hex(), before_capture);
-        let decoded = SnapshotV1::from_canonical_bytes(&encoded).unwrap();
+        let decoded = Snapshot::from_canonical_bytes(&encoded).unwrap();
         let recovered = decoded.restore().unwrap();
         assert_eq!(recovered.revision, MAX_SAFE_JSON_INTEGER);
         assert_same_state(&original, &recovered.state);
         for expected in [
-            "9007199254740993",
+            "9007199254740995",
             "0.000000000000000001",
             "30000000000000000000000000000000000000000000000000000001",
         ] {
@@ -458,16 +688,16 @@ mod tests {
 
     #[test]
     fn strict_json_and_domain_negative_table_has_stable_typed_errors() {
-        let base = SnapshotV1::capture(&rich_state(), MAX_SAFE_JSON_INTEGER).unwrap();
+        let base = Snapshot::capture(&rich_state(), MAX_SAFE_JSON_INTEGER).unwrap();
         let canonical = String::from_utf8(base.to_canonical_bytes().unwrap()).unwrap();
         let replace = |needle: &str, replacement: &str| {
             assert!(canonical.contains(needle), "missing fixture text {needle}");
             canonical.replacen(needle, replacement, 1)
         };
-        let unsupported_version = replace("\"snapshot_version\":1", "\"snapshot_version\":2");
+        let unsupported_version = replace("\"snapshot_version\":2", "\"snapshot_version\":3");
         let duplicate = replace(
-            "\"snapshot_version\":1",
-            "\"snapshot_version\":1,\"snapshot_version\":1",
+            "\"snapshot_version\":2",
+            "\"snapshot_version\":2,\"snapshot_version\":2",
         );
         let duplicate_nested = replace(
             "\"funds\":\"-0.000000000000000001\"",
@@ -483,7 +713,7 @@ mod tests {
         let wrong_bool = replace("\"computing_hidden\":false", "\"computing_hidden\":1");
         let negative_wire = replace("\"wire\":\"9007199254740995\"", "\"wire\":\"-1\"");
         let fractional_count = replace(
-            "\"marketing_level\":\"340282366920938463463374607431768211457\"",
+            "\"marketing_level\":\"302\"",
             "\"marketing_level\":\"1.000000000000000001\"",
         );
         let unsafe_revision = replace(
@@ -610,7 +840,7 @@ mod tests {
             ),
             ("truncated JSON", malformed, SnapshotError::MalformedJson),
         ] {
-            let error = SnapshotV1::from_canonical_bytes(input.as_bytes())
+            let error = Snapshot::from_canonical_bytes(input.as_bytes())
                 .expect_err(&format!("accepted invalid fixture: {label}"));
             assert_eq!(error, expected, "wrong class for {label}");
             assert!(
@@ -620,11 +850,11 @@ mod tests {
             eprintln!("strict snapshot case {label}: {expected:?}");
         }
         assert_eq!(
-            SnapshotV1::from_canonical_bytes(&[0xff, 0xfe]),
+            Snapshot::from_canonical_bytes(&[0xff, 0xfe]),
             Err(SnapshotError::InvalidUtf8)
         );
         for primitive in ["null", "true", "1", "[]", "{}"] {
-            assert!(SnapshotV1::from_canonical_bytes(primitive.as_bytes()).is_err());
+            assert!(Snapshot::from_canonical_bytes(primitive.as_bytes()).is_err());
         }
         for field in 0..5 {
             let mut invalid = base.clone();
@@ -641,5 +871,156 @@ mod tests {
                 Err(SnapshotError::DomainViolation)
             );
         }
+    }
+
+    #[test]
+    fn version_one_migration_retains_state_and_continues_identically() {
+        // V1 predates every G02 sales/Wire-modifier field. A valid fixture has
+        // all production still Unsold; later migration must not infer missing sales.
+        let mut original = rich_state();
+        original.pro.unsold_clips = original.pro.lifetime_clips.clone();
+        original.pro.clips_sold = NonNegativeAmount::zero();
+        original.pro.income = Amount::zero();
+        original.pro.last_sale_revenue = Amount::zero();
+        original.pro.marketing_effectiveness = Amount::from_i128(1);
+        original.pro.demand_boost = Amount::from_i128(1);
+        original.pro.prestige_u = IntegralAmount::from_i128(0);
+        original.pro.wire_base_price = Amount::from_i128(20);
+        original.pro.wire_price_counter = SafeU64::new(0).unwrap();
+        original.pro.wire_purchase_count = SafeU64::new(0).unwrap();
+        original.pro.wire_inactivity_ticks = SafeU64::new(0).unwrap();
+        original.pro.wire_quote = Amount::from_i128(17);
+        refresh_demand(&mut original.pro).unwrap();
+        let current = Snapshot::capture(&original, 77).unwrap();
+        let original_pro = ProSnapshotV1 {
+            lifetime_clips: current.pro.lifetime_clips.clone(),
+            unsold_clips: current.pro.unsold_clips.clone(),
+            unused_clips: current.pro.unused_clips.clone(),
+            wire: current.pro.wire.clone(),
+            funds: current.pro.funds.clone(),
+            wire_spool_length: current.pro.wire_spool_length.clone(),
+            wire_quote: current.pro.wire_quote.clone(),
+            price_per_clip: current.pro.price_per_clip.clone(),
+            marketing_level: current.pro.marketing_level.clone(),
+            trust: current.pro.trust.clone(),
+            processors: current.pro.processors.clone(),
+            memory: current.pro.memory.clone(),
+            computing_hidden: current.pro.computing_hidden,
+            projects_hidden: current.pro.projects_hidden,
+            auto_clipper_revealed: current.pro.auto_clipper_revealed,
+            auto_clippers: current.pro.auto_clippers.clone(),
+            auto_clipper_cost: current.pro.auto_clipper_cost.clone(),
+        };
+        let v1 = SnapshotV1 {
+            snapshot_version: 1,
+            revision: current.revision,
+            pro: original_pro,
+            clock: current.clock.clone(),
+            rng_state: current.rng_state.clone(),
+        };
+        let migrated = Snapshot::from_canonical_bytes(&serde_json::to_vec(&v1).unwrap()).unwrap();
+        assert_eq!(migrated.snapshot_version, 2);
+        assert_eq!(migrated.pro.lifetime_clips, current.pro.lifetime_clips);
+        assert_eq!(migrated.pro.funds, current.pro.funds);
+        assert_eq!(migrated.pro.wire_quote, current.pro.wire_quote);
+        assert_eq!(migrated.pro.wire_quote.to_string(), "17");
+        assert_eq!(migrated.rng_state, current.rng_state);
+        assert_eq!(migrated.pro.clips_sold, NonNegativeAmount::zero());
+        assert_eq!(migrated.pro.income, Amount::zero());
+        assert_eq!(migrated.pro.marketing_effectiveness, Amount::from_i128(1));
+        assert_eq!(migrated.pro.wire_base_price, Amount::from_i128(20));
+        assert_eq!(migrated.pro.wire_price_counter.get(), 0);
+
+        let mut uninterrupted = original;
+        let mut restored = migrated.restore().unwrap().state;
+        for _ in 0..20 {
+            advance_fast_phase(&mut uninterrupted).unwrap();
+            advance_fast_phase(&mut restored).unwrap();
+            assert_same_state(&uninterrupted, &restored);
+        }
+        assert_eq!(restored.clock, uninterrupted.clock);
+        assert!(restored.pro.clips_sold > NonNegativeAmount::zero());
+        assert!(restored.pro.income > Amount::zero());
+        assert!(restored.pro.last_sale_revenue > Amount::zero());
+        assert_eq!(restored.pro.wire_inactivity_ticks.get(), 20);
+        assert!(format!("{:?}", SnapshotError::DomainViolation).contains("DomainViolation"));
+    }
+
+    #[test]
+    fn nondefault_v2_economy_continuation_is_identical_after_restore() {
+        let original = rich_state();
+        let snapshot = Snapshot::capture(&original, 88).unwrap();
+        let encoded = snapshot.to_canonical_bytes().unwrap();
+        let mut restored = Snapshot::from_canonical_bytes(&encoded)
+            .unwrap()
+            .restore()
+            .unwrap()
+            .state;
+        let mut uninterrupted = original.clone();
+        assert_same_state(&uninterrupted, &restored);
+        assert_eq!(restored.pro.clips_sold.to_string(), "42.5");
+        assert_eq!(restored.pro.income.to_string(), "456.789");
+        assert_eq!(restored.pro.last_sale_revenue.to_string(), "3.002");
+        assert_eq!(
+            restored.pro.wire_base_price.to_string(),
+            "19.876543210123456789"
+        );
+        assert_eq!(restored.pro.wire_price_counter.get(), 17);
+        assert_eq!(restored.pro.wire_purchase_count.get(), 9);
+        assert_eq!(restored.pro.wire_inactivity_ticks.get(), 231);
+        assert!(restored.pro.demand > NonNegativeAmount::from_i128(100).unwrap());
+        for _ in 0..250 {
+            let left = uninterrupted.clock.advance().unwrap();
+            let right = restored.clock.advance().unwrap();
+            assert_eq!(left, right);
+            if left.fast_due {
+                advance_fast_phase(&mut uninterrupted).unwrap();
+                advance_fast_phase(&mut restored).unwrap();
+            }
+            assert_same_state(&uninterrupted, &restored);
+        }
+        assert!(
+            restored.pro.clips_sold
+                > NonNegativeAmount::new(Amount::parse("42.5").unwrap()).unwrap()
+        );
+        assert!(restored.pro.income > Amount::parse("456.789").unwrap());
+        assert!(restored.pro.last_sale_revenue > Amount::zero());
+        assert!(restored.pro.wire_inactivity_ticks.get() < 20);
+    }
+
+    #[test]
+    fn v2_conservation_rejects_vanished_clips_and_accepts_a_conserved_ledger() {
+        let healthy = Snapshot::capture(&rich_state(), 11).unwrap();
+        let canonical = healthy.to_canonical_bytes().unwrap();
+        Snapshot::from_canonical_bytes(&canonical)
+            .unwrap()
+            .restore()
+            .unwrap();
+        let mut vanished = healthy;
+        vanished.pro.unsold_clips = NonNegativeAmount::zero();
+        vanished.pro.clips_sold = NonNegativeAmount::zero();
+        assert_eq!(
+            vanished.to_canonical_bytes(),
+            Err(SnapshotError::DomainViolation)
+        );
+    }
+
+    #[test]
+    fn migrated_payloads_still_reject_unknown_tampering_and_crossfield_damage() {
+        let mut current = Snapshot::capture(&rich_state(), 11).unwrap();
+        current.pro.unsold_clips = current
+            .pro
+            .lifetime_clips
+            .add_exact(&NonNegativeAmount::from_i128(1).unwrap());
+        assert_eq!(
+            current.to_canonical_bytes(),
+            Err(SnapshotError::DomainViolation)
+        );
+        let mut current = Snapshot::capture(&rich_state(), 11).unwrap();
+        current.pro.demand = NonNegativeAmount::from_i128(1).unwrap();
+        assert_eq!(
+            current.to_canonical_bytes(),
+            Err(SnapshotError::DomainViolation)
+        );
     }
 }

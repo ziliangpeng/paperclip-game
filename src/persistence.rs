@@ -4,7 +4,7 @@ use crate::game::amount::{MAX_SAFE_JSON_INTEGER, SafeU64};
 use crate::game::clock::UPDATE_QUANTUM_NANOS;
 use crate::health::{HealthSnapshot, PersistenceFailure, PersistenceHealth};
 use crate::runtime::{RuntimeHandle, RuntimeView};
-use crate::snapshot::{SNAPSHOT_VERSION, SnapshotError, SnapshotV1};
+use crate::snapshot::{SNAPSHOT_VERSION, Snapshot, SnapshotError};
 use rusqlite::types::ValueRef;
 use rusqlite::{Connection, OpenFlags, TransactionBehavior};
 use sha2::{Digest, Sha256};
@@ -21,11 +21,11 @@ use tokio::task::JoinHandle as AsyncJoinHandle;
 pub const DEFAULT_SNAPSHOT_INTERVAL: Duration = Duration::from_secs(30);
 pub const DEFAULT_BUSY_TIMEOUT: Duration = Duration::from_millis(100);
 const DEFAULT_ROW: &str = "default";
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 const CREATE_SNAPSHOT_TABLE: &str = "
     CREATE TABLE game_snapshot (
         slot TEXT PRIMARY KEY CHECK (slot = 'default'),
-        snapshot_version INTEGER NOT NULL CHECK (snapshot_version = 1),
+        snapshot_version INTEGER NOT NULL CHECK (snapshot_version = 2),
         revision INTEGER NOT NULL CHECK (
             revision >= 0 AND revision <= 9007199254740991
         ),
@@ -52,13 +52,37 @@ const UPSERT_SNAPSHOT: &str = "
 pub enum LoadOrigin {
     FreshInitialized,
     Restored,
+    Migrated,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ImportedStep {
+    pub from_schema_version: i64,
+    pub from_snapshot_version: u8,
 }
 
 #[derive(Clone, Debug)]
 pub struct StoredSnapshot {
-    pub snapshot: SnapshotV1,
+    pub snapshot: Snapshot,
     pub capture_sequence: u64,
     pub origin: LoadOrigin,
+    pub imported_step: Option<ImportedStep>,
+    raw_checksum: String,
+}
+
+impl StoredSnapshot {
+    fn current_checksum(&self) -> Result<String, StorageError> {
+        if self.imported_step.is_some() {
+            Ok(sha256_hex(
+                &self
+                    .snapshot
+                    .to_canonical_bytes()
+                    .map_err(StorageError::Snapshot)?,
+            ))
+        } else {
+            Ok(self.raw_checksum.clone())
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -152,7 +176,7 @@ struct PreparedSnapshot {
 }
 
 impl PreparedSnapshot {
-    fn new(sequence: u64, snapshot: &SnapshotV1) -> Result<Self, StorageError> {
+    fn new(sequence: u64, snapshot: &Snapshot) -> Result<Self, StorageError> {
         SafeU64::new(sequence).map_err(|_| StorageError::SequenceExhausted)?;
         let payload = snapshot.to_canonical_bytes()?;
         let checksum = sha256_hex(&payload);
@@ -183,7 +207,7 @@ impl SnapshotStore {
     /// succeeds. Only an artifact-free nonexistent or zero-length file is fresh.
     pub fn open_or_initialize(
         path: &Path,
-        initial: &SnapshotV1,
+        initial: &Snapshot,
     ) -> Result<(Self, StoredSnapshot), StorageError> {
         let metadata = match std::fs::symlink_metadata(path) {
             Ok(metadata) => Some(metadata),
@@ -215,7 +239,7 @@ impl SnapshotStore {
 
     fn initialize_fresh(
         path: &Path,
-        initial: &SnapshotV1,
+        initial: &Snapshot,
     ) -> Result<(Self, StoredSnapshot), StorageError> {
         let prepared = PreparedSnapshot::new(0, initial)?;
         let mut connection = open_writable(path, true)?;
@@ -249,28 +273,27 @@ impl SnapshotStore {
                 snapshot: initial.clone(),
                 capture_sequence: 0,
                 origin: LoadOrigin::FreshInitialized,
+                imported_step: None,
+                raw_checksum: prepared.checksum,
             },
         ))
     }
 
     fn open_valid_existing(path: &Path) -> Result<(Self, StoredSnapshot), StorageError> {
-        // Journal recovery can require writes even when all requested operations
-        // are reads. Permit those writes only on this private, owner-writable copy.
-        // No schema initialization, DML or durability configuration is performed here.
+        // First validate and normalize only on an owner-writable private copy.
+        // Corruption or an invalid historical state therefore leaves source bytes untouched.
         let validation_copy = PrivateValidationCopy::new(path)?;
         let private_connection = open_writable(validation_copy.database_path(), false)?;
         let stored = validate_stored_snapshot(&private_connection)?;
         drop(private_connection);
         drop(validation_copy);
 
+        if stored.imported_step.is_some() {
+            migrate_existing(path, &stored)?;
+        }
         let connection = open_writable(path, false)?;
         configure_durability(&connection)?;
-        let checksum = sha256_hex(
-            &stored
-                .snapshot
-                .to_canonical_bytes()
-                .map_err(StorageError::Snapshot)?,
-        );
+        let checksum = stored.current_checksum()?;
         let store = Self {
             connection,
             last_sequence: stored.capture_sequence,
@@ -280,7 +303,7 @@ impl SnapshotStore {
         Ok((store, stored))
     }
 
-    pub fn commit(&mut self, sequence: u64, snapshot: &SnapshotV1) -> Result<(), StorageError> {
+    pub fn commit(&mut self, sequence: u64, snapshot: &Snapshot) -> Result<(), StorageError> {
         let prepared = PreparedSnapshot::new(sequence, snapshot)?;
         self.commit_prepared(&prepared)
     }
@@ -328,6 +351,42 @@ impl SnapshotStore {
     pub fn last_revision(&self) -> u64 {
         self.last_revision
     }
+}
+
+fn migrate_existing(path: &Path, expected: &StoredSnapshot) -> Result<(), StorageError> {
+    let mut connection = open_writable(path, false)?;
+    configure_durability(&connection)?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(map_transaction_error)?;
+    // Recheck the source bytes inside the same write transaction. A source change
+    // after private-copy validation cannot be silently replaced by another game.
+    let current = validate_stored_snapshot(&transaction)?;
+    if current.raw_checksum != expected.raw_checksum
+        || current.capture_sequence != expected.capture_sequence
+        || current.snapshot.revision != expected.snapshot.revision
+        || current.imported_step != expected.imported_step
+    {
+        return Err(StorageError::SequenceConflict);
+    }
+    let prepared = PreparedSnapshot::new(expected.capture_sequence, &expected.snapshot)?;
+    transaction
+        .execute(
+            "ALTER TABLE game_snapshot RENAME TO game_snapshot_migration_source",
+            [],
+        )
+        .map_err(map_transaction_error)?;
+    transaction
+        .execute(CREATE_SNAPSHOT_TABLE, [])
+        .map_err(map_transaction_error)?;
+    insert_prepared(&transaction, &prepared)?;
+    transaction
+        .execute("DROP TABLE game_snapshot_migration_source", [])
+        .map_err(map_transaction_error)?;
+    transaction
+        .pragma_update(None, "user_version", SCHEMA_VERSION)
+        .map_err(map_transaction_error)?;
+    transaction.commit().map_err(map_transaction_error)
 }
 
 static VALIDATION_COPY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -453,7 +512,7 @@ fn validate_stored_snapshot(connection: &Connection) -> Result<StoredSnapshot, S
     let schema_version: i64 = connection
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .map_err(map_validation_query_error)?;
-    if schema_version != SCHEMA_VERSION {
+    if !matches!(schema_version, 1 | 2) {
         return Err(StorageError::UnsupportedSchemaVersion);
     }
 
@@ -477,9 +536,9 @@ fn validate_stored_snapshot(connection: &Connection) -> Result<StoredSnapshot, S
     if !matches!(&row[0], RawValue::Text(slot) if slot == DEFAULT_ROW.as_bytes()) {
         return Err(StorageError::InvalidMetadata);
     }
-    let snapshot_version = metadata_integer(&row[1])?;
-    if snapshot_version != i64::from(SNAPSHOT_VERSION) {
-        return Err(StorageError::UnsupportedSnapshotVersion);
+    let stored_version = metadata_integer(&row[1])?;
+    if stored_version != schema_version {
+        return Err(StorageError::InvalidMetadata);
     }
     let revision = metadata_integer(&row[2])? as u64;
     let capture_sequence = metadata_integer(&row[3])? as u64;
@@ -503,14 +562,31 @@ fn validate_stored_snapshot(connection: &Connection) -> Result<StoredSnapshot, S
     if sha256_hex(payload) != *checksum {
         return Err(StorageError::ChecksumMismatch);
     }
-    let snapshot = SnapshotV1::from_canonical_bytes(payload).map_err(StorageError::Snapshot)?;
-    if snapshot.snapshot_version != SNAPSHOT_VERSION || snapshot.revision.get() != revision {
+    // Snapshot::from_canonical_bytes performs strict old-format parsing, retains all
+    // old fields, and normalizes the supported version 1 payload into current V2.
+    let snapshot = Snapshot::from_canonical_bytes(payload).map_err(StorageError::Snapshot)?;
+    if snapshot.revision.get() != revision {
         return Err(StorageError::InvalidMetadata);
     }
+    let imported_step = if schema_version != SCHEMA_VERSION {
+        Some(ImportedStep {
+            from_schema_version: schema_version,
+            from_snapshot_version: u8::try_from(stored_version)
+                .map_err(|_| StorageError::InvalidMetadata)?,
+        })
+    } else {
+        None
+    };
     Ok(StoredSnapshot {
         snapshot,
         capture_sequence,
-        origin: LoadOrigin::Restored,
+        origin: if imported_step.is_some() {
+            LoadOrigin::Migrated
+        } else {
+            LoadOrigin::Restored
+        },
+        imported_step,
+        raw_checksum: checksum.to_owned(),
     })
 }
 
@@ -749,7 +825,7 @@ impl PersistenceWorker {
         })
     }
 
-    pub fn submit(&self, snapshot: SnapshotV1) -> Result<u64, SubmitError> {
+    pub fn submit(&self, snapshot: Snapshot) -> Result<u64, SubmitError> {
         let revision = snapshot.revision.get();
         let update_count = snapshot.clock.update_count.get();
         // Encoding and digest work occurs before taking the queue mutex.
@@ -1040,7 +1116,7 @@ fn capture_and_submit(
     view: &RuntimeView,
 ) -> Result<u64, RuntimePersistenceError> {
     let snapshot =
-        SnapshotV1::capture(&view.game, view.revision).map_err(RuntimePersistenceError::Capture)?;
+        Snapshot::capture(&view.game, view.revision).map_err(RuntimePersistenceError::Capture)?;
     worker
         .submit(snapshot)
         .map_err(RuntimePersistenceError::Submit)
@@ -1059,6 +1135,8 @@ fn note_capture_failure(health: &PersistenceHealth, error: &RuntimePersistenceEr
         RuntimePersistenceError::WorkerShutdown(_)
         | RuntimePersistenceError::PublisherTaskEnded => PersistenceFailure::TransactionFailed,
     };
+    #[cfg(test)]
+    eprintln!("persistence capture path failure: {error:?} -> {failure:?}");
     health.write_failed(failure, false, 0);
 }
 
@@ -1103,7 +1181,7 @@ mod replacement_fault_tests {
         }
     }
 
-    fn publish_ready_marker(path: &Path, snapshot: &SnapshotV1) {
+    fn publish_ready_marker(path: &Path, snapshot: &Snapshot) {
         let staging = path.with_extension("tmp");
         std::fs::write(&staging, snapshot.to_canonical_bytes().unwrap()).unwrap();
         // Visibility implies the whole marker is present, not merely its creation.
@@ -1121,8 +1199,7 @@ mod replacement_fault_tests {
         let database = std::path::PathBuf::from(database);
         let marker = std::path::PathBuf::from(marker);
         let initial =
-            SnapshotV1::capture(&GameState::fresh(GameRng::from_test_seed([81_u8; 32])), 0)
-                .unwrap();
+            Snapshot::capture(&GameState::fresh(GameRng::from_test_seed([81_u8; 32])), 0).unwrap();
         let (mut store, stored) = SnapshotStore::open_or_initialize(&database, &initial).unwrap();
         assert_eq!(stored.origin, LoadOrigin::FreshInitialized);
         let rollback_journal = std::env::var_os(TEST_ROLLBACK_JOURNAL).is_some();
@@ -1145,7 +1222,7 @@ mod replacement_fault_tests {
         }
         let mut changed = stored.snapshot.restore().unwrap().state;
         changed.pro.funds = Amount::parse("7").unwrap();
-        let next = SnapshotV1::capture(&changed, 1).unwrap();
+        let next = Snapshot::capture(&changed, 1).unwrap();
         let prepared = PreparedSnapshot::new(1, &next).unwrap();
         store
             .commit_prepared_before_commit(&prepared, |transaction| {
@@ -1175,8 +1252,7 @@ mod replacement_fault_tests {
         let database = directory.0.join("state.sqlite3");
         let marker = directory.0.join("ready.marker");
         let initial =
-            SnapshotV1::capture(&GameState::fresh(GameRng::from_test_seed([81_u8; 32])), 0)
-                .unwrap();
+            Snapshot::capture(&GameState::fresh(GameRng::from_test_seed([81_u8; 32])), 0).unwrap();
         let child = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
@@ -1198,7 +1274,7 @@ mod replacement_fault_tests {
             assert!(Instant::now() < deadline, "bounded in-flight marker wait");
             std::thread::sleep(Duration::from_millis(2));
         }
-        let next = SnapshotV1::from_canonical_bytes(&std::fs::read(&marker).unwrap()).unwrap();
+        let next = Snapshot::from_canonical_bytes(&std::fs::read(&marker).unwrap()).unwrap();
         assert_eq!(next.revision.get(), 1);
         assert_eq!(next.pro.funds, Amount::parse("7").unwrap());
         assert!(!marker.with_extension("tmp").exists());
@@ -1234,8 +1310,7 @@ mod replacement_fault_tests {
         let database = directory.0.join("state.sqlite3");
         let marker = directory.0.join("ready.marker");
         let initial =
-            SnapshotV1::capture(&GameState::fresh(GameRng::from_test_seed([81_u8; 32])), 0)
-                .unwrap();
+            Snapshot::capture(&GameState::fresh(GameRng::from_test_seed([81_u8; 32])), 0).unwrap();
         let child = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
@@ -1258,7 +1333,7 @@ mod replacement_fault_tests {
             assert!(Instant::now() < deadline, "bounded hot-journal marker wait");
             std::thread::sleep(Duration::from_millis(2));
         }
-        let next = SnapshotV1::from_canonical_bytes(&std::fs::read(&marker).unwrap()).unwrap();
+        let next = Snapshot::from_canonical_bytes(&std::fs::read(&marker).unwrap()).unwrap();
         assert_eq!(next.revision.get(), 1);
         assert_eq!(next.pro.funds, Amount::parse("7").unwrap());
         assert!(!marker.with_extension("tmp").exists());
@@ -1324,7 +1399,7 @@ mod replacement_fault_tests {
             )
         );
         assert_eq!(
-            SnapshotV1::from_canonical_bytes(recovered_row.4.as_bytes()).unwrap(),
+            Snapshot::from_canonical_bytes(recovered_row.4.as_bytes()).unwrap(),
             initial,
             "the independent writable-SQLite oracle restores the complete old snapshot"
         );
