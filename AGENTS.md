@@ -42,6 +42,8 @@ This workflow has no human per-PR code review gate. Quality is ensured by execut
 - A reviewer must be independent of the implementation Agent and use fresh context. The implementation Agent's own work cannot serve as a required independent approval, and the Agent cannot be the sole reviewer of its own PR.
 - Reviewers give a clear conclusion, describe what they checked, and report findings for the current PR HEAD. After new commits, they must recheck affected conclusions and evidence.
 
+- **Review verdicts are public on the PR (single public writer).** After each review round concludes and the orchestrator independently verifies the verdict, the orchestrator posts a round comment on the PR stating: the verdict (BLOCK/ACCEPT), confirmed finding IDs with a one-line mechanism each, severity, the fix HEAD if a repair landed, and pointers to the evidence. Reviewer Agents themselves never write public state (no comments, reviews, PRs, or Issue edits); all public actions flow through the orchestrator, which is the single public writer. A review round is not complete until its verdict comment is posted.
+
 ## 5. Blocking and non-blocking findings
 
 Every **blocking finding** must provide all of the following:
