@@ -2225,6 +2225,400 @@ def run_r3_raw_counters_and_diagnostic(binary: Path, executable: str, version: s
             "browser": version, "chromeExit": case["chromeExit"], "backendExit": case["backendExit"]}
 
 
+class PhysicalReconnectState(ProxyState):
+    """Raw transport gates and real accepted-View observations for reconnect."""
+
+    def __init__(self, backend_port: int, template: dict[str, Any]):
+        super().__init__(backend_port)
+        self.run_id = "maintained-native-reconnect"
+        self.good1 = fixture_view(template, self.run_id, 1, {})
+        self.good2 = fixture_view(template, self.run_id, 2, {
+            "lifetime_clips": "22", "unsold_clips": "22", "unused_clips": "22", "wire": "978"})
+        bad_revision = raw_counter_frame(self.good2, "revision", "2.0")
+        self.invalid2_wire = physical_event_bytes(*bad_revision)
+        self.invalid2_body = bad_revision[2]
+        self.good3 = fixture_view(template, self.run_id, 3, {
+            "lifetime_clips": "23", "unsold_clips": "23", "unused_clips": "23", "wire": "977"})
+        self.invalid3_wire = physical_event_bytes(self.run_id, 999, json_bytes(self.good3))
+        self.good4 = fixture_view(template, self.run_id, 4, {
+            "lifetime_clips": "24", "unsold_clips": "24", "unused_clips": "24", "wire": "976"})
+        self.equal2 = fixture_view(template, self.run_id, 2, {
+            "lifetime_clips": "999", "unsold_clips": "999", "unused_clips": "999", "wire": "1"})
+        self.pure = fixture_view(template, self.run_id, 90, {"lifetime_clips": "777"})
+        self.get_started = threading.Event()
+        self.get_release = threading.Event()
+        self.get_delivered = threading.Event()
+        self.get_body = b"{bad json"
+        self.release_invalid2 = threading.Event()
+        self.release_good2 = threading.Event()
+        self.release_invalid3 = threading.Event()
+        self.close_connection1 = threading.Event()
+        self.connection2_started = threading.Event()
+        self.release_equal2 = threading.Event()
+        self.release_lower1 = threading.Event()
+        self.release_pure = threading.Event()
+        self.release_good3 = threading.Event()
+        self.close_connection2 = threading.Event()
+        self.connection3_started = threading.Event()
+        self.release_good4 = threading.Event()
+        self.close_connection3 = threading.Event()
+        self.connections: list[dict[str, Any]] = []
+
+    def release_all(self) -> None:
+        for value in self.__dict__.values():
+            if isinstance(value, threading.Event):
+                value.set()
+
+
+def physical_event_bytes(run_id: str, event_revision: int, data: bytes,
+                         event_name: str = "game_view") -> bytes:
+    assert len(data) <= 64 * 1024
+    return (f"id: {run_id}:{event_revision}\nevent: {event_name}\ndata: ").encode() + data + b"\n\n"
+
+
+def physical_reconnect_handler(state: PhysicalReconnectState) -> type[BaseHTTPRequestHandler]:
+    class Handler(proxy_handler(state)):
+        """Reuses genuine asset/backend/POST transport; only raw SSE/GET faults differ."""
+
+        def do_GET(self) -> None:
+            if self.path != "/api/game/stream" and self.path != "/api/game/view":
+                return super().do_GET()
+            if self.path != "/api/game/stream":
+                if state.get_started.is_set():
+                    return super().do_GET()
+                try:
+                    state.get_started.set()
+                    assert state.get_release.wait(20), "bounded physical-reconnect delayed GET"
+                    self.finite(200, state.get_body, "application/json")
+                    state.get_delivered.set()
+                except (AssertionError, OSError, http.client.HTTPException) as error:
+                    state.errors.append(f"GET {self.path}: {type(error).__name__}: {error}")
+                finally:
+                    self.close_connection = True
+                return
+            try:
+                number = state.fixture_connections + 1
+                assert number <= 3, "unexpected extra physical EventSource connection"
+                state.fixture_connections = number
+                connection = {"number": number, "lastEventId": self.headers.get("Last-Event-ID"),
+                              "openedAt": time.time()}
+                state.connections.append(connection)
+                if number == 2:
+                    state.connection2_started.set()
+                elif number == 3:
+                    state.connection3_started.set()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Cache-Control", "no-store, no-transform")
+                self.send_header("Connection", "close")
+                self.end_headers()
+                self.wfile.flush()
+                connection["headersAt"] = time.time()
+                if number == 1:
+                    self.send_wire(physical_event_bytes(state.run_id, 1, json_bytes(state.good1)),
+                                   state.release_invalid2, connection, "good1")
+                    self.send_wire(state.invalid2_wire, state.release_good2, connection,
+                                   "invalid2_raw_revision_2.0")
+                    self.send_wire(physical_event_bytes(state.run_id, 2, json_bytes(state.good2)),
+                                   state.release_invalid3, connection, "good2")
+                    self.send_wire(state.invalid3_wire, state.close_connection1, connection,
+                                   "invalid3_bad_event_id")
+                    connection["closedWithoutAcceptedReplacement"] = True
+                    return
+                if number == 2:
+                    # A real open is observable before any potential replacement View.
+                    assert state.release_equal2.wait(20), "hold connection2 before replacement"
+                    self.send_wire(physical_event_bytes(state.run_id, 2, json_bytes(state.equal2)),
+                                   state.release_lower1, connection, "equal2_conflicting_ignored")
+                    self.send_wire(physical_event_bytes(state.run_id, 1, json_bytes(state.good1)),
+                                   state.release_pure, connection, "lower1_ignored")
+                    self.send_wire(physical_event_bytes(state.run_id, 90, json_bytes(state.pure),
+                                                        event_name="message"),
+                                   state.release_good3, connection, "unnamed_pure_view_ignored")
+                    self.send_wire(physical_event_bytes(state.run_id, 3, json_bytes(state.good3)),
+                                   state.close_connection2, connection, "good3_real_recovery")
+                    return
+                assert state.release_good4.wait(20), "hold healthy reconnect before replacement"
+                self.send_wire(physical_event_bytes(state.run_id, 4, json_bytes(state.good4)),
+                               state.close_connection3, connection, "good4_healthy_reconnect")
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                pass
+            except (AssertionError, OSError, http.client.HTTPException) as error:
+                state.errors.append(f"GET {self.path}: {type(error).__name__}: {error}")
+                try:
+                    self.send_error(502)
+                except OSError:
+                    pass
+            finally:
+                self.close_connection = True
+
+        def send_wire(self, wire: bytes, release: threading.Event,
+                      connection: dict[str, Any], label: str) -> None:
+            self.wfile.write(wire)
+            self.wfile.flush()
+            connection.setdefault("sent", []).append({
+                "label": label, "sha256": hashlib.sha256(wire).hexdigest(),
+                "hex": wire.hex(), "at": time.time()})
+            assert release.wait(20), "bounded physical-reconnect frame gate: " + label
+
+    return Handler
+
+
+def physical_reconnect_dom(page: Cdp, state: PhysicalReconnectState) -> dict[str, Any]:
+    result = page.evaluate("""({
+      runId: document.documentElement.dataset.runId,
+      revision: document.documentElement.dataset.revision,
+      viewState: document.documentElement.dataset.viewState,
+      lifetime: document.getElementById('lifetime-clips').dataset.canonical,
+      wire: document.getElementById('wire').dataset.canonical,
+      connection: document.getElementById('connection-status').textContent,
+      streams: (window.__maintainedReconnectStreams || []).map((stream, index) => ({
+        index, readyState: stream.readyState, url: stream.url})),
+      streamEvents: window.__maintainedReconnectEvents || [],
+      history: window.__maintainedConnectionHistory || [],
+      revisionHistory: window.__maintainedRevisionHistory || []
+    })""")
+    result["physicalConnections"] = [
+        {key: value for key, value in item.items() if key != "sent"}
+        for item in state.connections
+    ]
+    result["sentCounts"] = [len(item.get("sent", [])) for item in state.connections]
+    return result
+
+
+def physical_reconnect_page(browser: Browser, origin: str) -> Cdp:
+    assert browser.browser_connection is not None
+    context = browser.browser_connection.call("Target.createBrowserContext")["browserContextId"]
+    target = browser.browser_connection.call("Target.createTarget", {
+        "url": "about:blank", "browserContextId": context})["targetId"]
+    url = wait_for(lambda: next((item.get("webSocketDebuggerUrl")
+                                for item in browser.http_json("/json/list")
+                                if item.get("id") == target), None),
+                   description="instrumented native physical-reconnect CDP")
+    page = Cdp(url)
+    browser.pages.append(page)
+    page.call("Page.enable")
+    page.call("Runtime.enable")
+    page.call("Network.enable", {"maxTotalBufferSize": 2_000_000, "maxResourceBufferSize": 256_000})
+    # Observation only. Reflect constructs and returns the actual native EventSource.
+    # No synthetic event, dispatchEvent, EventSource replacement or client label rewrite.
+    page.call("Page.addScriptToEvaluateOnNewDocument", {"source": r"""
+      (() => {
+        const Native = window.EventSource;
+        window.__maintainedReconnectStreams = [];
+        window.__maintainedReconnectEvents = [];
+        window.EventSource = new Proxy(Native, {
+          construct(target, args) {
+            const stream = Reflect.construct(target, args);
+            const index = window.__maintainedReconnectStreams.length;
+            window.__maintainedReconnectStreams.push(stream);
+            const record = type => window.__maintainedReconnectEvents.push({
+              index, type, readyState: stream.readyState, at: performance.now()});
+            stream.addEventListener('open', () => record('open'));
+            stream.addEventListener('error', () => record('error'));
+            record('constructed');
+            return stream;
+          }
+        });
+      })();
+    """})
+    page.call("Page.navigate", {"url": origin + "/"})
+    return page
+
+
+def run_physical_reconnect_lifecycle(binary: Path, executable: str, version: str) -> dict[str, Any]:
+    """A rejected View retains diagnosis until accepted presentation across a real reconnect."""
+    invalid = "An invalid server View was ignored; the last valid View is retained."
+    accepted = "Newest accepted server View displayed."
+    opened = "Live server connection open; receiving complete Views."
+    interrupted = "Live connection interrupted; the browser will reconnect without resetting the game."
+    result: dict[str, Any] = {"browser": version,
+                              "transport": "real backend/Chrome/native EventSource through raw-byte proxy"}
+    with tempfile.TemporaryDirectory(prefix="paperclip-native-physical-reconnect-") as temporary_name:
+        temporary = Path(temporary_name)
+        backend_port = api.free_port()
+        database = temporary / "owned.sqlite3"
+        out = (temporary / "backend.stdout").open("wb")
+        err = (temporary / "backend.stderr").open("wb")
+        backend = None
+        browser = None
+        proxy = None
+        proxy_thread = None
+        client = api.Client(backend_port)
+        try:
+            backend = api.start_ready(binary.resolve(), ["--listen-addr", f"127.0.0.1:{backend_port}",
+                                                         "--database-path", str(database)],
+                                      backend_port, temporary, out, err)
+            template = api.checked_json(client.get()[1])
+            state = PhysicalReconnectState(backend_port, template)
+            proxy = Proxy(("127.0.0.1", 0), physical_reconnect_handler(state))
+            proxy_thread = threading.Thread(target=proxy.serve_forever, daemon=True)
+            proxy_thread.start()
+            origin = f"http://127.0.0.1:{proxy.server_address[1]}"
+            browser = Browser(executable, temporary, origin)
+            page = physical_reconnect_page(browser, origin)
+            assert state.get_started.wait(8)
+            baseline = wait_for(lambda: physical_reconnect_dom(page, state),
+                                lambda value: value.get("revision") == "1" and value.get("viewState") == "ready",
+                                "native physical-reconnect real good1")
+            assert len(state.connections) == 1 and baseline["streams"][0]["readyState"] == 1
+            page.evaluate("""(() => {
+              window.__maintainedConnectionHistory = [];
+              window.__maintainedRevisionHistory = [];
+              const status = document.getElementById('connection-status');
+              new MutationObserver(() => window.__maintainedConnectionHistory.push(status.textContent))
+                .observe(status, {childList: true, characterData: true, subtree: true});
+              new MutationObserver(() => window.__maintainedRevisionHistory
+                .push(document.documentElement.dataset.revision))
+                .observe(document.documentElement, {attributes: true,
+                  attributeFilter: ['data-revision']});
+            })()""")
+
+            # Separate held-stream invalid SSE then malformed GET, then genuine good2.
+            state.release_invalid2.set()
+            invalid_initial = wait_for(lambda: physical_reconnect_dom(page, state),
+                                       lambda value: value["connection"] == invalid and value["revision"] == "1",
+                                       "raw 2.0 SSE diagnosis while baseline retained")
+            state.get_release.set()
+            assert state.get_delivered.wait(8)
+            settle_dom(page)
+            after_get = physical_reconnect_dom(page, state)
+            assert after_get["revision"] == "1" and after_get["lifetime"] == "0"
+            assert after_get["history"] == [invalid], after_get
+            assert len(state.connections) == 1 and after_get["streams"][0]["readyState"] == 1
+            state.release_good2.set()
+            recovered2 = wait_for(lambda: physical_reconnect_dom(page, state),
+                                  lambda value: value["revision"] == "2" and value["lifetime"] == "22"
+                                  and value["wire"] == "978" and value["connection"] == accepted,
+                                  "genuine good2 accepted on the still-held stream")
+            assert recovered2["history"] == [invalid, accepted], recovered2
+            assert recovered2["revisionHistory"] == ["2"]
+            assert len(state.connections) == 1 and not state.close_connection1.is_set()
+            result["rawInvalidDelayedGetGood2HeldStream"] = {
+                "rawInvalidBodyHex": state.invalid2_body.hex(),
+                "rawInvalidBodySha256": hashlib.sha256(state.invalid2_body).hexdigest(),
+                "delayedMalformedGetHex": state.get_body.hex(),
+                "baseline": baseline, "invalid": invalid_initial, "afterGet": after_get,
+                "acceptedGood2": recovered2, "physicalStreamHeldOpen": True,
+                "good2AcceptedExactlyOnce": True,
+            }
+
+            # Reject the event ID, then separately close the physical socket through the proxy.
+            state.release_invalid3.set()
+            before_close = wait_for(lambda: physical_reconnect_dom(page, state),
+                                    lambda value: value["connection"] == invalid and value["revision"] == "2",
+                                    "wrong Event Id rejected before physical close")
+            state.close_connection1.set()
+            assert state.connection2_started.wait(10), "native automatic second physical connection"
+
+            def second_open(value: dict[str, Any]) -> bool:
+                events = value["streamEvents"]
+                return (len(value["streams"]) == 1 and value["streams"][0]["index"] == 0
+                        and len(state.connections) == 2 and len(value["streams"]) == 1
+                        and value["streams"][0]["readyState"] == 1
+                        and any(event["type"] == "error" for event in events)
+                        and len([event for event in events if event["type"] == "open"]) >= 2
+                        and events[-1]["type"] == "open"
+                        and value["sentCounts"] == [4, 0]
+                        and value["revisionHistory"] == ["2"])
+
+            before_replacement = wait_for(lambda: physical_reconnect_dom(page, state), second_open,
+                                         "second real open before any replacement frame", timeout=12)
+            # A generic error/open here is the healthy expectation's specific old-bug failure.
+            assert before_replacement["connection"] == invalid, {
+                "expected": invalid, "afterPhysicalErrorOpenBeforeReplacement": before_replacement}
+            assert before_replacement["lifetime"] == "22" and before_replacement["wire"] == "978"
+            assert before_replacement["history"] == [invalid, accepted, invalid], before_replacement
+            assert state.connections[1]["lastEventId"] == state.run_id + ":999"
+            result["diagnosisAcrossSecondPhysicalConnection"] = {
+                "invalidEventIdFrameHex": state.invalid3_wire.hex(), "beforeClose": before_close,
+                "afterErrorOpenBeforeAnyReplacement": before_replacement,
+                "acceptedReplacementPresentBeforeErasureCheck": False,
+                "diagnosticRetainedUntilAcceptedView": True,
+                "sameJavaScriptNativeEventSource": True,
+                "physicalConnections": 2,
+            }
+
+            for label, gate in (("equal2", state.release_equal2),
+                                ("lower1", state.release_lower1),
+                                ("unnamedPureView", state.release_pure)):
+                gate.set()
+                settle_dom(page)
+                ignored = physical_reconnect_dom(page, state)
+                assert ignored["revision"] == "2" and ignored["lifetime"] == "22"
+                assert ignored["wire"] == "978" and ignored["connection"] == invalid
+                assert ignored["revisionHistory"] == ["2"]
+                result[label] = ignored
+            state.release_good3.set()
+            recovered3 = wait_for(lambda: physical_reconnect_dom(page, state),
+                                  lambda value: value["revision"] == "3" and value["lifetime"] == "23"
+                                  and value["wire"] == "977" and value["connection"] == accepted,
+                                  "actual accepted good3 recovery after physical reconnect")
+            assert recovered3["revisionHistory"] == ["2", "3"]
+            assert recovered3["history"] == [invalid, accepted, invalid, accepted], recovered3
+            result["acceptedGood3Recovery"] = recovered3
+
+            # Generic error/open must still work after accepted presentation cleared the flag.
+            state.close_connection2.set()
+            assert state.connection3_started.wait(10)
+            healthy = wait_for(lambda: physical_reconnect_dom(page, state),
+                               lambda value: len(value["physicalConnections"]) == 3
+                               and value["connection"] == opened and value["revision"] == "3"
+                               and value["sentCounts"] == [4, 4, 0],
+                               "healthy reconnect open after accepted presentation", timeout=12)
+            assert healthy["history"][-2:] == [interrupted, opened], healthy
+            assert len(healthy["streams"]) == 1 and healthy["streams"][0]["index"] == 0
+            assert state.connections[2]["lastEventId"] == state.run_id + ":3"
+            state.release_good4.set()
+            healthy4 = wait_for(lambda: physical_reconnect_dom(page, state),
+                                lambda value: value["revision"] == "4" and value["lifetime"] == "24"
+                                and value["wire"] == "976" and value["connection"] == accepted,
+                                "valid good4 accepted on healthy third connection")
+            assert healthy4["history"] == [invalid, accepted, invalid, accepted,
+                                           interrupted, opened, accepted], healthy4
+            assert healthy4["revisionHistory"] == ["2", "3", "4"]
+            assert not state.command_records, "transport fixtures must never be commands/economic credits"
+            backend_after = api.checked_json(client.get()[1])
+            assert backend_after["game"]["lifetime_clips"] == template["game"]["lifetime_clips"]
+            assert backend_after["game"]["wire"] == template["game"]["wire"]
+            assert backend_after["run_id"] == template["run_id"]
+            result["healthyReconnectControl"] = {"beforeGood4": healthy, "acceptedGood4": healthy4}
+            result["physicalConnections"] = state.connections
+            result["acceptedRevisionHistory"] = healthy4["revisionHistory"]
+            assert [item["number"] for item in state.connections] == [1, 2, 3]
+            assert not state.errors, state.errors
+            result["backendResourceAuthority"] = {
+                "fixtureValuesAreNotBackendCredits": True,
+                "forwardedCommands": 0,
+                "lifetimeClips": backend_after["game"]["lifetime_clips"],
+                "wire": backend_after["game"]["wire"],
+            }
+            result["status"] = "pass"
+            result["proxyErrors"] = state.errors
+            state.close_connection3.set()
+            return result
+        finally:
+            if "state" in locals():
+                state.release_all()
+            if browser is not None:
+                browser.close()
+                result["chromeExit"] = browser.process.poll()
+            if proxy is not None:
+                proxy.shutdown()
+                proxy.server_close()
+            if proxy_thread is not None:
+                proxy_thread.join(timeout=5)
+                result["proxyThreadStopped"] = not proxy_thread.is_alive()
+            client.close()
+            if backend is not None:
+                backend.stop()
+                result["backendExit"] = backend.process.poll()
+            out.close()
+            err.close()
+            result["backendStdoutHex"] = (temporary / "backend.stdout").read_bytes().hex()
+            result["backendStderrHex"] = (temporary / "backend.stderr").read_bytes().hex()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("binary", type=Path)
@@ -2244,6 +2638,10 @@ def main() -> int:
     binary = args.binary.resolve()
     startup_result = run_startup_feedback_and_cleanup(binary, executable, version)
     print(f"native UI: first-View feedback and constructor-failure cleanup passed: {startup_result}")
+    physical_result = run_physical_reconnect_lifecycle(binary, executable, version)
+    assert (physical_result["chromeExit"], physical_result["backendExit"],
+            physical_result["proxyThreadStopped"]) == (0, 0, True), physical_result
+    print("NATIVE_R4_PHYSICAL_RECONNECT_EVIDENCE=" + json.dumps(physical_result, separators=(",", ":")))
     response_result = run_r2_response_and_get(binary, executable, version)
     print("NATIVE_R2_RESPONSE_EVIDENCE=" + json.dumps(response_result, separators=(",", ":")))
     lifecycle_result = run_r2_connection_lifecycle(binary, executable, version)
@@ -2291,6 +2689,7 @@ def main() -> int:
                 "startup": startup_result, "main": main_result,
                 "numericOrdering": numeric_result, "recovery": recovery_result,
                 "r3CounterDiagnostic": r3_result,
+                "physicalReconnectLifecycle": physical_result,
                 "durationSeconds": round(time.perf_counter() - started, 3),
             }
             print("NATIVE_UI_BROWSER_SUMMARY=" + json.dumps(summary, separators=(",", ":")))

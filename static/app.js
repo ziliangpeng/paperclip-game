@@ -154,11 +154,15 @@ function connectStream() {
     if (source !== currentSource) return;
     streamToken = synchronizer.openStream();
     initialFrame = true;
-    setConnectionStatus("Live server connection open; receiving complete Views.");
+    if (!invalidViewDiagnostic) {
+      setConnectionStatus("Live server connection open; receiving complete Views.");
+    }
   };
   currentSource.onerror = () => {
     if (source === currentSource) {
-      setConnectionStatus("Live connection interrupted; the browser will reconnect without resetting the game.");
+      if (!invalidViewDiagnostic) {
+        setConnectionStatus("Live connection interrupted; the browser will reconnect without resetting the game.");
+      }
     }
   };
   currentSource.addEventListener("game_view", (event) => {
