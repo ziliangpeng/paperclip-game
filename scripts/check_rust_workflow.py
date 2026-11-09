@@ -681,6 +681,41 @@ def _trigger_list_value(text: str, parent: str, key: str) -> list[str] | None:
     return values if found_parent and found_key else None
 
 
+def _check_rust_triggers(text: str) -> list[Finding]:
+    findings: list[Finding] = []
+    trigger_lines = _trigger_lines(text)
+    if trigger_lines is None:
+        return [Finding("workflow-rust-trigger-contract", "Rust document must contain exactly one top-level on block")]
+    current_trigger: str | None = None
+    trigger_names: list[str] = []
+    allowed_nested = {
+        "pull_request": set(),
+        "push": {"branches"},
+        "workflow_dispatch": set(),
+    }
+    for line in trigger_lines:
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        root = re.fullmatch(r"  ([A-Za-z0-9_-]+):", line)
+        if root:
+            current_trigger = root.group(1)
+            trigger_names.append(current_trigger)
+            continue
+        nested = re.fullmatch(r"    ([A-Za-z0-9_-]+):", line)
+        if nested:
+            if current_trigger not in allowed_nested or nested.group(1) not in allowed_nested[current_trigger]:
+                findings.append(Finding("workflow-rust-trigger-contract", f"unsupported Rust trigger metadata {nested.group(1)}"))
+            continue
+        if re.fullmatch(r"      - .+", line) and current_trigger != "workflow_dispatch":
+            continue
+        findings.append(Finding("workflow-rust-trigger-contract", "unsupported Rust trigger structure"))
+    if trigger_names != ["pull_request", "push", "workflow_dispatch"]:
+        findings.append(Finding("workflow-rust-trigger-contract", "Rust triggers must be exactly pull_request, push, and workflow_dispatch"))
+    if _trigger_list_value(text, "push", "branches") != ["main"]:
+        findings.append(Finding("workflow-rust-trigger-contract", "push must target exactly the main branch through branches"))
+    return findings
+
+
 def _check_controls_document(text: str) -> list[Finding]:
     findings = _check_job_contract(text, job_id="controls")
     trigger_lines = _trigger_lines(text)
@@ -756,6 +791,7 @@ def check_controls_path(path: Path) -> int:
 
 def validate_document(text: str) -> list[Finding]:
     findings: list[Finding] = _check_job_contract(text)
+    findings.extend(_check_rust_triggers(text))
     permissions = _permissions(text)
     if permissions is None or permissions.get("contents") != "read" or any(
         value not in {"read", "none"} for value in permissions.values()
@@ -1087,6 +1123,25 @@ def _base_mutations(healthy: str) -> list[tuple[str, str, str]]:
         "      - name: Check out the triggering revision\n        shell: bash\n        uses:",
         "workflow-step-contract",
     )
+    trigger_code = "workflow-rust-trigger-contract"
+    add("trigger-remove-pull-request", "  pull_request:\n", "", trigger_code)
+    add("trigger-push-staging-only", "      - main\n", "      - staging\n", trigger_code)
+    add("trigger-remove-push", "  push:\n    branches:\n      - main\n", "", trigger_code)
+    add("trigger-remove-dispatch", "  workflow_dispatch:\n", "", trigger_code)
+    add("trigger-pr-path-limit", "  pull_request:\n", "  pull_request:\n    paths:\n      - README.md\n", trigger_code)
+    add("trigger-pr-branch-limit", "  pull_request:\n", "  pull_request:\n    branches:\n      - main\n", trigger_code)
+    add("trigger-extra-schedule", "  workflow_dispatch:\n", "  workflow_dispatch:\n  schedule:\n    - cron: '0 0 * * *'\n", trigger_code)
+    add("trigger-push-extra-branch", "      - main\n", "      - main\n      - staging\n", trigger_code)
+    add("trigger-extra-release", "  workflow_dispatch:\n", "  release:\n    types:\n      - published\n  workflow_dispatch:\n", trigger_code)
+    add("trigger-duplicate-pull-request", "  pull_request:\n", "  pull_request:\n  pull_request:\n", trigger_code)
+    add("trigger-push-tags", "    branches:\n      - main\n", "    branches:\n      - main\n    tags:\n      - v1.0.0\n", trigger_code)
+    add("trigger-push-paths", "    branches:\n      - main\n", "    branches:\n      - main\n    paths:\n      - '*.rs'\n", trigger_code)
+    add("trigger-duplicate-push-branches", "    branches:\n      - main\n", "    branches:\n      - main\n    branches:\n      - main\n", trigger_code)
+    add("trigger-pr-types", "  pull_request:\n", "  pull_request:\n    types:\n      - opened\n", trigger_code)
+    add("trigger-dispatch-inputs", "  workflow_dispatch:\n\npermissions:", "  workflow_dispatch:\n    inputs:\n      reason:\n        required: false\n\npermissions:", trigger_code)
+    on_block = "on:\n  pull_request:\n  push:\n    branches:\n      - main\n  workflow_dispatch:\n"
+    add("trigger-duplicate-top-level-on", on_block, on_block + "\n" + on_block, trigger_code)
+    add("trigger-missing-on", on_block, "", trigger_code)
     return cases
 
 
@@ -1563,6 +1618,17 @@ def _static_self_test(script: Path, workflow: Path, root: Path) -> tuple[int, li
     )
     fixtures = [
         ("healthy-workflow", healthy, 0, None),
+        ("healthy-trigger-comment", _replace_once(healthy, "on:\n", "on:\n  # Keep the required native PR, main, and manual triggers.\n"), 0, None),
+        (
+            "healthy-trigger-whitespace-and-root-comment",
+            _replace_once(
+                _replace_once(healthy, "on:\n", "on:\n\n"),
+                "  workflow_dispatch:\n\npermissions:",
+                "  workflow_dispatch:\n# schedule: comment only, not a trigger\n\npermissions:",
+            ),
+            0,
+            None,
+        ),
         ("healthy-job-comment", _replace_once(healthy, "  rust:\n", "  rust:\n    # if: ${{ false }}\n"), 0, None),
         ("healthy-jobs-list-comment-colon", _replace_once(healthy, "jobs:\n", "jobs:\n  # if:\n"), 0, None),
         ("healthy-jobs-list-helper-comment-colon", _replace_once(healthy, "jobs:\n", "jobs:\n  # helper:\n"), 0, None),
@@ -1642,6 +1708,23 @@ def _static_self_test(script: Path, workflow: Path, root: Path) -> tuple[int, li
         "bootstrap-duplicate-rustup": "stable Rust setup must appear exactly once",
         "bootstrap-custom-noop-shell": "cannot hide stable Rust setup",
         "shell-on-action-step": "only on run steps",
+        "trigger-remove-pull-request": "exactly pull_request",
+        "trigger-remove-push": "exactly pull_request",
+        "trigger-remove-dispatch": "exactly pull_request",
+        "trigger-extra-schedule": "exactly pull_request",
+        "trigger-extra-release": "exactly pull_request",
+        "trigger-duplicate-pull-request": "exactly pull_request",
+        "trigger-push-staging-only": "exactly the main branch",
+        "trigger-push-extra-branch": "exactly the main branch",
+        "trigger-duplicate-push-branches": "exactly the main branch",
+        "trigger-pr-path-limit": "metadata paths",
+        "trigger-pr-branch-limit": "metadata branches",
+        "trigger-pr-types": "metadata types",
+        "trigger-push-tags": "metadata tags",
+        "trigger-push-paths": "metadata paths",
+        "trigger-dispatch-inputs": "metadata inputs",
+        "trigger-duplicate-top-level-on": "exactly one top-level on block",
+        "trigger-missing-on": "exactly one top-level on block",
     }
     expected_auxiliary_codes = {
         "step-cargo-custom-noop-shell": ["workflow-step-contract"],
