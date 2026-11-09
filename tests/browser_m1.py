@@ -1658,7 +1658,7 @@ def run_autoclipper_native_evidence(binary: Path, executable: str, version: str)
             Decimal(view["game"]["funds"]) >= Decimal("26"),
             "legal sales fund the first Wire spool after reveal", timeout=120)["game"]
         first_wire = press(page1, "buy_wire")
-        first_wire_after = wait_for(current, lambda view: int(view["game"]["wire"]) >= 900,
+        first_wire_after = wait_for(current, lambda view: Decimal(view["game"]["wire"]) >= Decimal("900"),
                                     "first legal post-reveal spool")["game"]
         wire_charge = (Decimal(first_wire_before["funds"]) + Decimal(first_wire_after["income"]) -
                        Decimal(first_wire_before["income"]) - Decimal(first_wire_after["funds"]))
@@ -1706,6 +1706,8 @@ def run_autoclipper_native_evidence(binary: Path, executable: str, version: str)
             if Decimal(commerce["funds"]) >= Decimal("100"):
                 break
             available_wire = int(Decimal(commerce["wire"]))
+            # This exact decimal-derived count is only the maximum whole
+            # one-Wire Make commands; sub-one stock grants no manual clip.
             if available_wire > 0:
                 for index in range(available_wire):
                     status, body = agent.make(f"g03-more-{wire_purchases}-{index}")
