@@ -1,0 +1,51 @@
+:root {
+  color-scheme: light;
+  font-family: Arial, Helvetica, sans-serif;
+  color: #000;
+  background: #fff;
+  line-height: 1.45;
+}
+
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+body { max-width: 64rem; margin: 0 auto; padding: 1rem; background: #fff; }
+.skip-link { position: absolute; left: -10000px; top: 0; background: #fff; padding: .75rem; }
+.skip-link:focus { left: 0; z-index: 1; }
+a { color: #000; text-decoration-thickness: .12em; text-underline-offset: .18em; }
+a:focus-visible, button:focus-visible, main:focus-visible { outline: 3px solid #000; outline-offset: 3px; }
+.masthead { border-bottom: 2px solid #000; }
+.game-title { font-size: 1.1rem; font-weight: bold; margin-bottom: .25rem; }
+h1 { font-size: 1.75rem; font-weight: normal; margin-top: 0; overflow-wrap: anywhere; }
+h2 { font-size: 1.3rem; border-bottom: 1px solid #000; padding-bottom: .25rem; }
+h3 { font-size: 1.1rem; }
+nav { display: flex; flex-wrap: wrap; gap: 1.25rem; padding: .8rem 0; }
+main, footer { display: block; }
+section { margin: 1.5rem 0; }
+button {
+  appearance: auto;
+  min-height: 2.75rem;
+  padding: .5rem .9rem;
+  border: 2px solid #000;
+  border-radius: 0;
+  color: #000;
+  background: #fff;
+  font: inherit;
+  font-weight: bold;
+  cursor: pointer;
+}
+button:hover { background: #eee; }
+button:disabled { border-style: dashed; cursor: wait; color: #000; background: #eee; }
+.command-status { max-width: 60rem; padding: .55rem; border-left: 4px solid #000; }
+.command-status[data-kind="error"] { border-left-width: 8px; font-weight: bold; }
+.amount { font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+table { width: 100%; max-width: 42rem; border-collapse: collapse; margin: .75rem 0; }
+caption { text-align: left; font-weight: bold; padding: .35rem 0; }
+th, td { border-bottom: 1px solid #000; padding: .45rem .35rem; text-align: left; vertical-align: top; }
+td { width: 55%; overflow-wrap: anywhere; }
+footer { border-top: 1px solid #000; margin-top: 2rem; font-size: .95rem; }
+@media (max-width: 36rem) {
+  body { padding: .75rem; }
+  th, td { display: block; width: 100%; }
+  td { border-bottom: 0; padding-top: 0; }
+  tr { display: block; border-bottom: 1px solid #000; margin-bottom: .6rem; }
+}

@@ -1,6 +1,22 @@
 // Full-view browser synchronization for the default authoritative game.
 // Amount authority and display never pass through Number or parseFloat.
 
+// The same source check is used by command, HTTP and native SSE consumers.
+// The command boundary supplies its private validation type; stream.js remains
+// self-contained for the standalone native-stream harness.
+const JSON_INTEGER_SOURCE = /^-?(?:0|[1-9][0-9]*)$/;
+
+export function parseTransportJson(text, ValidationError = TypeError) {
+  return JSON.parse(text, (_key, value, context) => {
+    if (typeof value !== "number") return value;
+    if (!context || typeof context.source !== "string" ||
+        !JSON_INTEGER_SOURCE.test(context.source.trim()) || !Number.isSafeInteger(value)) {
+      throw new ValidationError("invalid JSON integer response");
+    }
+    return value;
+  });
+}
+
 const VIEW_FIELDS = ["clock", "game", "revision", "run_id", "schema_version"];
 const CLOCK_FIELDS = [
   "combat_pulses", "combat_remainder_nanos", "fast_phase", "second_phase",

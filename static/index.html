@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en" data-view-state="loading">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Universal Paperclips</title>
+  <link rel="stylesheet" href="/static/styles.css">
+  <script type="module" src="/static/app.js"></script>
+</head>
+<body>
+  <a class="skip-link" href="#main-content">Skip to game controls</a>
+  <header class="masthead">
+    <p class="game-title">Universal Paperclips</p>
+    <h1>Paperclips: <data id="lifetime-clips" class="amount" value="">Waiting for server</data></h1>
+  </header>
+  <nav aria-label="Game sections">
+    <a href="#production">Production</a>
+    <a href="#business">Business</a>
+    <a href="#manufacturing">Manufacturing</a>
+  </nav>
+  <main id="main-content" tabindex="-1">
+    <section id="production" aria-labelledby="production-heading">
+      <h2 id="production-heading">Paperclip production</h2>
+      <form id="command-form">
+        <button id="make-paperclip" type="submit">Make Paperclip</button>
+      </form>
+      <p id="make-help">Ask the server to convert one inch of Wire into one paperclip. Enter and Space activate the focused button.</p>
+      <p id="command-status" class="command-status" role="status" aria-live="polite" aria-atomic="true">Loading the current server View.</p>
+      <p id="connection-status">Connecting to the shared game.</p>
+
+      <h3>Clip ledgers</h3>
+      <table>
+        <caption>Current server-reported clips</caption>
+        <tbody>
+          <tr><th scope="row">Unsold Inventory</th><td><data id="unsold-clips" class="amount" value="">Waiting for server</data></td></tr>
+          <tr><th scope="row">Unused Clips</th><td><data id="unused-clips" class="amount" value="">Waiting for server</data></td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="business" aria-labelledby="business-heading">
+      <h2 id="business-heading">Business</h2>
+      <table>
+        <caption>Current business readouts</caption>
+        <tbody>
+          <tr><th scope="row">Available Funds</th><td>$<data id="funds" class="amount currency" value="">Waiting for server</data></td></tr>
+          <tr><th scope="row">Price per Clip</th><td>$<data id="price-per-clip" class="amount currency" value="">Waiting for server</data></td></tr>
+          <tr><th scope="row">Marketing Level</th><td><data id="marketing-level" class="amount" value="">Waiting for server</data></td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="manufacturing" aria-labelledby="manufacturing-heading">
+      <h2 id="manufacturing-heading">Manufacturing</h2>
+      <table>
+        <caption>Current Wire readouts</caption>
+        <tbody>
+          <tr><th scope="row">Wire (inches)</th><td><data id="wire" class="amount" value="">Waiting for server</data></td></tr>
+          <tr><th scope="row">Wire spool length</th><td><data id="wire-spool-length" class="amount" value="">Waiting for server</data></td></tr>
+          <tr><th scope="row">Current Wire quote</th><td>$<data id="wire-quote" class="amount currency" value="">Waiting for server</data></td></tr>
+        </tbody>
+      </table>
+      <section id="auto-clippers-panel" aria-labelledby="auto-clippers-heading" hidden>
+        <h3 id="auto-clippers-heading">AutoClippers</h3>
+        <table>
+          <caption>Current server-reported AutoClipper state</caption>
+          <tbody>
+            <tr><th scope="row">AutoClippers</th><td><data id="auto-clippers" class="amount" value="">Waiting for server</data></td></tr>
+            <tr><th scope="row">Current cost</th><td>$<data id="auto-clipper-cost" class="amount currency" value="">Waiting for server</data></td></tr>
+          </tbody>
+        </table>
+      </section>
+    </section>
+
+    <section id="computational-resources" aria-labelledby="computing-heading" hidden>
+      <h2 id="computing-heading">Computational Resources</h2>
+      <table>
+        <caption>Current computational readouts</caption>
+        <tbody>
+          <tr><th scope="row">Trust</th><td><data id="trust" class="amount" value="">Waiting for server</data></td></tr>
+          <tr><th scope="row">Processors</th><td><data id="processors" class="amount" value="">Waiting for server</data></td></tr>
+          <tr><th scope="row">Memory</th><td><data id="memory" class="amount" value="">Waiting for server</data></td></tr>
+        </tbody>
+      </table>
+    </section>
+  </main>
+  <footer>
+    <p>This page shares the default game with other browsers and Agents. No login, role, world selection, or new-game action is needed.</p>
+  </footer>
+</body>
+</html>

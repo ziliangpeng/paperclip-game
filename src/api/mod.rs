@@ -1,5 +1,6 @@
 //! Axum transport for the authoritative runtime.
 
+mod assets;
 mod commands;
 mod health;
 mod stream;
@@ -47,6 +48,11 @@ impl ApiState {
 
 fn router_with_state(state: ApiState) -> Router {
     Router::new()
+        .route("/", get(assets::index))
+        .route("/static/styles.css", get(assets::styles))
+        .route("/static/app.js", get(assets::app))
+        .route("/static/view-model.js", get(assets::view_model))
+        .route("/static/commands.js", get(assets::commands))
         .route("/api/game/view", get(get_view))
         .route("/api/game/stream", get(stream::get_stream))
         .route("/static/stream.js", get(stream::browser_synchronizer))
