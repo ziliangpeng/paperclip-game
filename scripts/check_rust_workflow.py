@@ -206,6 +206,33 @@ def _permissions(text: str) -> dict[str, str] | None:
     return result
 
 
+def _check_root_metadata_contract(text: str) -> list[Finding]:
+    """Apply the two bounded root-metadata contracts shared by both workflows."""
+    root_keys: list[str] = []
+    for line in text.splitlines():
+        if not line or line[0].isspace() or line.startswith("#"):
+            continue
+        parts = _metadata_parts(line)
+        if parts is None:
+            spaced_key = re.match(r"""^((?:defaults|permissions|"defaults"|"permissions"|'defaults'|'permissions'))\s+:""", line)
+            if spaced_key:
+                parts = _metadata_parts(spaced_key.group(1) + ":" + line[spaced_key.end():])
+        if parts is not None:
+            root_keys.append(parts[0])
+    findings: list[Finding] = []
+    if "defaults" in root_keys:
+        findings.append(Finding(
+            "workflow-default-shell",
+            "unsupported top-level defaults, including defaults.run.shell; use only supported per-step bash/sh",
+        ))
+    if root_keys.count("permissions") > 1:
+        findings.append(Finding(
+            "workflow-permissions",
+            "duplicate top-level permissions blocks; declare exactly one read-only permissions mapping",
+        ))
+    return findings
+
+
 def _shell_tokens(line: str) -> list[str]:
     lexer = shlex.shlex(line, posix=True, punctuation_chars=";&|")
     lexer.whitespace_split = True
@@ -687,6 +714,7 @@ def _check_rust_triggers(text: str) -> list[Finding]:
     if trigger_lines is None:
         return [Finding("workflow-rust-trigger-contract", "Rust document must contain exactly one top-level on block")]
     current_trigger: str | None = None
+    current_field: str | None = None
     trigger_names: list[str] = []
     allowed_nested = {
         "pull_request": set(),
@@ -699,16 +727,18 @@ def _check_rust_triggers(text: str) -> list[Finding]:
         root = re.fullmatch(r"  ([A-Za-z0-9_-]+):", line)
         if root:
             current_trigger = root.group(1)
+            current_field = None
             trigger_names.append(current_trigger)
             continue
         nested = re.fullmatch(r"    ([A-Za-z0-9_-]+):", line)
         if nested:
+            current_field = nested.group(1)
             if current_trigger not in allowed_nested or nested.group(1) not in allowed_nested[current_trigger]:
                 findings.append(Finding("workflow-rust-trigger-contract", f"unsupported Rust trigger metadata {nested.group(1)}"))
             continue
-        if re.fullmatch(r"      - .+", line) and current_trigger != "workflow_dispatch":
+        if re.fullmatch(r"      - .+", line) and current_trigger == "push" and current_field == "branches":
             continue
-        findings.append(Finding("workflow-rust-trigger-contract", "unsupported Rust trigger structure"))
+        findings.append(Finding("workflow-rust-trigger-contract", "unsupported Rust trigger structure; sequence entries are only allowed under push.branches"))
     if trigger_names != ["pull_request", "push", "workflow_dispatch"]:
         findings.append(Finding("workflow-rust-trigger-contract", "Rust triggers must be exactly pull_request, push, and workflow_dispatch"))
     if _trigger_list_value(text, "push", "branches") != ["main"]:
@@ -717,7 +747,8 @@ def _check_rust_triggers(text: str) -> list[Finding]:
 
 
 def _check_controls_document(text: str) -> list[Finding]:
-    findings = _check_job_contract(text, job_id="controls")
+    findings = _check_root_metadata_contract(text)
+    findings.extend(_check_job_contract(text, job_id="controls"))
     trigger_lines = _trigger_lines(text)
     if trigger_lines is None:
         findings.append(Finding("workflow-controls-contract", "controls document must contain exactly one top-level on block"))
@@ -790,7 +821,8 @@ def check_controls_path(path: Path) -> int:
 
 
 def validate_document(text: str) -> list[Finding]:
-    findings: list[Finding] = _check_job_contract(text)
+    findings: list[Finding] = _check_root_metadata_contract(text)
+    findings.extend(_check_job_contract(text))
     findings.extend(_check_rust_triggers(text))
     permissions = _permissions(text)
     if permissions is None or permissions.get("contents") != "read" or any(
@@ -1142,6 +1174,39 @@ def _base_mutations(healthy: str) -> list[tuple[str, str, str]]:
     on_block = "on:\n  pull_request:\n  push:\n    branches:\n      - main\n  workflow_dispatch:\n"
     add("trigger-duplicate-top-level-on", on_block, on_block + "\n" + on_block, trigger_code)
     add("trigger-missing-on", on_block, "", trigger_code)
+    cases.extend([
+        (
+            "global-default-noop-shell",
+            healthy + "\ndefaults:\n  run:\n    shell: bash -c 'exit 0' {0}\n",
+            "workflow-default-shell",
+        ),
+        (
+            "global-default-bash-shell",
+            healthy + "\ndefaults:\n  run:\n    shell: bash\n",
+            "workflow-default-shell",
+        ),
+        (
+            "global-default-inline-mapping",
+            healthy + '\n"defaults": {"run": {"shell": "bash"}}\n',
+            "workflow-default-shell",
+        ),
+        (
+            "permissions-duplicate-write",
+            healthy + "\npermissions:\n  contents: write\n",
+            "workflow-permissions",
+        ),
+        (
+            "permissions-duplicate-read",
+            healthy + "\npermissions:\n  contents: read\n",
+            "workflow-permissions",
+        ),
+    ])
+    add("trigger-pr-direct-event-sequence", "  pull_request:\n", "  pull_request:\n      - opened\n", trigger_code)
+    cases.append((
+        "global-default-spaced-key",
+        healthy + "\ndefaults :\n  run:\n    shell: bash -c 'exit 0' {0}\n",
+        "workflow-default-shell",
+    ))
     return cases
 
 
@@ -1528,6 +1593,24 @@ def _controls_fixtures(healthy: str) -> list[dict[str, object]]:
         "workflow-action-contract",
         "precede every run step",
     ))
+    fixtures.append(case(
+        "controls-global-default-noop-shell",
+        healthy + "\ndefaults:\n  run:\n    shell: true {0}\n",
+        "workflow-default-shell",
+        "top-level defaults",
+    ))
+    fixtures.append(case(
+        "controls-permissions-duplicate-read",
+        healthy + "\npermissions:\n  contents: read\n",
+        "workflow-permissions",
+        "duplicate top-level permissions",
+    ))
+    fixtures.append(case(
+        "controls-permissions-spaced-duplicate",
+        healthy + '\n"permissions" : {"contents": "write"}\n',
+        "workflow-permissions",
+        "duplicate top-level permissions",
+    ))
     return fixtures
 
 
@@ -1725,6 +1808,13 @@ def _static_self_test(script: Path, workflow: Path, root: Path) -> tuple[int, li
         "trigger-dispatch-inputs": "metadata inputs",
         "trigger-duplicate-top-level-on": "exactly one top-level on block",
         "trigger-missing-on": "exactly one top-level on block",
+        "global-default-noop-shell": "top-level defaults",
+        "global-default-bash-shell": "top-level defaults",
+        "global-default-inline-mapping": "top-level defaults",
+        "global-default-spaced-key": "top-level defaults",
+        "permissions-duplicate-write": "duplicate top-level permissions",
+        "permissions-duplicate-read": "duplicate top-level permissions",
+        "trigger-pr-direct-event-sequence": "unsupported Rust trigger structure",
     }
     expected_auxiliary_codes = {
         "step-cargo-custom-noop-shell": ["workflow-step-contract"],
