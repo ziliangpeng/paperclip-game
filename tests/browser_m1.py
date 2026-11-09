@@ -1513,12 +1513,30 @@ def run_autoclipper_native_evidence(binary: Path, executable: str, version: str)
         state: ProxyState = case["state"]
         agent: api.Client = case["client"]
         database: Path = case["database"]
+        # Bind this same public run to the exact canonical M1 entry. The normal
+        # initial V3 row is read-only evidence, never a state injection.
+        entry_stored = stored.read_snapshot(database)
+        assert entry_stored["revision"] == 0 and entry_stored["sequence"] == 0
+        assert all(value == 0 for value in entry_stored["clock"].values())
+        assert entry_stored["pro"]["wire_base_price"] == "20"
+        assert entry_stored["pro"]["wire_price_counter"] == 0
+        assert entry_stored["pro"]["wire_purchase_count"] == 0
+        assert entry_stored["pro"]["wire_inactivity_ticks"] == 0
+        assert entry_stored["pro"]["marketing_effectiveness"] == "1"
+        assert entry_stored["pro"]["demand_boost"] == "1"
+        assert entry_stored["pro"]["prestige_u"] == "0"
+        assert entry_stored["pro"]["auto_clipper_production_accumulator"] == "0"
+        entry_game = stored.assert_stored_pro(entry_stored["pro"])
+        entry_game["marketing_cost"] = "100"
+        api.assert_production({"game": entry_game}, "1000", "0")
+
         page1, context1, target1 = browser.new_page("/")
         page2, context2, target2 = browser.new_page("/")
         assert context1 != context2
         started = clock.monotonic()
         labels = {"buy_auto_clipper": "Buy AutoClipper", "buy_wire": "Buy Wire",
-                  "buy_marketing": "Buy Marketing"}
+                  "buy_marketing": "Buy Marketing", "lower_price": "Lower Price",
+                  "raise_price": "Raise Price"}
 
         def current() -> dict[str, Any]:
             return api.checked_json(agent.get()[1])
@@ -1572,6 +1590,9 @@ def run_autoclipper_native_evidence(binary: Path, executable: str, version: str)
         both(lambda value: value.get("viewState") == "ready" and value["autoClippersHidden"] and
              value["autoClippers"] == "0" and value["autoClipperCost"] == "5",
              "fresh hidden AutoClippers on two pages")
+        # Browser startup may allow real online Wire-quote movement. No other M1
+        # entry field may move before the first legal player command.
+        assert_only_wire_quote_can_advance(current()["game"], copy.deepcopy(entry_game))
         for index in range(1000):
             status, body = agent.make(f"g03-manual-{index}")
             assert status == 200 and api.checked_json(body)["status"] == "applied"
@@ -1633,7 +1654,7 @@ def run_autoclipper_native_evidence(binary: Path, executable: str, version: str)
         assert after_second["auto_clipper_cost"] == "6.21"
         assert (Decimal(before_rejection["funds"]) <
                 Decimal(before_rejection["auto_clipper_cost"])), before_rejection
-        press(page2, "buy_auto_clipper", 422)
+        below_cost_rejection = press(page2, "buy_auto_clipper", 422)
         after_rejection = current()["game"]
         assert after_rejection["auto_clippers"] == "2"
         assert after_rejection["auto_clipper_cost"] == "6.21"
@@ -1659,6 +1680,24 @@ def run_autoclipper_native_evidence(binary: Path, executable: str, version: str)
         assert replay["response_body"] == first["response_body"]
         post_replay = current()["game"]
         assert post_replay["auto_clippers"] == "2" and post_replay["auto_clipper_cost"] == "6.21"
+
+        # Issue17 integrated exit: real native Price commands also occur after
+        # reveal. Restore the proven working price before subsequent procurement.
+        post_reveal_lower = press(page1, "lower_price")
+        post_reveal_lower_view = wait_for(current, lambda view:
+            view["game"]["price_per_clip"] == "0.03", "post-reveal native lower Price")
+        assert post_reveal_lower_view["game"]["auto_clipper_cost"] == "6.21"
+        both(lambda value: value["price"] == "0.03" and
+             value["demand"] == post_reveal_lower_view["game"]["demand"] and
+             value["autoClippers"] == "2" and value["autoClipperCost"] == "6.21",
+             "post-reveal lower Price and exact Demand on both server-fed pages")
+        post_reveal_raise = press(page2, "raise_price")
+        post_reveal_raise_view = wait_for(current, lambda view:
+            view["game"]["price_per_clip"] == "0.04", "post-reveal native raise Price")
+        assert post_reveal_raise_view["game"]["demand"] == "20"
+        both(lambda value: value["price"] == "0.04" and value["demand"] == "20" and
+             value["autoClippers"] == "2" and value["autoClipperCost"] == "6.21",
+             "working Price restored through the other anonymous page")
 
         first_wire_before = wait_for(current, lambda view:
             Decimal(view["game"]["funds"]) >= Decimal("26"),
@@ -1769,19 +1808,49 @@ def run_autoclipper_native_evidence(binary: Path, executable: str, version: str)
              len(value["consoleMessages"]) == 5,
              "G03 five-line console and shared Marketing/AutoClipper state")
 
-        # A real ordinary stop captures the final coherent writer View. Read its
-        # private SQLite row for recovery evidence only, never to alter state.
-        old_run = current()["run_id"]
+        # Issue17 AC4: commit a genuine M1 world, then accept a later legal
+        # command which is deliberately not saved before a real SIGKILL.
+        marketing_revision = marketing["response_body"]["revision"]
+        commit_sequence_before_wait = api.assert_ready(agent)["last_committed_sequence"]
+        assert commit_sequence_before_wait is not None
+        committed_health = stored.wait_for_health(
+            agent, 200, 40,
+            lambda health: health["last_committed_revision"] is not None and
+            health["last_committed_revision"] >= marketing_revision and
+            health["last_committed_sequence"] is not None and
+            health["last_committed_sequence"] > commit_sequence_before_wait)
+        assert committed_health["last_committed_sequence"] is not None
+        unsaved_lower = press(page1, "lower_price")
+        unsaved_revision = unsaved_lower["response_body"]["revision"]
+        assert unsaved_revision > committed_health["last_committed_revision"]
+        pre_crash = current()
+        assert pre_crash["game"]["price_per_clip"] == "0.03"
+        assert pre_crash["game"]["marketing_level"] == "2"
+        assert pre_crash["revision"] >= unsaved_revision
+        old_run = pre_crash["run_id"]
         agent.close()
         old_backend = case["backendOwner"]
-        old_backend.stop()
+        old_backend.force_stop()
+        crash_exit = old_backend.process.poll()
+        assert crash_exit != 0, "owned server really crashed without graceful final save"
+
+        # Read only the last committed V3 row after the process is dead. No
+        # pre-crash state write or snapshot edit participates in this test.
         saved = stored.read_snapshot(database)
+        assert saved["revision"] < unsaved_revision
+        assert saved["revision"] < pre_crash["revision"]
         assert saved["pro"]["auto_clippers"] == "2"
         assert saved["pro"]["auto_clipper_cost"] == "6.21"
         assert saved["pro"]["auto_clipper_revealed"] is True
+        assert saved["pro"]["marketing_level"] == "2"
+        assert saved["pro"]["price_per_clip"] == "0.04"
+        assert Decimal("0") <= Decimal(saved["pro"]["auto_clipper_rate"]) <= Decimal("2")
         assert len(saved["pro"]["console_messages"]) == 5
 
-        clock.sleep(0.2)  # Real process downtime; no logical clock should backfill it.
+        downtime_started = clock.monotonic()
+        clock.sleep(1.2)  # Bounded real downtime; no logical clock may backfill it.
+        downtime_seconds = clock.monotonic() - downtime_started
+        restart_started = clock.monotonic()
         new_out = (case["temporary"] / "g03-restart.stdout").open("wb")
         new_err = (case["temporary"] / "g03-restart.stderr").open("wb")
         with new_out, new_err:
@@ -1791,9 +1860,14 @@ def run_autoclipper_native_evidence(binary: Path, executable: str, version: str)
         case["backendProcess"] = replacement.process
         agent = api.Client(case["port"])
         recovered = current()
+        restart_observation_seconds = clock.monotonic() - restart_started
         update_delta = recovered["clock"]["update_count"] - saved["clock"]["update_count"]
         assert update_delta >= 0
         assert update_delta <= 5_000, "bounded recovered online-tick reference"
+        # The real downtime exceeds a second and cannot be counted among updates
+        # observed since this restart began. Auto production below checks exact continuation.
+        assert Decimal(update_delta) * Decimal("0.01") <= Decimal(str(restart_observation_seconds)) + Decimal("0.25")
+
         # Replay only online updates after restoration. The stored partial second
         # continues exactly, and each ordinary G01 Wire gate/request is observed.
         expected_lifetime = Decimal(saved["pro"]["lifetime_clips"])
@@ -1808,7 +1882,6 @@ def run_autoclipper_native_evidence(binary: Path, executable: str, version: str)
             expected_lifetime += actual
             expected_wire -= actual
             expected_accumulator += actual
-            current_update = saved["clock"]["update_count"] + tick_offset - 1
             if (saved["clock"]["update_count"] + tick_offset) % 100 == 0:
                 expected_rate = expected_accumulator
                 expected_accumulator = Decimal("0")
@@ -1820,17 +1893,51 @@ def run_autoclipper_native_evidence(binary: Path, executable: str, version: str)
         assert recovered["game"]["auto_clippers"] == "2"
         assert recovered["game"]["auto_clipper_cost"] == "6.21"
         assert recovered["game"]["auto_clipper_revealed"] is True
+        assert recovered["game"]["price_per_clip"] == saved["pro"]["price_per_clip"] == "0.04"
+        assert recovered["game"]["marketing_level"] == saved["pro"]["marketing_level"] == "2"
         both(lambda value: value["runId"] == recovered["run_id"] and value["autoClippers"] == "2" and
-             value["autoClipperCost"] == "6.21" and value["consoleMessages"] == saved["pro"]["console_messages"],
-             "new-run browser resync restores exact AutoClipper fields without level-zero recomputation")
+             value["autoClipperCost"] == "6.21" and value["price"] == "0.04" and
+             value["marketingLevel"] == "2" and
+             value["consoleMessages"] == saved["pro"]["console_messages"],
+             "new-run browser resync adopts the last committed M1 View, not the unsaved command")
         agent.close()
 
+        # A later ordinary stop is only a readback device for exact RNG/timer
+        # continuation; it does not replace the SIGKILL recovery proof above.
+        replacement.stop()
+        recovered_saved = stored.read_snapshot(database)
+        recovery_phases = stored.fast_phases_between(saved, recovered_saved)
+        stored.assert_rng_continuation(saved["rng_state"], recovered_saved["rng_state"], recovery_phases)
+        assert recovered_saved["pro"]["auto_clippers"] == "2"
+        assert recovered_saved["pro"]["auto_clipper_cost"] == "6.21"
+        assert recovered_saved["pro"]["auto_clipper_revealed"] is True
+        assert recovered_saved["pro"]["marketing_level"] == "2"
+        assert recovered_saved["pro"]["price_per_clip"] == "0.04"
+
+        def typed_receipt(record: dict[str, Any], kind: str) -> dict[str, Any]:
+            return {"command": exact_command(record, kind),
+                    "httpStatus": record["response_status"],
+                    "response": record["response_body"]}
+
         result = {
+            "m1PlayableIntegration": "current M1 prefix only; no M2/full-game claim",
+            "canonicalM1Entry": entry_game,
+            "entrySnapshotRevision": entry_stored["revision"],
             "freshLegalManualCommands": 1000,
             "firstRevealBeforeSuccessfulWireOrMarketing": True,
             "preRevealWirePurchases": 0,
             "preRevealMarketingLevel": "1",
             "firstFundsObserved": first_crossing["game"]["funds"],
+            "firstRevealPublicView": first_crossing,
+            "typedM1Receipts": {
+                "firstAutoClipper": typed_receipt(first, "buy_auto_clipper"),
+                "secondAutoClipper": typed_receipt(second, "buy_auto_clipper"),
+                "belowCostRejection": typed_receipt(below_cost_rejection, "buy_auto_clipper"),
+                "postRevealLowerPrice": typed_receipt(post_reveal_lower, "lower_price"),
+                "postRevealRaisePrice": typed_receipt(post_reveal_raise, "raise_price"),
+                "firstReplacementWire": typed_receipt(first_wire, "buy_wire"),
+                "initialMarketing": typed_receipt(marketing, "buy_marketing"),
+                "unsavedPostCommitLowerPrice": typed_receipt(unsaved_lower, "lower_price")},
             "firstCharge": str(charge), "firstStoredSuccessor": after["auto_clipper_cost"],
             "firstReceiptRevision": first["response_body"]["revision"],
             "belowCurrentCostRejected": True,
@@ -1842,6 +1949,14 @@ def run_autoclipper_native_evidence(binary: Path, executable: str, version: str)
             "secondReceiptRevision": second["response_body"]["revision"],
             "firstTerminalUuidReplay": "original bytes/revision, no third producer",
             "twoAnonymousPagesAndCanonicalCostDisplay": "6.1 stored / 6.10 shown; 6.21 unchanged",
+            "postRevealPriceActions": {
+                "lowerReceiptRevision": post_reveal_lower["response_body"]["revision"],
+                "lowerPrice": post_reveal_lower_view["game"]["price_per_clip"],
+                "lowerDemand": post_reveal_lower_view["game"]["demand"],
+                "raiseReceiptRevision": post_reveal_raise["response_body"]["revision"],
+                "restoredPrice": post_reveal_raise_view["game"]["price_per_clip"],
+                "restoredDemand": post_reveal_raise_view["game"]["demand"],
+                "twoPageServerViewFeedback": True},
             "firstPostRevealWireCharge": str(wire_charge),
             "zeroClientSeconds": seconds, "zeroClientProduced": str(produced),
             "zeroClientTickUpdates": disconnected_update_delta,
@@ -1857,10 +1972,27 @@ def run_autoclipper_native_evidence(binary: Path, executable: str, version: str)
             "recoveredRunIdChanged": True,
             "recoveryStoredCountCostReveal": ["2", "6.21", True],
             "recoveryOnlyOnlineProduction": str(expected_production),
+            "realSigkillCrashRecovery": {
+                "crashExit": crash_exit,
+                "committedRevision": saved["revision"],
+                "unsavedLowerReceiptRevision": unsaved_revision,
+                "preCrashRevision": pre_crash["revision"],
+                "savedPrice": saved["pro"]["price_per_clip"],
+                "unsavedPrice": pre_crash["game"]["price_per_clip"],
+                "recoveredPrice": recovered["game"]["price_per_clip"],
+                "savedMarketingLevel": saved["pro"]["marketing_level"],
+                "recoveredMarketingLevel": recovered["game"]["marketing_level"],
+                "downtimeSeconds": round(downtime_seconds, 3),
+                "restartObservationSeconds": round(restart_observation_seconds, 3),
+                "onlineUpdateDelta": update_delta,
+                "rngContinuationFastPhases": recovery_phases,
+                "lastCommitOnly": True, "noOfflineBackfill": True,
+                "dedupAcrossCrashClaimed": False},
             "savedRate": saved["pro"]["auto_clipper_rate"],
             "recoveredRate": recovered["game"]["auto_clipper_rate"],
             "expectedRecoveredRate": str(expected_rate),
             "noOfflineBackfillOrLevelZeroRecompute": True,
+            "finalAuthoritativeRecoveredPublicView": recovered,
             "durationSeconds": round(clock.monotonic() - started, 3),
         }
     return {**result, "browser": version, "realBackend": True,
@@ -2062,34 +2194,109 @@ def run_main_ui(browser: Browser, state: ProxyState, backend_port: int, page1: C
     assert after_api_conflict["game"]["lifetime_clips"] == "6"
     assert agent_client.make(retry_command["command_id"]) == (dropped["response_status"], json_bytes(dropped["response_body"]))
 
-    # Stock exhaustion is a real writer rejection, not a DOM disabled gate.
-    for index in range(994):
+    # Issue17 actual shared-world contention: every client observes one legal
+    # remaining Wire, but only one of two native pages plus the Agent can apply.
+    for index in range(993):
         status, body = agent_client.make(f"m1-ui-exhaust-{index}")
         assert status == 200, (index, status, body)
+    contention_entry = api.checked_json(agent_client.get()[1])
+    assert contention_entry["game"]["wire"] == "1"
+    assert contention_entry["game"]["lifetime_clips"] == "999"
+
+    state.hold_commands = True
+    state.command_release.clear()
+    contention_index = len(state.command_records)
+    page1.evaluate("document.getElementById('make-paperclip').focus()")
+    page1.call("Page.bringToFront")
+    page1.press("Enter")
+    page2.evaluate("document.getElementById('make-paperclip').focus()")
+    page2.call("Page.bringToFront")
+    page2.press("Space")
+    browser_contenders = wait_commands(state, contention_index + 2)[contention_index:]
+    agent_contender_result: list[Any] = []
+    def contend_for_last_wire() -> None:
+        agent_contender_result.append(agent_client.make("m1-ui-one-wire-agent-rival"))
+    agent_contender_thread = threading.Thread(target=contend_for_last_wire)
+    agent_contender_thread.start()
+    state.hold_commands = False
+    state.command_release.set()
+    agent_contender_thread.join(timeout=8)
+    assert not agent_contender_thread.is_alive() and len(agent_contender_result) == 1
+    agent_contender_status, agent_contender_raw = agent_contender_result[0]
+    agent_contender_body = api.checked_json(agent_contender_raw)
+    assert agent_contender_status in (200, 422)
+    if agent_contender_status == 200:
+        assert agent_contender_body["status"] == "applied"
+        assert type(agent_contender_body["revision"]) is int
+
+    contention_receipts = []
+    browser_rejections = []
+    for page, label, record in zip((page1, page2), ("page1", "page2"), browser_contenders):
+        command = exact_command(record)
+        wait_for(lambda record=record: record.get("response_body"),
+                 lambda value: isinstance(value, dict), "real one-Wire rival response")
+        assert record["forwarded"] == 1 and record["response_status"] in (200, 422), record
+        body = record["response_body"]
+        revision = body["revision"]
+        if record["response_status"] == 200:
+            assert body["status"] == "applied"
+            message = (f"Server applied the command at revision {revision}. "
+                       "Displayed resources come from the newest full server View.")
+        else:
+            assert body["status"] == "rule_rejected" and body["reason"] == "insufficient_wire"
+            message = ("Server rejected the command: not enough Wire. "
+                       "This request made no resource change.")
+            browser_rejections.append(record)
+        wait_for(lambda page=page, message=message, revision=revision: dom_state(page),
+                 lambda value: value["status"] == message and int(value["revision"]) >= revision,
+                 f"{label} typed one-Wire terminal feedback")
+        contention_receipts.append({"client": label, "command_id": command["command_id"],
+                                    "httpStatus": record["response_status"], "body": body})
+    contention_receipts.append({"client": "structured Agent",
+                                "command_id": "m1-ui-one-wire-agent-rival",
+                                "httpStatus": agent_contender_status,
+                                "body": agent_contender_body})
+    assert sorted(receipt["httpStatus"] for receipt in contention_receipts) == [200, 422, 422]
+    assert all(record["response_body"]["reason"] == "insufficient_wire"
+               for record in browser_rejections)
+    if agent_contender_status == 422:
+        assert agent_contender_body["status"] == "rule_rejected"
+        assert agent_contender_body["reason"] == "insufficient_wire"
+    assert len(browser_rejections) >= 1
+
+    # All views converge to the one serial authoritative result. No stale page or
+    # rejected command invents a positive resource delta.
+    both_stock = lambda value: value.get("viewState") == "ready" and stock_ledger_visible(value, 1000, "0")
+    for page in (page1, page2):
+        wait_for(lambda page=page: dom_state(page), both_stock,
+                 "two-page one-Wire contender convergence")
     exhausted = api.checked_json(agent_client.get()[1])
     assert exhausted["game"]["wire"] == "0" and exhausted["game"]["lifetime_clips"] == "1000"
-    rejection_index = len(state.command_records)
-    page1.press("Enter")
-    rejection_record = wait_commands(state, rejection_index + 1)[-1]
-    assert rejection_record["response_status"] == 422 and rejection_record["response_body"]["reason"] == "insufficient_wire"
-    wait_for(lambda: dom_state(page1), lambda value: "not enough Wire" in value["status"] and "no resource change" in value["status"], "real rejection feedback")
-    # The rejection response can arrive before the last successful command's
-    # SSE View. A response is not the global render order; wait for both the
-    # actual rejection feedback and the corresponding authoritative DOM state.
-    wait_for(lambda: dom_state(page1), lambda value: value["lifetime"] == "1000" and value["wire"] == "0" and "not enough Wire" in value["status"],
-             "rejection feedback after last successful full View")
+
+    # A rejected command ID replays its exact original terminal receipt only.
+    rejection_record = browser_rejections[0]
     rejected_id = exact_command(rejection_record)["command_id"]
-    assert agent_client.make(rejected_id) == (422, json_bytes(rejection_record["response_body"]))
+    assert agent_client.make(rejected_id) == (
+        422, json_bytes(rejection_record["response_body"]))
     after_rejection = api.checked_json(agent_client.get()[1])
     assert_only_wire_quote_can_advance(after_rejection["game"], exhausted["game"])
+    assert after_rejection["game"]["wire"] == "0"
+    assert after_rejection["game"]["lifetime_clips"] == "1000"
     agent_client.close()
 
     return {"commandsThroughUIProxy": len(state.command_records), "twoPageConvergedClips": "1000",
             "firstManualCommand": {"lifetime": "0->1", "unsold": "0->1", "unused": "0->1",
                                    "wire": "1000->999", "funds": after_one["game"]["funds"], "headline": "0->1"},
             "pendingGrantedNothing": True, "serverAndBothPagesMatched": True,
-            "agentAppliedCommands": 995, "sameIdRetryAppliedOnce": True,
-            "realRuleRejections": 1, "apiConflicts": 1, "typedProxyConflicts": 1,
+            "agentAppliedCommands": 994 + int(agent_contender_status == 200),
+            "sameIdRetryAppliedOnce": True,
+            "realRuleRejections": 2, "apiConflicts": 1, "typedProxyConflicts": 1,
+            "oneWireContention": {
+                "entryWire": contention_entry["game"]["wire"],
+                "entryLifetime": contention_entry["game"]["lifetime_clips"],
+                "receipts": contention_receipts, "appliedCommands": 1,
+                "insufficientWireReceipts": 2, "rejectedIdReplayBodyIdentical": True,
+                "twoPagesAndAgentConverged": True},
             "allUIEnvelopesExact": all(exact_command(record) for record in state.command_records)}
 
 
