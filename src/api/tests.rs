@@ -380,6 +380,11 @@ async fn final_stock_contention_and_rule_rejection_both_replay_first_terminal_re
         post(server.address, command("another-rejection")).await,
         new_rejection
     );
+    assert_eq!(
+        post(server.address, command("winner")).await,
+        a,
+        "terminal success replays after the original command would be unaffordable"
+    );
     let view = server.handle.view();
     assert_eq!(view.game.pro.wire.to_string(), "0");
     assert_eq!(view.game.pro.lifetime_clips.to_string(), "1");

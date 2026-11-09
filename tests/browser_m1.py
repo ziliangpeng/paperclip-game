@@ -609,7 +609,23 @@ def dom_state(page: Cdp) -> dict[str, Any]:
       revision: document.documentElement.dataset.revision,
       viewState: document.documentElement.dataset.viewState,
       lifetime: document.getElementById('lifetime-clips').dataset.canonical,
+      headlineText: document.getElementById('lifetime-clips').textContent,
+      headlineTooltip: document.getElementById('lifetime-clips').title,
+      unsold: document.getElementById('unsold-clips').dataset.canonical,
+      unused: document.getElementById('unused-clips').dataset.canonical,
+      funds: document.getElementById('funds').dataset.canonical,
       wire: document.getElementById('wire').dataset.canonical,
+      spool: document.getElementById('wire-spool-length').dataset.canonical,
+      wireQuote: document.getElementById('wire-quote').dataset.canonical,
+      price: document.getElementById('price-per-clip').dataset.canonical,
+      marketingLevel: document.getElementById('marketing-level').dataset.canonical,
+      trust: document.getElementById('trust').dataset.canonical,
+      processors: document.getElementById('processors').dataset.canonical,
+      memory: document.getElementById('memory').dataset.canonical,
+      computingHidden: document.getElementById('computational-resources').hidden,
+      autoClippersHidden: document.getElementById('auto-clippers-panel').hidden,
+      autoClippers: document.getElementById('auto-clippers').dataset.canonical,
+      autoClipperCost: document.getElementById('auto-clipper-cost').dataset.canonical,
       status: document.getElementById('command-status').textContent,
       button: document.getElementById('make-paperclip').textContent,
       disabled: document.getElementById('make-paperclip').disabled,
@@ -1038,6 +1054,27 @@ def run_main_ui(browser: Browser, state: ProxyState, backend_port: int, page1: C
     first = wait_for(lambda: dom_state(page1), lambda value: value.get("viewState") == "ready", "page one baseline")
     second = wait_for(lambda: dom_state(page2), lambda value: value.get("viewState") == "ready", "page two baseline")
     assert first["runId"] == second["runId"] and first["lifetime"] == second["lifetime"] == "0"
+    initial_client = api.Client(backend_port)
+    initial_view = api.checked_json(initial_client.get()[1])
+    initial_client.close()
+    assert initial_view["run_id"] == first["runId"]
+    assert initial_view["game"] == {
+        "auto_clipper_cost": "5", "auto_clipper_revealed": False, "auto_clippers": "0",
+        "computing_hidden": True, "funds": "0", "lifetime_clips": "0",
+        "marketing_level": "1", "memory": "1", "price_per_clip": "0.25",
+        "processors": "1", "projects_hidden": True, "trust": "2",
+        "unsold_clips": "0", "unused_clips": "0", "wire": "1000",
+        "wire_quote": "20", "wire_spool_length": "1000",
+    }
+    for baseline in (first, second):
+        assert baseline["headlineText"] == "0" and baseline["headlineTooltip"] == "0"
+        assert baseline["unsold"] == baseline["unused"] == "0"
+        assert baseline["funds"] == "0" and baseline["wire"] == "1000"
+        assert baseline["spool"] == "1000" and baseline["wireQuote"] == "20"
+        assert baseline["price"] == "0.25" and baseline["marketingLevel"] == "1"
+        assert baseline["trust"] == "2" and baseline["processors"] == baseline["memory"] == "1"
+        assert baseline["computingHidden"] and baseline["autoClippersHidden"]
+        assert baseline["autoClippers"] == "0" and baseline["autoClipperCost"] == "5"
     check_accessibility_and_keyboard_order(page1)
 
     # The focused native button is activated with Enter. Repeat keydown cannot
@@ -1048,13 +1085,32 @@ def run_main_ui(browser: Browser, state: ProxyState, backend_port: int, page1: C
     records = wait_commands(state, 1)
     first_command = exact_command(records[0])
     pending = wait_for(lambda: dom_state(page1), lambda value: value["ariaDisabled"] == "true" and not value["disabled"] and "pending" in value["status"].lower(), "visible pending")
-    assert pending["lifetime"] == "0" and pending["wire"] == "1000" and pending["focus"] == "make-paperclip"
+    assert pending["lifetime"] == pending["unsold"] == pending["unused"] == "0"
+    assert pending["funds"] == "0" and pending["wire"] == "1000"
+    assert pending["headlineText"] == "0" and pending["focus"] == "make-paperclip"
     page1.press("Enter")
     settle_dom(page1)
     assert len(state.command_records) == 1, "pending activation is deduplicated without losing focus"
     state.command_release.set()
-    wait_for(lambda: dom_state(page1), lambda value: value["lifetime"] == "1" and value["wire"] == "999" and "applied" in value["status"], "page one applied View")
-    wait_for(lambda: dom_state(page2), lambda value: value["lifetime"] == "1" and value["wire"] == "999", "page two observes page one")
+    def first_clip_rendered(value: dict[str, Any]) -> bool:
+        return (value["lifetime"] == value["unsold"] == value["unused"] == "1" and
+                value["headlineText"] == value["headlineTooltip"] == "1" and
+                value["wire"] == "999" and value["funds"] == "0")
+    first_applied = wait_for(lambda: dom_state(page1),
+                             lambda value: first_clip_rendered(value) and "applied" in value["status"],
+                             "page one applied View and all three ledgers")
+    first_shared = wait_for(lambda: dom_state(page2), first_clip_rendered,
+                            "page two observes page one's exact three-ledger update")
+    assert first_applied["runId"] == first_shared["runId"] == initial_view["run_id"]
+    after_one_client = api.Client(backend_port)
+    after_one = api.checked_json(after_one_client.get()[1])
+    after_one_client.close()
+    assert after_one["run_id"] == initial_view["run_id"]
+    assert after_one["game"]["lifetime_clips"] == after_one["game"]["unsold_clips"] == after_one["game"]["unused_clips"] == "1"
+    assert after_one["game"]["wire"] == "999" and after_one["game"]["funds"] == "0"
+    for field in ("wire_spool_length", "wire_quote", "price_per_clip", "marketing_level",
+                  "trust", "processors", "memory", "auto_clippers", "auto_clipper_cost"):
+        assert after_one["game"][field] == initial_view["game"][field], field
     assert records[0]["response_status"] == 200 and records[0]["response_body"]["status"] == "applied"
     assert page1.evaluate("document.activeElement.id") == "make-paperclip"
 
@@ -1066,7 +1122,12 @@ def run_main_ui(browser: Browser, state: ProxyState, backend_port: int, page1: C
     second_command = exact_command(records[1])
     assert second_command["command_id"] != first_command["command_id"]
     for page in (page1, page2):
-        wait_for(lambda page=page: dom_state(page), lambda value: value["lifetime"] == "2" and value["wire"] == "998", "two-page second command convergence")
+        wait_for(lambda page=page: dom_state(page),
+                 lambda value: (value["lifetime"] == value["unsold"] == value["unused"] == "2" and
+                                value["headlineText"] == value["headlineTooltip"] == "2" and
+                                value["wire"] == "998" and
+                                value["runId"] == initial_view["run_id"]),
+                 "two-page second command convergence")
 
     # Two held browser commands and a structured-Agent command race through the
     # ordinary public API. There is no actor, first-page lock, or local winner.
@@ -1162,6 +1223,9 @@ def run_main_ui(browser: Browser, state: ProxyState, backend_port: int, page1: C
     agent_client.close()
 
     return {"commandsThroughUIProxy": len(state.command_records), "twoPageConvergedClips": "1000",
+            "firstManualCommand": {"lifetime": "0->1", "unsold": "0->1", "unused": "0->1",
+                                   "wire": "1000->999", "funds": "0", "headline": "0->1"},
+            "pendingGrantedNothing": True, "serverAndBothPagesMatched": True,
             "agentAppliedCommands": 995, "sameIdRetryAppliedOnce": True,
             "realRuleRejections": 1, "apiConflicts": 1, "typedProxyConflicts": 1,
             "allUIEnvelopesExact": all(exact_command(record) for record in state.command_records)}

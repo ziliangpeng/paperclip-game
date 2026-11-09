@@ -199,4 +199,171 @@ mod tests {
             Amount::parse("0.000000000000000002").unwrap()
         );
     }
+
+    #[test]
+    fn acceptance_rule_table_covers_full_fractional_zero_and_capped_wire() {
+        for (wire, numerator, denominator, produced, remaining) in [
+            ("5", 10, 1, "5", "0"),
+            ("2", 1, 1, "1", "1"),
+            ("1", 1, 5, "0.2", "0.8"),
+            ("1", 10, 1, "1", "0"),
+        ] {
+            let mut state = state_with_wire(wire);
+            assert_eq!(
+                request(&mut state, numerator, denominator),
+                Ok(produced.to_owned())
+            );
+            assert_eq!(state.wire.to_string(), remaining);
+            assert_ledgers(&state, produced);
+            assert_eq!(state.funds, Amount::zero());
+            eprintln!(
+                "G01 conversion: Wire {wire}, request {numerator}/{denominator} -> {produced}, Wire {remaining}"
+            );
+        }
+        for (wire, numerator, denominator) in [
+            ("0", 1, 1),
+            ("0.5", 1, 5),
+            ("0.5", 1, 1),
+            ("0.999", 1, 1),
+            ("0.000000000000000001", 1, 1),
+        ] {
+            let mut state = state_with_wire(wire);
+            let before = state.clone();
+            assert_eq!(
+                request(&mut state, numerator, denominator),
+                Err(ConversionError::InsufficientWire)
+            );
+            assert_eq!(state, before);
+            eprintln!("G01 ordinary below-one rejection: Wire {wire} stayed unchanged");
+        }
+    }
+
+    #[test]
+    fn positive_grid_quantum_survives_and_huge_ledger_increments_stay_exact() {
+        const GRID: i128 = 1_000_000_000_000_000_000;
+        let mut tiny = state_with_wire("1");
+        assert_eq!(
+            request(&mut tiny, GRID - 1, GRID),
+            Ok("0.999999999999999999".to_owned())
+        );
+        assert_eq!(tiny.wire.to_string(), "0.000000000000000001");
+        assert!(!tiny.wire.amount().is_zero());
+        assert_ledgers(&tiny, "0.999999999999999999");
+        let before = tiny.clone();
+        assert_eq!(
+            convert_one_wire(&mut tiny),
+            Err(ConversionError::InsufficientWire)
+        );
+        assert_eq!(
+            tiny, before,
+            "rejection does not erase the positive remainder"
+        );
+
+        for (initial, expected) in [
+            ("9007199254740992", "9007199254740993"),
+            (
+                "30000000000000000000000000000000000000000000000000000000",
+                "30000000000000000000000000000000000000000000000000000001",
+            ),
+        ] {
+            let mut state = state_with_wire("1");
+            for ledger in [
+                &mut state.lifetime_clips,
+                &mut state.unsold_clips,
+                &mut state.unused_clips,
+            ] {
+                *ledger = Amount::parse(initial).unwrap().nonnegative().unwrap();
+            }
+            state.funds = Amount::from_i128(17);
+            let before = state.clone();
+            assert_eq!(convert_one_wire(&mut state).unwrap().to_string(), "1");
+            assert_eq!(state.wire, NonNegativeAmount::zero());
+            assert_ledgers(&state, expected);
+            assert_eq!(state.funds, before.funds);
+            assert_eq!(state.wire_quote, before.wire_quote);
+            assert_eq!(state.price_per_clip, before.price_per_clip);
+            assert_eq!(state.marketing_level, before.marketing_level);
+            assert_eq!(state.auto_clipper_cost, before.auto_clipper_cost);
+            eprintln!("G01 exact huge ledger: {initial} + 1 = {expected}");
+        }
+    }
+
+    #[test]
+    fn generated_conversions_match_an_independent_exact_rational_reference() {
+        const GRID: i128 = 1_000_000_000_000_000_000;
+        let grid = BigInt::from(GRID);
+        let mut seed = 0xd1b5_4a32_d192_ed03u64;
+        let mut accepted = 0usize;
+        let mut rejected = 0usize;
+        for _ in 0..1_000 {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            let wire_mantissa = BigInt::from(seed % (6 * GRID as u64 + 3));
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            let numerator = BigInt::from(seed % (4 * GRID as u64) + 1);
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            let denominator = BigInt::from(seed % 1_000_003 + 1);
+
+            let mut state = state_with_wire("0");
+            state.wire = Amount::from_mantissa(wire_mantissa.clone())
+                .nonnegative()
+                .unwrap();
+            for (index, ledger) in [
+                &mut state.lifetime_clips,
+                &mut state.unsold_clips,
+                &mut state.unused_clips,
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let mantissa = BigInt::from(9_007_199_254_740_992u64 + index as u64) * &grid
+                    + BigInt::from(index + 1);
+                *ledger = Amount::from_mantissa(mantissa).nonnegative().unwrap();
+            }
+            let before = state.clone();
+            let requested_mantissa = &numerator * &grid / &denominator;
+            let result = convert_wire_ratio(&mut state, &numerator, &denominator);
+            let mut expected = before.clone();
+            if wire_mantissa < grid {
+                assert_eq!(result, Err(ConversionError::InsufficientWire));
+                rejected += 1;
+            } else {
+                assert!(requested_mantissa > BigInt::from(0));
+                let actual_mantissa = requested_mantissa.min(wire_mantissa.clone());
+                let actual = Amount::from_mantissa(actual_mantissa.clone())
+                    .nonnegative()
+                    .unwrap();
+                assert_eq!(result, Ok(actual.clone()));
+                expected.wire = Amount::from_mantissa(wire_mantissa - &actual_mantissa)
+                    .nonnegative()
+                    .unwrap();
+                for (before_ledger, expected_ledger) in [
+                    (&before.lifetime_clips, &mut expected.lifetime_clips),
+                    (&before.unsold_clips, &mut expected.unsold_clips),
+                    (&before.unused_clips, &mut expected.unused_clips),
+                ] {
+                    let next =
+                        Amount::from_mantissa(before_ledger.amount().mantissa() + &actual_mantissa)
+                            .nonnegative()
+                            .unwrap();
+                    assert_eq!(
+                        (next.amount() - before_ledger.amount()).mantissa(),
+                        actual.amount().mantissa()
+                    );
+                    *expected_ledger = next;
+                }
+                accepted += 1;
+            }
+            assert_eq!(state, expected);
+        }
+        assert!(accepted > 700 && rejected > 100);
+        eprintln!(
+            "G01 generated exact-rational conversion reference: {accepted} accepted, {rejected} rejected"
+        );
+    }
 }
