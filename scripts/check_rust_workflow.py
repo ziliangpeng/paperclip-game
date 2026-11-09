@@ -520,11 +520,22 @@ def _check_browser_contract(steps: list[Step]) -> list[Finding]:
             findings.append(Finding("workflow-browser-contract", "browser stream must run immediately after persistence and before public validation"))
 
     native_ui_matches = [step for step in steps if step.name == NATIVE_UI_STEP_NAME]
-    if len(native_ui_matches) != 1:
+    native_ui_commands = [
+        step for step in steps
+        if step.run is not None and step.run.strip() == NATIVE_UI_COMMAND
+    ]
+    native_ui_identity_mismatch = (
+        len(native_ui_matches) != 1
+        or len(native_ui_commands) != 1
+        or native_ui_matches[0] is not native_ui_commands[0]
+    )
+    if native_ui_identity_mismatch:
         findings.append(Finding(
             "workflow-browser-contract",
-            f"independent native UI step {NATIVE_UI_STEP_NAME} must appear exactly once with its own command, found {len(native_ui_matches)}",
+            f"independent native UI command must execute exactly once in the single {NATIVE_UI_STEP_NAME} step; "
+            f"found {len(native_ui_commands)} exact command steps and {len(native_ui_matches)} correctly named steps",
         ))
+    if len(native_ui_matches) != 1:
         return findings
     native_ui = native_ui_matches[0]
     if native_ui.unsupported_metadata:
@@ -1284,6 +1295,32 @@ def _native_ui_mutations(healthy: str) -> list[tuple[str, str, str]]:
     edit_ui("if-false", "        run:", "        if: ${{ false }}" + chr(10) + "        run:")
     edit_ui("continue-on-error", "        run:", "        continue-on-error: true" + chr(10) + "        run:")
     add("duplicate", _replace_once(healthy, native_ui_block, native_ui_block + native_ui_block))
+    renamed_ui_block = _replace_once(
+        native_ui_block,
+        NATIVE_UI_STEP_NAME,
+        "Second native UI execution under another label",
+    )
+    add("renamed-duplicate-after-required", _replace_once(
+        healthy,
+        native_ui_block,
+        native_ui_block + renamed_ui_block,
+    ))
+    public_block = _step_block(healthy, "Validate public repository hygiene")
+    add("renamed-duplicate-after-public", _replace_once(
+        healthy,
+        public_block,
+        public_block + renamed_ui_block,
+    ))
+    multiline_ui_block = _replace_once(
+        renamed_ui_block,
+        "        run: " + NATIVE_UI_COMMAND,
+        "        run: |" + chr(10) + "          " + NATIVE_UI_COMMAND,
+    )
+    add("renamed-duplicate-multiline", _replace_once(
+        healthy,
+        native_ui_block,
+        native_ui_block + multiline_ui_block,
+    ))
     add("before-stream", _replace_once(
         healthy,
         browser_block + native_ui_block,
@@ -1750,7 +1787,27 @@ def _controls_native_ui_self_test(script: Path, workflow: Path, root: Path) -> t
         stream_block,
         _replace_once(stream_block, " --require-browser", ""),
     )
-    cases = [("native-ui-healthy", healthy, 0, None)]
+    native_ui_block = _step_block(healthy, NATIVE_UI_STEP_NAME)
+    literal_ui_block = _replace_once(
+        native_ui_block,
+        "        run: " + NATIVE_UI_COMMAND,
+        "        run: |" + chr(10) + "          " + NATIVE_UI_COMMAND,
+    )
+    quoted_ui_block = _replace_once(
+        native_ui_block,
+        NATIVE_UI_STEP_NAME,
+        '"' + NATIVE_UI_STEP_NAME + '"',
+    )
+    cases = [
+        ("native-ui-healthy", healthy, 0, None),
+        ("native-ui-literal-run-healthy", _replace_once(healthy, native_ui_block, literal_ui_block), 0, None),
+        ("native-ui-quoted-name-healthy", _replace_once(healthy, native_ui_block, quoted_ui_block), 0, None),
+        ("native-ui-comment-only-healthy", _replace_once(
+            healthy,
+            native_ui_block,
+            native_ui_block + "      # " + NATIVE_UI_STEP_NAME + ": " + NATIVE_UI_COMMAND + chr(10),
+        ), 0, None),
+    ]
     cases.extend((name, document, 1, "workflow-browser-contract") for name, document, _ in _native_ui_mutations(healthy))
     cases.append(("native-ui-stream-required-flag-removed", stream_bad, 1, "workflow-browser-contract"))
     details = {
@@ -1759,6 +1816,9 @@ def _controls_native_ui_self_test(script: Path, workflow: Path, root: Path) -> t
         "native-ui-if-false": "unconditional",
         "native-ui-continue-on-error": "unconditional",
         "native-ui-stream-required-flag-removed": "--require-browser",
+        "native-ui-renamed-duplicate-after-required": "exactly once",
+        "native-ui-renamed-duplicate-after-public": "exactly once",
+        "native-ui-renamed-duplicate-multiline": "exactly once",
     }
     directory = root / "native-ui-fixtures"
     directory.mkdir(parents=True, exist_ok=True)
