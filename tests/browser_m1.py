@@ -39,6 +39,7 @@ class WebSocket:
         assert parsed.scheme == "ws" and parsed.hostname == "127.0.0.1"
         self.socket = socket.create_connection((parsed.hostname, parsed.port), timeout=5)
         self.buffer = bytearray()
+        self._frame_context: dict[str, Any] | None = None
         key = base64.b64encode(os.urandom(16)).decode()
         path = parsed.path + (("?" + parsed.query) if parsed.query else "")
         request = (
@@ -65,7 +66,19 @@ class WebSocket:
 
     def _exact(self, size: int) -> bytes:
         while len(self.buffer) < size:
-            chunk = self.socket.recv(min(64 * 1024, max(4096, size - len(self.buffer))))
+            receive_size = min(64 * 1024, max(4096, size - len(self.buffer)))
+            try:
+                chunk = self.socket.recv(receive_size)
+            except TimeoutError as error:
+                if self._frame_context is not None:
+                    note = {"component": "WebSocket._exact", **self._frame_context,
+                            "requestedExactSize": size, "requestedReceiveChunkSize": receive_size,
+                            "bufferedByteArrayLength": len(self.buffer)}
+                    if self._frame_context["phase"] == "payload":
+                        note["pendingPayloadPrefixHex"] = bytes(self.buffer[:64]).hex()
+                    error.add_note("CDP timeout context: " +
+                                   json.dumps(note, sort_keys=True, separators=(",", ":")))
+                raise
             if not chunk:
                 raise EOFError("CDP websocket closed")
             self.buffer.extend(chunk)
@@ -93,15 +106,25 @@ class WebSocket:
         self.socket.settimeout(timeout)
         fragments = bytearray()
         while True:
+            # A new header cannot inherit metadata from an earlier frame.
+            context: dict[str, Any] = {"phase": "header", "frameFin": None,
+                                       "frameOpcode": None, "declaredPayloadLength": None,
+                                       "incompleteFrameIdentity": "unknown"}
+            self._frame_context = context
             first, second = self._exact(2)
             fin, opcode = bool(first & 0x80), first & 0x0F
             assert not second & 0x80, "server CDP frames must not be masked"
+            context["frameFin"], context["frameOpcode"] = fin, opcode
             size = second & 0x7F
             if size == 126:
+                context["phase"] = "extended-length"
                 size = struct.unpack("!H", self._exact(2))[0]
             elif size == 127:
+                context["phase"] = "extended-length"
                 size = struct.unpack("!Q", self._exact(8))[0]
             assert size <= 8 * 1024 * 1024, "bounded CDP message"
+            context["declaredPayloadLength"] = size
+            context["phase"] = "payload"
             payload = self._exact(size)
             if opcode == 8:
                 raise EOFError("CDP close frame")
@@ -128,6 +151,7 @@ class WebSocket:
 
 class Cdp:
     def __init__(self, url: str) -> None:
+        self.page_endpoint = url
         self.websocket = WebSocket(url)
         self.next_id = 1
         # A bounded diagnostic buffer, never an unbounded protocol journal.
@@ -141,7 +165,22 @@ class Cdp:
         while True:
             remaining = deadline - time.monotonic()
             assert remaining > 0, f"bounded CDP call: {method}"
-            message = self.websocket.receive(remaining)
+            try:
+                message = self.websocket.receive(remaining)
+            except TimeoutError as error:
+                observed = time.monotonic()
+                note = {"component": "Cdp.call", "outgoingMethod": method,
+                        "outgoingCommandId": command_id, "providedTimeoutSeconds": timeout,
+                        "receiveBudgetProvidedSeconds": remaining,
+                        "deadlineMonotonicSeconds": deadline,
+                        "deadlineReached": observed >= deadline,
+                        "callElapsedSeconds": round(observed - (deadline - timeout), 6),
+                        "remainingDeadlineBudgetSeconds": round(deadline - observed, 6),
+                        "pageEndpoint": self.page_endpoint,
+                        "unfinishedResponseOrEventIdentity": "unknown"}
+                error.add_note("CDP timeout context: " +
+                               json.dumps(note, sort_keys=True, separators=(",", ":")))
+                raise
             if message.get("id") != command_id:
                 if "method" in message:
                     self.events.append(message)
