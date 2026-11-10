@@ -9,6 +9,7 @@ from contextlib import contextmanager
 from collections import deque
 import hashlib
 import http.client
+import importlib.util
 import json
 import os
 import re
