@@ -27,7 +27,9 @@ MAX_WORKFLOW_BYTES = 256 * 1024
 CHECKOUT = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
 SETUP_PYTHON = "actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0"
 RUSTUP_COMMAND = "rustup toolchain install stable --profile minimal --component rustfmt,clippy"
+HOST_PLATFORM_COMMAND = "uname -s\nuname -m\ntest \"$(uname -s)\" = Linux\ntest \"$(uname -m)\" = x86_64"
 TOOL_VERSIONS_COMMAND = "rustup show active-toolchain\nrustc --version\ncargo --version\npython3 --version"
+BOOTSTRAP_COMMAND = HOST_PLATFORM_COMMAND + "\n" + TOOL_VERSIONS_COMMAND
 EXPECTED_CARGO = [
     ["cargo", "fmt", "--check"],
     ["cargo", "check", "--locked", "--all-targets"],
@@ -344,7 +346,7 @@ def _check_rust_bootstrap(steps: list[Step]) -> list[Finding]:
     positions: list[int] = []
     for label, command in (
         ("stable Rust setup", RUSTUP_COMMAND),
-        ("exact tool version recording", TOOL_VERSIONS_COMMAND),
+        ("exact host platform and tool version recording", BOOTSTRAP_COMMAND),
     ):
         matches = [step for step in steps if step.run and step.run.strip() == command]
         if len(matches) != 1:
@@ -1107,8 +1109,8 @@ def _base_mutations(healthy: str) -> list[tuple[str, str, str]]:
     )
     add(
         "step-unknown-field",
-        "      - name: Record actual tool versions\n        run: |",
-        "      - name: Record actual tool versions\n        timeout-minutes: 1\n        run: |",
+        "      - name: Record actual host platform and tool versions\n        run: |",
+        "      - name: Record actual host platform and tool versions\n        timeout-minutes: 1\n        run: |",
         "workflow-step-contract",
     )
     add(
@@ -1142,7 +1144,7 @@ def _base_mutations(healthy: str) -> list[tuple[str, str, str]]:
         "workflow-action-contract",
     )
     rustup_block = _step_block(healthy, "Install stable Rust components")
-    versions_block = _step_block(healthy, "Record actual tool versions")
+    versions_block = _step_block(healthy, "Record actual host platform and tool versions")
     checkout_block = _step_block(healthy, "Check out the triggering revision")
     setup_block = _step_block(healthy, "Select stable Python 3.14")
     fmt_block = _step_block(healthy, "Check Rust formatting")
@@ -1161,6 +1163,25 @@ def _base_mutations(healthy: str) -> list[tuple[str, str, str]]:
     cases.append(("rustup-removed", healthy.replace(rustup_block, "", 1), "workflow-bootstrap-contract"))
     add("rustup-clippy-removed", RUSTUP_COMMAND, "rustup toolchain install stable --profile minimal --component rustfmt", "workflow-bootstrap-contract")
     cases.append(("versions-removed", healthy.replace(versions_block, "", 1), "workflow-bootstrap-contract"))
+    cases.append((
+        "bootstrap-duplicate-host-and-versions",
+        _replace_once(healthy, versions_block, versions_block + versions_block),
+        "workflow-bootstrap-contract",
+    ))
+    add("host-system-probe-removed", "          uname -s\n", "", "workflow-bootstrap-contract")
+    add("host-architecture-probe-removed", "          uname -m\n", "", "workflow-bootstrap-contract")
+    add("host-linux-assertion-removed", '          test "$(uname -s)" = Linux\n', "", "workflow-bootstrap-contract")
+    add("host-x86-assertion-removed", '          test "$(uname -m)" = x86_64\n', "", "workflow-bootstrap-contract")
+    add("host-linux-assertion-wrong", 'test "$(uname -s)" = Linux', 'test "$(uname -s)" = Darwin', "workflow-bootstrap-contract")
+    add("host-x86-assertion-wrong", 'test "$(uname -m)" = x86_64', 'test "$(uname -m)" = arm64', "workflow-bootstrap-contract")
+    add("tool-version-rustc-removed", "          rustc --version\n", "", "workflow-bootstrap-contract")
+    add("tool-version-rustc-duplicated", "          rustc --version\n", "          rustc --version\n          rustc --version\n", "workflow-bootstrap-contract")
+    add(
+        "bootstrap-injected-prefix",
+        "      - name: Record actual host platform and tool versions\n        run: |\n          uname -s",
+        "      - name: Record actual host platform and tool versions\n        run: |\n          echo injected-prefix\n          uname -s",
+        "workflow-bootstrap-contract",
+    )
     cases.append(("checkout-setup-swapped", _replace_once(healthy, checkout_block + setup_block, setup_block + checkout_block), "workflow-action-contract"))
     without_checkout = healthy.replace(checkout_block, "", 1)
     cases.append((
@@ -1176,8 +1197,20 @@ def _base_mutations(healthy: str) -> list[tuple[str, str, str]]:
     ))
     add(
         "versions-quoted-if",
-        "      - name: Record actual tool versions\n        run:",
-        "      - name: Record actual tool versions\n        \"if\": ${{ false }}\n        run:",
+        "      - name: Record actual host platform and tool versions\n        run:",
+        "      - name: Record actual host platform and tool versions\n        \"if\": ${{ false }}\n        run:",
+        "workflow-bootstrap-contract",
+    )
+    add(
+        "versions-continue-on-error",
+        "      - name: Record actual host platform and tool versions\n        run:",
+        "      - name: Record actual host platform and tool versions\n        continue-on-error: true\n        run:",
+        "workflow-bootstrap-contract",
+    )
+    add(
+        "versions-custom-noop-shell",
+        "      - name: Record actual host platform and tool versions\n        run:",
+        "      - name: Record actual host platform and tool versions\n        shell: bash -c 'exit 0' {0}\n        run:",
         "workflow-bootstrap-contract",
     )
     cases.append((
@@ -1935,9 +1968,9 @@ def _static_self_test(script: Path, workflow: Path, root: Path) -> tuple[int, li
         "          printf \"%s\\n\" \"    if: not-job-metadata\" \"  helper: not-a-job\"\n\n"
         "      - name: Check Rust formatting\n",
     )
-    version_header = "      - name: Record actual tool versions\n        run: |"
-    healthy_bash_versions = _replace_once(healthy, version_header, "      - name: Record actual tool versions\n        shell: bash\n        run: |")
-    healthy_sh_versions = _replace_once(healthy, version_header, "      - name: Record actual tool versions\n        shell: sh\n        run: |")
+    version_header = "      - name: Record actual host platform and tool versions\n        run: |"
+    healthy_bash_versions = _replace_once(healthy, version_header, "      - name: Record actual host platform and tool versions\n        shell: bash\n        run: |")
+    healthy_sh_versions = _replace_once(healthy, version_header, "      - name: Record actual host platform and tool versions\n        shell: sh\n        run: |")
     healthy_bash_cargo = _replace_once(
         healthy,
         "      - name: Test all Rust targets against the committed lockfile\n        run:",
@@ -1951,7 +1984,7 @@ def _static_self_test(script: Path, workflow: Path, root: Path) -> tuple[int, li
     healthy_quoted_shells = _replace_once(
         healthy_quoted_shells,
         version_header,
-        "      - name: Record actual tool versions\n        shell: 'sh'\n        run: |",
+        "      - name: Record actual host platform and tool versions\n        shell: 'sh'\n        run: |",
     )
     fixtures = [
         ("healthy-workflow", healthy, 0, None),
@@ -2036,7 +2069,7 @@ def _static_self_test(script: Path, workflow: Path, root: Path) -> tuple[int, li
         "rustup-continue-on-error": "must be unconditional and propagate failure",
         "rustup-removed": "stable Rust setup must appear exactly once",
         "rustup-clippy-removed": "stable Rust setup must appear exactly once",
-        "versions-removed": "exact tool version recording must appear exactly once",
+        "versions-removed": "exact host platform and tool version recording must appear exactly once",
         "checkout-setup-swapped": "precede every run step",
         "checkout-moved-after-early-guards": "precede every run step",
         "setup-moved-after-early-guards": "precede every run step",
@@ -2089,6 +2122,7 @@ def _static_self_test(script: Path, workflow: Path, root: Path) -> tuple[int, li
         "step-browser-custom-noop-shell": ["workflow-step-contract"],
         "native-ui-unsupported-metadata": ["workflow-step-contract"],
         "bootstrap-custom-noop-shell": ["workflow-step-contract"],
+        "versions-custom-noop-shell": ["workflow-step-contract"],
     }
     for name, text, code in _mutations(healthy):
         fixtures.append((name, text, 1, code))
