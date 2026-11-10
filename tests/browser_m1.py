@@ -306,6 +306,13 @@ class Browser:
         page.call("Runtime.enable")
         page.call("Network.enable", {"maxTotalBufferSize": 2_000_000, "maxResourceBufferSize": 256_000})
         page.call("Page.bringToFront")
+        wait_for(lambda: page.evaluate("""({
+            url: document.URL,
+            rootPresent: document.documentElement !== null,
+            readyState: document.readyState
+        })"""), lambda value: value["url"] == self.origin + path
+            and value["rootPresent"] and value["readyState"] != "loading",
+            "real target DOM initialized before returning page")
         return page, context_id, target_id
 
     def close(self) -> None:
