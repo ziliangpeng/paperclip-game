@@ -171,6 +171,30 @@ pub(crate) fn push_console_message(state: &mut ProState, message: String) {
     state.console_messages[4] = message;
 }
 
+pub const COMPUTATIONAL_RESOURCES_UNLOCK_MESSAGE: &str = "Trust-Constrained Self-Modification";
+
+/// Exact source availability condition, independent of the persisted visibility latch.
+pub fn computational_resources_unlock_condition(state: &ProState) -> bool {
+    let one = Amount::from_i128(1);
+    state.lifetime_clips.amount() >= &Amount::from_i128(2_000)
+        || (state.unsold_clips.amount() < &one
+            && state.funds < state.wire_quote
+            && state.wire.amount() < &one)
+}
+
+/// Observe both availability flags atomically after a successful legal update.
+/// The visible state is the one-way latch; no later observation can relock it.
+pub fn observe_computational_resources(state: &mut ProState) {
+    if state.computing_hidden
+        && state.projects_hidden
+        && computational_resources_unlock_condition(state)
+    {
+        state.computing_hidden = false;
+        state.projects_hidden = false;
+        push_console_message(state, COMPUTATIONAL_RESOURCES_UNLOCK_MESSAGE.to_owned());
+    }
+}
+
 /// Latch reveal only after the authoritative Funds balance actually reaches 5.
 pub fn observe_auto_clipper_reveal(state: &mut ProState) {
     if !state.auto_clipper_revealed && state.funds >= Amount::from_i128(5) {

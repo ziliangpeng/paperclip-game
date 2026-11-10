@@ -48,7 +48,8 @@ ECONOMIC_VIEW_FIELDS = frozenset({
 
 def assert_production(view: dict[str, Any], wire: str, clips: str,
                       economic_values: dict[str, Any] | None = None,
-                      stored_model: bool = False) -> None:
+                      stored_model: bool = False,
+                      availability_values: dict[str, bool] | None = None) -> None:
     game = view["game"]
     expected = {
         "lifetime_clips": clips,
@@ -84,6 +85,10 @@ def assert_production(view: dict[str, Any], wire: str, clips: str,
         # other captured G02/G03 field remains mandatory in the expectation.
         supplied = {key: economic_values[key] for key in economic_fields}
         expected.update(supplied)
+    if availability_values is not None:
+        assert set(availability_values) == {"computing_hidden", "projects_hidden"}
+        assert all(type(value) is bool for value in availability_values.values())
+        expected.update(availability_values)
     if stored_model:
         # ProSnapshot intentionally stores level rather than duplicating this
         # View-only derived cost. HTTP View validation still requires it below.
@@ -159,7 +164,8 @@ def assert_ready(client: Client, expected_status: int = 200) -> dict[str, Any]:
     return health
 
 
-def assert_view_schema(view: dict[str, Any]) -> None:
+def assert_view_schema(view: dict[str, Any],
+                       availability_values: dict[str, bool] | None = None) -> None:
     assert set(view) == {"schema_version", "run_id", "revision", "clock", "game"}
     assert view["schema_version"] == 1
     assert isinstance(view["run_id"], str) and len(view["run_id"]) == 32
@@ -183,7 +189,8 @@ def assert_view_schema(view: dict[str, Any]) -> None:
     ):
         assert isinstance(clock[field], int)
     game = view["game"]
-    assert_production(view, game["wire"], game["lifetime_clips"], game)
+    assert_production(view, game["wire"], game["lifetime_clips"], game,
+                      availability_values=availability_values)
 
 
 class Client:

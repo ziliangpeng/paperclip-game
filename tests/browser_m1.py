@@ -1226,7 +1226,12 @@ def run_business_flow(browser: Browser, state: ProxyState, agent: api.Client,
     def current() -> dict[str, Any]:
         view = api.checked_json(agent.get()[1])
         api.assert_production(view, view["game"]["wire"],
-                              view["game"]["lifetime_clips"], view["game"])
+                              view["game"]["lifetime_clips"], view["game"],
+                              availability_values={
+                                  "computing_hidden": view["game"]["computing_hidden"],
+                                  "projects_hidden": view["game"]["projects_hidden"],
+                              })
+        assert view["game"]["computing_hidden"] == view["game"]["projects_hidden"]
         return view
 
     def wait_feedback(page: Cdp, kind: str, record: dict[str, Any]) -> None:
@@ -1882,7 +1887,7 @@ def run_autoclipper_native_evidence(binary: Path, executable: str, version: str)
 
         # Read only the last committed V3 row after the process is dead. No
         # pre-crash state write or snapshot edit participates in this test.
-        saved = stored.read_snapshot(database)
+        saved = stored.read_snapshot(database, availability_values={"computing_hidden": False, "projects_hidden": False})
         assert saved["revision"] < unsaved_revision
         assert saved["revision"] < pre_crash["revision"]
         assert saved["pro"]["auto_clippers"] == "2"
@@ -1951,7 +1956,7 @@ def run_autoclipper_native_evidence(binary: Path, executable: str, version: str)
         # A later ordinary stop is only a readback device for exact RNG/timer
         # continuation; it does not replace the SIGKILL recovery proof above.
         replacement.stop()
-        recovered_saved = stored.read_snapshot(database)
+        recovered_saved = stored.read_snapshot(database, availability_values={"computing_hidden": False, "projects_hidden": False})
         recovery_phases = stored.fast_phases_between(saved, recovered_saved)
         stored.assert_rng_continuation(saved["rng_state"], recovered_saved["rng_state"], recovery_phases)
         assert recovered_saved["pro"]["auto_clippers"] == "2"
@@ -3913,8 +3918,19 @@ def main() -> int:
             recovery_result = run_recovery(binary, temporary, browser)
             print(f"native UI: real refresh/reconnect/recovery passed: {recovery_result}")
             assert not state.errors, state.errors[:10]
+            m2_path = Path(__file__).resolve().with_name("browser_m2_c01.py")
+            m2_spec = importlib.util.spec_from_file_location("paperclip_browser_m2_c01", m2_path)
+            assert m2_spec is not None and m2_spec.loader is not None
+            m2_module = importlib.util.module_from_spec(m2_spec)
+            m2_spec.loader.exec_module(m2_module)
+            m2_result = m2_module.run(binary, executable, version)
+            assert (m2_result["lifetimeRoute"]["chromeExit"],
+                    m2_result["lifetimeRoute"]["backendExit"],
+                    m2_result["strandedRoute"]["chromeExit"],
+                    m2_result["strandedRoute"]["backendExit"]) == (0, 0, 0, 0), m2_result
             summary = {
                 "status": "pass", "browser": version, "independentBrowserContexts": 2,
+                "m2C01Unlock": m2_result,
                 "startup": startup_result, "main": main_result,
                 "numericOrdering": numeric_result, "recovery": recovery_result,
                 "g02NativeBusiness": business_result,

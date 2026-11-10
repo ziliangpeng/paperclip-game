@@ -29,6 +29,7 @@ mod m1_playable_integration_tests {
             economy::observe_auto_clipper_reveal(&mut state.pro);
         }
         economy::advance_auto_clippers(state, cadence.second_due).unwrap();
+        economy::observe_computational_resources(&mut state.pro);
     }
 
     fn advance_until(state: &mut GameState, predicate: impl Fn(&GameState) -> bool, label: &str) {
@@ -57,6 +58,7 @@ mod m1_playable_integration_tests {
         let mut made = 0_u64;
         while BigInt::from(made) < available {
             convert_one_wire(&mut state.pro).expect("whole available Wire makes one clip");
+            economy::observe_computational_resources(&mut state.pro);
             made += 1;
         }
         made
@@ -131,6 +133,7 @@ mod m1_playable_integration_tests {
         // Every clip is a legal individual Make; no pre-reveal Wire or Marketing buy.
         for expected in 1..=1_000_i128 {
             assert_eq!(convert_one_wire(&mut initial.pro), Ok(positive("1")));
+            economy::observe_computational_resources(&mut initial.pro);
             assert_eq!(initial.pro.lifetime_clips, positive(&expected.to_string()));
         }
         assert_eq!(initial.pro.wire, NonNegativeAmount::zero());
@@ -291,9 +294,19 @@ mod m1_playable_integration_tests {
         assert_eq!(initial.pro.trust.to_string(), "2");
         assert_eq!(initial.pro.processors.to_string(), "1");
         assert_eq!(initial.pro.memory.to_string(), "1");
-        assert!(initial.pro.computing_hidden && initial.pro.projects_hidden);
+        assert!(initial.pro.lifetime_clips >= positive("2000"));
+        assert!(!initial.pro.computing_hidden && !initial.pro.projects_hidden);
+        assert_eq!(
+            initial
+                .pro
+                .console_messages
+                .iter()
+                .filter(|message| *message == economy::COMPUTATIONAL_RESOURCES_UNLOCK_MESSAGE)
+                .count(),
+            1
+        );
         eprintln!(
-            "E2E-M1-DECLARED-PLAYABLE-EXIT pure prefix: reveal Funds={}, charges 5/6.1, Wire quote={}, automatic 4 in 200 ticks / complete-second rate 2, lifetime={}, sold={}, income={}, Marketing level 2; M2/full phase not claimed",
+            "E2E-M1-DECLARED-PLAYABLE-EXIT pure prefix: reveal Funds={}, charges 5/6.1, Wire quote={}, automatic 4 in 200 ticks / complete-second rate 2, lifetime={}, sold={}, income={}, Marketing level 2; M2-C01 unlock only, M2/full phase not claimed",
             first_reveal_funds,
             quote,
             initial.pro.lifetime_clips,

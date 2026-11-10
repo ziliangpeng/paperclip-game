@@ -561,6 +561,7 @@ impl<C: MonotonicClock> Writer<C> {
         }
         economy::advance_auto_clippers(&mut candidate, cadence.second_due)
             .map_err(RuntimeFailure::Economy)?;
+        economy::observe_computational_resources(&mut candidate.pro);
         self.state = candidate;
         self.revision = next_revision;
         self.lag_debt_nanos -= UPDATE_QUANTUM_NANOS;
@@ -606,6 +607,7 @@ impl<C: MonotonicClock> Writer<C> {
                 _ => {}
             }
             economy::observe_auto_clipper_reveal(&mut candidate.pro);
+            economy::observe_computational_resources(&mut candidate.pro);
         }
         let result = match outcome {
             Ok(()) => {
@@ -1098,6 +1100,116 @@ mod tests {
         assert_eq!(handle.view().game.rng_state_hex(), before.rng_state_hex());
         assert_eq!(handle.view().revision, 0);
         eprintln!("below-one Wire: InsufficientWire; full game state and revision unchanged");
+        runtime.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn computational_unlock_commits_once_at_exact_2000_across_retry_rejection_and_tick() {
+        let mut state = GameState::fresh(GameRng::from_test_seed([42_u8; 32]));
+        state.pro.lifetime_clips = NonNegativeAmount::from_i128(1_999).unwrap();
+        state.pro.unsold_clips = NonNegativeAmount::from_i128(1_999).unwrap();
+        state.pro.unused_clips = NonNegativeAmount::from_i128(1_999).unwrap();
+        state.pro.wire = NonNegativeAmount::from_i128(1).unwrap();
+        state.pro.funds = Amount::from_i128(100);
+        let (runtime, handle, clock) = test_runtime_with_state(state);
+        assert!(handle.view().game.pro.computing_hidden);
+        assert!(handle.view().game.pro.projects_hidden);
+
+        let applied = handle.execute(command(42_000)).await.unwrap();
+        assert_eq!(applied.revision, 1);
+        assert_eq!(applied.result, Ok(()));
+        let unlocked = handle.view();
+        assert_eq!(unlocked.game.pro.lifetime_clips.to_string(), "2000");
+        assert_eq!(unlocked.game.pro.wire, NonNegativeAmount::zero());
+        assert!(!unlocked.game.pro.computing_hidden);
+        assert!(!unlocked.game.pro.projects_hidden);
+        assert_eq!(unlocked.game.pro.trust.to_string(), "2");
+        assert_eq!(unlocked.game.pro.processors.to_string(), "1");
+        assert_eq!(unlocked.game.pro.memory.to_string(), "1");
+        assert_eq!(
+            unlocked
+                .game
+                .pro
+                .console_messages
+                .iter()
+                .filter(|message| *message == economy::COMPUTATIONAL_RESOURCES_UNLOCK_MESSAGE)
+                .count(),
+            1
+        );
+
+        let replay = handle.execute(command(42_000)).await.unwrap();
+        assert_eq!(replay, applied);
+        assert_eq!(handle.view().game.pro, unlocked.game.pro);
+        let rejected = handle.execute(command(42_001)).await.unwrap();
+        assert_eq!(rejected.revision, 1);
+        assert_eq!(
+            rejected.result,
+            Err(CommandRejection::Conversion(
+                ConversionError::InsufficientWire
+            ))
+        );
+        assert_eq!(handle.view().game.pro, unlocked.game.pro);
+
+        clock.advance(Duration::from_millis(10));
+        let after_tick = wait_for(&handle, |view| view.game.clock.update_count() == 1).await;
+        assert_eq!(after_tick.game.pro, unlocked.game.pro);
+        assert_eq!(
+            after_tick
+                .game
+                .pro
+                .console_messages
+                .iter()
+                .filter(|message| *message == economy::COMPUTATIONAL_RESOURCES_UNLOCK_MESSAGE)
+                .count(),
+            1
+        );
+        runtime.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stranded_rejection_has_no_partial_unlock_then_successful_tick_latches_once() {
+        let mut state = GameState::fresh(GameRng::from_test_seed([43_u8; 32]));
+        state.pro.wire = NonNegativeAmount::zero();
+        let (runtime, handle, clock) = test_runtime_with_state(state);
+        assert!(economy::computational_resources_unlock_condition(
+            &handle.view().game.pro
+        ));
+        let before = handle.view();
+
+        let rejected = handle.execute(command(43_000)).await.unwrap();
+        assert_eq!(rejected.revision, 0);
+        assert_eq!(
+            rejected.result,
+            Err(CommandRejection::Conversion(
+                ConversionError::InsufficientWire
+            ))
+        );
+        assert_eq!(handle.view().game.pro, before.game.pro);
+        assert!(handle.view().game.pro.computing_hidden);
+        assert!(handle.view().game.pro.projects_hidden);
+        assert_eq!(
+            handle.view().game.pro.console_messages,
+            before.game.pro.console_messages
+        );
+
+        clock.advance(Duration::from_millis(10));
+        let unlocked = wait_for(&handle, |view| view.game.clock.update_count() == 1).await;
+        assert!(!unlocked.game.pro.computing_hidden);
+        assert!(!unlocked.game.pro.projects_hidden);
+        assert_eq!(unlocked.game.pro.trust.to_string(), "2");
+        assert_eq!(unlocked.game.pro.processors.to_string(), "1");
+        assert_eq!(unlocked.game.pro.memory.to_string(), "1");
+        assert_eq!(
+            unlocked.game.pro.console_messages[4],
+            economy::COMPUTATIONAL_RESOURCES_UNLOCK_MESSAGE
+        );
+        let latched_messages = unlocked.game.pro.console_messages.clone();
+
+        clock.advance(Duration::from_millis(90));
+        let repeated = wait_for(&handle, |view| view.game.clock.update_count() == 10).await;
+        assert!(!repeated.game.pro.computing_hidden);
+        assert!(!repeated.game.pro.projects_hidden);
+        assert_eq!(repeated.game.pro.console_messages, latched_messages);
         runtime.shutdown().await.unwrap();
     }
 

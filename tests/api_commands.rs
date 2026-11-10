@@ -668,3 +668,151 @@ fn closed_business_commands_and_original_key_retries_use_real_rules() {
     assert_eq!(at_floor.game.price_per_clip.to_string(), "0.01");
     server.stop();
 }
+
+#[test]
+fn actual_commands_expose_both_computational_unlock_routes_through_typed_get() {
+    let lifetime_server = TestServer::start_with_state(|state| {
+        state.pro.lifetime_clips = NonNegativeAmount::from_i128(1_999).unwrap();
+        state.pro.unsold_clips = NonNegativeAmount::from_i128(1_999).unwrap();
+        state.pro.unused_clips = NonNegativeAmount::from_i128(1_999).unwrap();
+        state.pro.wire = NonNegativeAmount::from_i128(1).unwrap();
+        state.pro.funds = Amount::from_i128(100);
+    });
+    let initial = get(lifetime_server.address).view();
+    assert_eq!(initial.game.lifetime_clips.to_string(), "1999");
+    assert!(initial.game.computing_hidden && initial.game.projects_hidden);
+    let applied = post(lifetime_server.address, command("m2-c01-http-lifetime"));
+    assert_eq!(applied.status, 200);
+    assert_eq!(applied.json()["status"], "applied");
+    let unlocked = get(lifetime_server.address).view();
+    assert_eq!(unlocked.game.lifetime_clips.to_string(), "2000");
+    assert!(!unlocked.game.computing_hidden && !unlocked.game.projects_hidden);
+    assert_eq!(unlocked.game.trust.to_string(), "2");
+    assert_eq!(unlocked.game.processors.to_string(), "1");
+    assert_eq!(unlocked.game.memory.to_string(), "1");
+    assert_eq!(
+        unlocked
+            .game
+            .console_messages
+            .iter()
+            .filter(|message| {
+                *message == paperclip_game::game::economy::COMPUTATIONAL_RESOURCES_UNLOCK_MESSAGE
+            })
+            .count(),
+        1
+    );
+    let rejected = post(
+        lifetime_server.address,
+        command("m2-c01-http-after-empty-wire"),
+    );
+    assert_eq!(rejected.status, 422);
+    assert_eq!(rejected.json()["reason"], "insufficient_wire");
+    let after_rejection = get(lifetime_server.address).view();
+    assert!(!after_rejection.game.computing_hidden && !after_rejection.game.projects_hidden);
+    assert_eq!(
+        after_rejection.game.console_messages,
+        unlocked.game.console_messages
+    );
+
+    let stranded_server = TestServer::start_with_state(|state| {
+        state.pro.wire = NonNegativeAmount::zero();
+        state.pro.funds = Amount::from_i128(100);
+    });
+    let stranded_initial = get(stranded_server.address).view();
+    assert_eq!(stranded_initial.game.lifetime_clips.to_string(), "0");
+    assert_eq!(stranded_initial.game.unsold_clips.to_string(), "0");
+    assert_eq!(stranded_initial.game.wire.to_string(), "0");
+    assert_eq!(stranded_initial.game.funds, Amount::from_i128(100));
+    assert!(stranded_initial.game.computing_hidden && stranded_initial.game.projects_hidden);
+    let marketing = post(
+        stranded_server.address,
+        serde_json::to_vec(&json!({
+            "command_id": "m2-c01-http-stranded",
+            "type": "buy_marketing",
+            "arguments": {}
+        }))
+        .unwrap(),
+    );
+    assert_eq!(marketing.status, 200);
+    assert_eq!(marketing.json()["status"], "applied");
+    let stranded = get(stranded_server.address).view();
+    assert_eq!(stranded.game.lifetime_clips.to_string(), "0");
+    assert_eq!(stranded.game.unsold_clips.to_string(), "0");
+    assert_eq!(stranded.game.wire.to_string(), "0");
+    assert!(stranded.game.funds < stranded.game.wire_quote);
+    assert!(!stranded.game.computing_hidden && !stranded.game.projects_hidden);
+    assert_eq!(stranded.game.trust.to_string(), "2");
+    assert_eq!(stranded.game.processors.to_string(), "1");
+    assert_eq!(stranded.game.memory.to_string(), "1");
+    assert_eq!(
+        stranded
+            .game
+            .console_messages
+            .iter()
+            .filter(|message| {
+                *message == paperclip_game::game::economy::COMPUTATIONAL_RESOURCES_UNLOCK_MESSAGE
+            })
+            .count(),
+        1
+    );
+    lifetime_server.stop();
+    stranded_server.stop();
+}
+
+#[test]
+fn unlock_negative_space_rejects_later_controls_and_arbitrary_writes_without_mutation() {
+    let server = TestServer::start();
+    let initial = get(server.address).view();
+    for kind in [
+        "purchase_project",
+        "create_project_offer",
+        "set_state",
+        "pause",
+        "step",
+        "add_processor",
+        "add_memory",
+    ] {
+        let response = post(
+            server.address,
+            serde_json::to_vec(&json!({
+                "command_id": format!("m2-c01-negative-{kind}"),
+                "type": kind,
+                "arguments": {}
+            }))
+            .unwrap(),
+        );
+        assert_eq!(response.status, 404, "{kind}");
+        assert_eq!(response.json()["status"], "unknown_command", "{kind}");
+    }
+    let arbitrary_write = post(
+        server.address,
+        serde_json::to_vec(&json!({
+            "command_id": "m2-c01-arbitrary-write",
+            "type": "make_paperclip",
+            "arguments": {"funds": "2000", "computing_hidden": false}
+        }))
+        .unwrap(),
+    );
+    assert_eq!(arbitrary_write.status, 400);
+    assert_eq!(arbitrary_write.json()["reason"], "invalid_arguments");
+    for path in ["/api/game/pause", "/api/game/step", "/api/game/state"] {
+        let response = request(server.address, "POST", path, b"{}");
+        assert_eq!(response.status, 404, "{path}");
+    }
+    let after = get(server.address).view();
+    for (before, later) in [
+        (&initial.game.lifetime_clips, &after.game.lifetime_clips),
+        (&initial.game.unsold_clips, &after.game.unsold_clips),
+        (&initial.game.unused_clips, &after.game.unused_clips),
+        (&initial.game.wire, &after.game.wire),
+    ] {
+        assert_eq!(before, later);
+    }
+    assert_eq!(initial.game.funds, after.game.funds);
+    assert_eq!(initial.game.trust, after.game.trust);
+    assert_eq!(initial.game.processors, after.game.processors);
+    assert_eq!(initial.game.memory, after.game.memory);
+    assert!(after.game.computing_hidden && after.game.projects_hidden);
+    assert_eq!(after.game.console_messages, initial.game.console_messages);
+    server.stop();
+}

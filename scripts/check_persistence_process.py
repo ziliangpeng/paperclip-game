@@ -82,7 +82,8 @@ INTERNAL_PRO_FIELDS = {
 }
 
 
-def assert_stored_pro(pro: dict[str, Any]) -> dict[str, Any]:
+def assert_stored_pro(pro: dict[str, Any],
+                      availability_values: dict[str, bool] | None = None) -> dict[str, Any]:
     """Validate stored authority and return its exact public projection.
 
     Marketing cost is intentionally derived from the stored level and is not
@@ -107,7 +108,7 @@ def assert_stored_pro(pro: dict[str, Any]) -> dict[str, Any]:
     supplied = {key: public[key] for key in api.ECONOMIC_VIEW_FIELDS if key != "marketing_cost"}
     api.assert_production(
         {"game": public}, public["wire"], public["lifetime_clips"], supplied,
-        stored_model=True,
+        stored_model=True, availability_values=availability_values,
     )
     return public
 
@@ -279,7 +280,8 @@ def assert_view_matches_stored(
     after.pop("marketing_cost")
     assert_public_sales_between_events(before, after, expected_makes)
 
-def read_snapshot(database: Path) -> dict[str, Any]:
+def read_snapshot(database: Path,
+                  availability_values: dict[str, bool] | None = None) -> dict[str, Any]:
     # Only call this for a known-valid database. Startup corruption is tested
     # against original bytes without allowing SQLite to mutate the source file.
     connection = sqlite3.connect(f"{database.resolve().as_uri()}?mode=ro", uri=True)
@@ -304,7 +306,7 @@ def read_snapshot(database: Path) -> dict[str, Any]:
     assert set(snapshot) == {"snapshot_version", "revision", "pro", "clock", "rng_state"}
     assert type(snapshot["snapshot_version"]) is int and snapshot["snapshot_version"] == 3
     assert type(snapshot["revision"]) is int and snapshot["revision"] == revision
-    assert_stored_pro(snapshot["pro"])
+    assert_stored_pro(snapshot["pro"], availability_values=availability_values)
     assert set(snapshot["clock"]) == {
         "update_count", "fast_phase", "second_phase", "slow_phase",
         "combat_remainder_nanos", "combat_pulses",
