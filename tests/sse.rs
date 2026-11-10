@@ -700,3 +700,85 @@ mod recovery {
         panic!("active recovered SSE ended within the bounded frame drain");
     }
 }
+
+#[test]
+fn computational_unlock_sse_get_and_reconnect_share_one_authoritative_transition() {
+    let server = TestServer::start(|state| {
+        state.pro.lifetime_clips =
+            paperclip_game::game::amount::NonNegativeAmount::from_i128(1_999).unwrap();
+        state.pro.unsold_clips =
+            paperclip_game::game::amount::NonNegativeAmount::from_i128(1_999).unwrap();
+        state.pro.unused_clips =
+            paperclip_game::game::amount::NonNegativeAmount::from_i128(1_999).unwrap();
+        state.pro.wire = paperclip_game::game::amount::NonNegativeAmount::from_i128(1).unwrap();
+        state.pro.funds = Amount::from_i128(100);
+    });
+    let mut first_stream = SseClient::connect(server.address, None);
+    let initial = first_stream.next().unwrap();
+    assert_event(&initial);
+    assert_eq!(initial.view.game.lifetime_clips.to_string(), "1999");
+    assert!(initial.view.game.computing_hidden && initial.view.game.projects_hidden);
+
+    let (status, crossing_revision) = command_receipt(server.address, "m2-c01-sse-crossing");
+    assert_eq!(status, 200);
+    let crossing = first_stream.next_revision(crossing_revision);
+    assert_event(&crossing);
+    assert_eq!(crossing.view.game.lifetime_clips.to_string(), "2000");
+    assert_eq!(crossing.view.game.wire.to_string(), "0");
+    assert!(!crossing.view.game.computing_hidden && !crossing.view.game.projects_hidden);
+    assert_eq!(crossing.view.game.trust.to_string(), "2");
+    assert_eq!(crossing.view.game.processors.to_string(), "1");
+    assert_eq!(crossing.view.game.memory.to_string(), "1");
+    assert_eq!(
+        crossing
+            .view
+            .game
+            .console_messages
+            .iter()
+            .filter(|message| {
+                *message == paperclip_game::game::economy::COMPUTATIONAL_RESOURCES_UNLOCK_MESSAGE
+            })
+            .count(),
+        1
+    );
+    let transition_messages = crossing.view.game.console_messages.clone();
+    let transition_event_id = crossing.id.clone();
+    drop(first_stream);
+
+    let mut reconnect = SseClient::connect(server.address, Some(&transition_event_id));
+    let baseline = reconnect.next().unwrap();
+    assert_event(&baseline);
+    assert!(!baseline.view.game.computing_hidden && !baseline.view.game.projects_hidden);
+    assert_eq!(baseline.view.game.console_messages, transition_messages);
+    let current_get = get(server.address);
+    assert_eq!(current_get.run_id, baseline.view.run_id);
+    assert!(!current_get.game.computing_hidden && !current_get.game.projects_hidden);
+    assert_eq!(current_get.game.console_messages, transition_messages);
+    assert_eq!(current_get.game.trust, baseline.view.game.trust);
+    assert_eq!(current_get.game.processors, baseline.view.game.processors);
+    assert_eq!(current_get.game.memory, baseline.view.game.memory);
+
+    // The repeat is rejected at empty Wire and cannot partially mutate or announce.
+    let repeat = command_receipt(server.address, "m2-c01-sse-repeat");
+    assert_eq!(repeat.0, 422);
+    wait_for_updates(server.address, current_get.clock.update_count.get() + 20);
+    let later_get = get(server.address);
+    assert_eq!(later_get.game.console_messages, transition_messages);
+    let later = reconnect.next_revision(later_get.revision.get());
+    assert_event(&later);
+    assert!(!later.view.game.computing_hidden && !later.view.game.projects_hidden);
+    assert_eq!(later.view.game.console_messages, transition_messages);
+    assert_eq!(
+        later
+            .view
+            .game
+            .console_messages
+            .iter()
+            .filter(|message| {
+                *message == paperclip_game::game::economy::COMPUTATIONAL_RESOURCES_UNLOCK_MESSAGE
+            })
+            .count(),
+        1
+    );
+    server.stop();
+}
