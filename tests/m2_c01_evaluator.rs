@@ -133,3 +133,88 @@ fn p2_is_positive_and_repeated_p_is_bit_and_amount_identical() {
         stages.log10, stages.power, stages.composite
     );
 }
+
+/// Opt-in host observation: parse generator requests and call only the real
+/// production evaluator, so the subsequent Decimal reference run cannot use a
+/// private numeric substitute. Output is a path-free canonical NATIVE_C01 table.
+#[test]
+#[ignore = "large native observation; standard mac/Linux replay is references_replay"]
+fn native_processor_reference_sweep() {
+    use paperclip_game::game::evaluator::{ProcessorSpeedStages, processor_domain_upper};
+    use std::fs;
+    use std::path::Path;
+
+    let path = std::env::var_os("C01_SWEEP_REQUESTS")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/m2-c01-evaluator/sweep.requests")
+        });
+    let body = fs::read_to_string(path).expect("read deterministic native requests");
+    assert!(processor_domain_upper() > BigInt::from(1u8));
+    let print_stages = |stages: ProcessorSpeedStages| {
+        let amount = processor_speed_to_amount(stages.composite).expect("finite native Amount");
+        for _ in 0..2 {
+            let repeated = processor_speed_to_amount(stages.composite).unwrap();
+            assert_eq!(
+                repeated, amount,
+                "Amount conversion is idempotent across repeats"
+            );
+        }
+        print!(
+            " OK {:016x} {:016x} {:016x} {:016x} {}",
+            stages.binary_input.to_bits(),
+            stages.log10.to_bits(),
+            stages.power.to_bits(),
+            stages.composite.to_bits(),
+            amount
+        );
+    };
+    for (index, line) in body.lines().enumerate() {
+        let row: serde_json::Value = serde_json::from_str(line).expect("request JSON");
+        let operation = row["op"].as_str().unwrap();
+        match operation {
+            "stages" | "convert" => {
+                let numerator =
+                    BigInt::parse_bytes(row["numerator"].as_str().unwrap().as_bytes(), 10)
+                        .expect("request BigInt numerator");
+                let denominator =
+                    BigInt::parse_bytes(row["denominator"].as_str().unwrap().as_bytes(), 10)
+                        .expect("request BigInt denominator");
+                print!("NATIVE_C01 {operation} {numerator} {denominator}");
+                let input = ExactRatio::new(numerator, denominator);
+                match operation {
+                    "stages" => match input.and_then(|input| creativity_speed_ratio_stages(&input))
+                    {
+                        Ok(stages) => print_stages(stages),
+                        Err(error) => print!(" ERR {error:?}"),
+                    },
+                    "convert" => match input.and_then(|input| input.to_f64()) {
+                        Ok(input) => {
+                            let bits = input.to_bits();
+                            print!(" OK {bits:016x}");
+                        }
+                        Err(error) => print!(" ERR {error:?}"),
+                    },
+                    _ => unreachable!(),
+                }
+            }
+            "amount" => {
+                let bits = u64::from_str_radix(row["bits"].as_str().unwrap(), 16).unwrap();
+                let input = f64::from_bits(bits);
+                print!("NATIVE_C01 amount {bits:016x}");
+                match processor_speed_to_amount(input) {
+                    Ok(amount) => {
+                        let previous = amount.clone();
+                        for _ in 0..1000 {
+                            assert_eq!(processor_speed_to_amount(input), Ok(previous.clone()));
+                        }
+                        print!(" OK {amount}");
+                    }
+                    Err(error) => print!(" ERR {error:?}"),
+                }
+            }
+            unknown => panic!("unsupported native operation {unknown} at request {index}"),
+        }
+        println!();
+    }
+}
