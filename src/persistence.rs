@@ -21,11 +21,11 @@ use tokio::task::JoinHandle as AsyncJoinHandle;
 pub const DEFAULT_SNAPSHOT_INTERVAL: Duration = Duration::from_secs(30);
 pub const DEFAULT_BUSY_TIMEOUT: Duration = Duration::from_millis(100);
 const DEFAULT_ROW: &str = "default";
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 const CREATE_SNAPSHOT_TABLE: &str = "
     CREATE TABLE game_snapshot (
         slot TEXT PRIMARY KEY CHECK (slot = 'default'),
-        snapshot_version INTEGER NOT NULL CHECK (snapshot_version = 3),
+        snapshot_version INTEGER NOT NULL CHECK (snapshot_version = 4),
         revision INTEGER NOT NULL CHECK (
             revision >= 0 AND revision <= 9007199254740991
         ),
@@ -512,7 +512,7 @@ fn validate_stored_snapshot(connection: &Connection) -> Result<StoredSnapshot, S
     let schema_version: i64 = connection
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .map_err(map_validation_query_error)?;
-    if !matches!(schema_version, 1..=3) {
+    if !matches!(schema_version, 1..=4) {
         return Err(StorageError::UnsupportedSchemaVersion);
     }
 
@@ -563,7 +563,7 @@ fn validate_stored_snapshot(connection: &Connection) -> Result<StoredSnapshot, S
         return Err(StorageError::ChecksumMismatch);
     }
     // Snapshot::from_canonical_bytes performs strict old-format parsing, retains all
-    // old fields, and normalizes supported historical payloads into current V3.
+    // old fields, and normalizes supported historical payloads into current V4.
     let snapshot = Snapshot::from_canonical_bytes(payload).map_err(StorageError::Snapshot)?;
     if snapshot.revision.get() != revision {
         return Err(StorageError::InvalidMetadata);

@@ -225,7 +225,7 @@ fn real_sqlite_full_row_commit_and_repeated_restore_do_not_reapply_progress() {
     let user_version: i64 = connection
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(user_version, 3);
+    assert_eq!(user_version, 4);
     let payload_type: String = connection
         .query_row("SELECT typeof(payload) FROM game_snapshot", [], |row| {
             row.get(0)
@@ -243,7 +243,7 @@ fn real_sqlite_full_row_commit_and_repeated_restore_do_not_reapply_progress() {
     assert!(row_types(&path).iter().all(|(_, kind)| kind != "REAL"));
     assert_eq!(DEFAULT_SNAPSHOT_INTERVAL, Duration::from_secs(30));
     eprintln!(
-        "real SQLite: current schema 3, TEXT/INTEGER row, two identical restores, no progression replay"
+        "real SQLite: current schema 4, TEXT/INTEGER row, two identical restores, no progression replay"
     );
 }
 
@@ -253,12 +253,12 @@ fn strict_stored_payload_negative_table_preserves_existing_raw_database() {
         (
             "unsupported snapshot",
             SnapshotError::UnsupportedSnapshotVersion,
-            |text: &str| text.replacen("\"snapshot_version\":3", "\"snapshot_version\":4", 1),
+            |text: &str| text.replacen("\"snapshot_version\":4", "\"snapshot_version\":5", 1),
         ),
         ("duplicate", SnapshotError::DuplicateField, |text: &str| {
             text.replacen(
-                "\"snapshot_version\":3",
-                "\"snapshot_version\":3,\"snapshot_version\":3",
+                "\"snapshot_version\":4",
+                "\"snapshot_version\":4,\"snapshot_version\":4",
                 1,
             )
         }),
@@ -375,7 +375,7 @@ fn r1_assert_autoclipper_corruption_fails_store_and_startup(impossible_rate: boo
         StorageError::Snapshot(SnapshotError::DomainViolation),
     );
     eprintln!(
-        "R1 strict V3/store/startup rejected {} without changing the last good row",
+        "R1 strict V4/store/startup rejected {} without changing the last good row",
         if impossible_rate {
             "stored rate above producer count"
         } else {
@@ -423,7 +423,7 @@ fn checksum_metadata_utf8_and_schema_faults_are_explicit_and_non_mutating() {
             |path: &Path| {
                 Connection::open(path)
                     .unwrap()
-                    .pragma_update(None, "user_version", 4)
+                    .pragma_update(None, "user_version", 5)
                     .unwrap();
             },
         ),
@@ -436,10 +436,10 @@ fn checksum_metadata_utf8_and_schema_faults_are_explicit_and_non_mutating() {
                     .pragma_update(None, "ignore_check_constraints", true)
                     .unwrap();
                 connection
-                    .execute("UPDATE game_snapshot SET snapshot_version = 3", [])
+                    .execute("UPDATE game_snapshot SET snapshot_version = 4", [])
                     .unwrap();
                 let future =
-                    payload(path).replacen("\"snapshot_version\":3", "\"snapshot_version\":4", 1);
+                    payload(path).replacen("\"snapshot_version\":4", "\"snapshot_version\":5", 1);
                 replace_payload(path, &future);
             },
         ),
@@ -850,10 +850,41 @@ fn normal_shutdown_joins_and_commits_latest_pending_full_snapshot() {
     assert_eq!(restored.capture_sequence, 1);
 }
 
+fn strip_c01_fields(mut historical: String, pro: &paperclip_game::snapshot::ProSnapshot) -> String {
+    for (name, value) in [
+        (
+            "next_trust_target",
+            serde_json::to_string(&pro.next_trust_target).unwrap(),
+        ),
+        (
+            "trust_target_predecessor",
+            serde_json::to_string(&pro.trust_target_predecessor).unwrap(),
+        ),
+        (
+            "creativity_speed",
+            serde_json::to_string(&pro.creativity_speed).unwrap(),
+        ),
+        (
+            "standard_ops",
+            serde_json::to_string(&pro.standard_ops).unwrap(),
+        ),
+        (
+            "temporary_ops",
+            serde_json::to_string(&pro.temporary_ops).unwrap(),
+        ),
+    ] {
+        let member = format!(",\"{name}\":{value}");
+        assert_eq!(historical.matches(&member).count(), 1, "C01 member {name}");
+        historical = historical.replacen(&member, "", 1);
+    }
+    historical
+}
+
 fn legacy_v1_bytes(snapshot: &Snapshot) -> Vec<u8> {
-    assert_eq!(snapshot.snapshot_version, 3);
+    assert_eq!(snapshot.snapshot_version, 4);
     let mut historical = String::from_utf8(snapshot.to_canonical_bytes().unwrap()).unwrap();
-    historical = historical.replacen("\"snapshot_version\":3", "\"snapshot_version\":1", 1);
+    historical = historical.replacen("\"snapshot_version\":4", "\"snapshot_version\":1", 1);
+    historical = strip_c01_fields(historical, &snapshot.pro);
     let p = &snapshot.pro;
     for (name, value) in [
         (
@@ -969,7 +1000,8 @@ fn write_actual_schema_one(directory: &TestDirectory, snapshot: &Snapshot, extra
 fn legacy_v2_bytes(snapshot: &Snapshot) -> Vec<u8> {
     let p = &snapshot.pro;
     let mut historical = String::from_utf8(snapshot.to_canonical_bytes().unwrap()).unwrap();
-    historical = historical.replacen("\"snapshot_version\":3", "\"snapshot_version\":2", 1);
+    historical = historical.replacen("\"snapshot_version\":4", "\"snapshot_version\":2", 1);
+    historical = strip_c01_fields(historical, &snapshot.pro);
     for (name, value) in [
         (
             "auto_clipper_rate",
@@ -989,6 +1021,44 @@ fn legacy_v2_bytes(snapshot: &Snapshot) -> Vec<u8> {
         historical = historical.replacen(&member, "", 1);
     }
     historical.into_bytes()
+}
+
+fn legacy_v3_bytes(snapshot: &Snapshot) -> Vec<u8> {
+    let historical = String::from_utf8(snapshot.to_canonical_bytes().unwrap()).unwrap();
+    let historical = historical.replacen("\"snapshot_version\":4", "\"snapshot_version\":3", 1);
+    strip_c01_fields(historical, &snapshot.pro).into_bytes()
+}
+
+fn write_actual_schema_three(directory: &TestDirectory, snapshot: &Snapshot) {
+    let historical = String::from_utf8(legacy_v3_bytes(snapshot)).unwrap();
+    let connection = Connection::open(directory.database()).unwrap();
+    connection
+        .execute_batch(
+            "PRAGMA user_version = 3;
+         PRAGMA journal_mode = WAL;
+         PRAGMA synchronous = FULL;
+         CREATE TABLE game_snapshot (
+             slot TEXT PRIMARY KEY CHECK (slot = 'default'),
+             snapshot_version INTEGER NOT NULL CHECK (snapshot_version = 3),
+             revision INTEGER NOT NULL CHECK (
+                 revision >= 0 AND revision <= 9007199254740991
+             ),
+             capture_sequence INTEGER NOT NULL CHECK (
+                 capture_sequence >= 0 AND capture_sequence <= 9007199254740991
+             ),
+             payload TEXT NOT NULL,
+             checksum TEXT NOT NULL CHECK (length(checksum) = 64)
+         );",
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO game_snapshot (
+             slot, snapshot_version, revision, capture_sequence, payload, checksum
+         ) VALUES ('default', 3, 77, 3, ?1, ?2)",
+            rusqlite::params![historical, digest(historical.as_bytes())],
+        )
+        .unwrap();
 }
 
 fn write_actual_schema_two(directory: &TestDirectory, snapshot: &Snapshot) {
@@ -1024,6 +1094,52 @@ fn write_actual_schema_two(directory: &TestDirectory, snapshot: &Snapshot) {
 }
 
 #[test]
+fn actual_schema_three_migration_retains_old_compute_progress_and_c01_defaults() {
+    let directory = TestDirectory::new();
+    let mut expected = actual_legacy_state();
+    expected.pro.trust = IntegralAmount::from_i128(77);
+    expected.pro.processors = IntegralAmount::from_i128(9);
+    expected.pro.memory = IntegralAmount::from_i128(11);
+    write_actual_schema_three(&directory, &expected);
+
+    let first = open(&directory.database());
+    assert_eq!(first.origin, LoadOrigin::Migrated);
+    assert_eq!(first.revision, 77);
+    assert_eq!(first.capture_sequence, 3);
+    assert_eq!(first.state.pro.trust.to_string(), "77");
+    assert_eq!(first.state.pro.processors.to_string(), "9");
+    assert_eq!(first.state.pro.memory.to_string(), "11");
+    assert_eq!(first.state.pro.lifetime_clips.to_string(), "8");
+    assert_eq!(first.state.pro.next_trust_target.to_string(), "3000");
+    assert_eq!(first.state.pro.trust_target_predecessor.to_string(), "2000");
+    assert_eq!(first.state.pro.creativity_speed.to_string(), "1");
+    assert_eq!(first.state.pro.standard_ops.to_string(), "0");
+    assert_eq!(first.state.pro.temporary_ops.to_string(), "0");
+    assert_eq!(state_snapshot(&first.state, 77), expected);
+    let first_bytes = std::fs::read(directory.database()).unwrap();
+    assert!(payload(&directory.database()).starts_with("{\"snapshot_version\":4,"));
+    let connection = Connection::open(directory.database()).unwrap();
+    let row_version: i64 = connection
+        .query_row("SELECT snapshot_version FROM game_snapshot", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(row_version, 4);
+    let schema: i64 = connection
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(schema, 4);
+    drop(connection);
+
+    for _ in 0..2 {
+        let restored = open(&directory.database());
+        assert_eq!(restored.origin, LoadOrigin::Restored);
+        assert_eq!(state_snapshot(&restored.state, 77), expected);
+        assert_eq!(std::fs::read(directory.database()).unwrap(), first_bytes);
+    }
+}
+
+#[test]
 fn actual_schema_two_migration_retains_stored_autoclipper_price_count_and_reveal() {
     let directory = TestDirectory::new();
     let mut expected = actual_legacy_state();
@@ -1047,7 +1163,7 @@ fn actual_schema_two_migration_retains_stored_autoclipper_price_count_and_reveal
         std::array::from_fn(|_| String::new())
     );
     assert_eq!(first.state.pro.lifetime_clips.to_string(), "8");
-    assert!(payload(&directory.database()).starts_with("{\"snapshot_version\":3,"));
+    assert!(payload(&directory.database()).starts_with("{\"snapshot_version\":4,"));
     let first_bytes = std::fs::read(directory.database()).unwrap();
     let connection = Connection::open(directory.database()).unwrap();
     let versions: (i64, i64, i64) = connection
@@ -1057,11 +1173,11 @@ fn actual_schema_two_migration_retains_stored_autoclipper_price_count_and_reveal
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .unwrap();
-    assert_eq!(versions, (3, 77, 3));
+    assert_eq!(versions, (4, 77, 3));
     let schema: i64 = connection
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(schema, 3);
+    assert_eq!(schema, 4);
     drop(connection);
 
     let second = open(&directory.database());
@@ -1069,7 +1185,7 @@ fn actual_schema_two_migration_retains_stored_autoclipper_price_count_and_reveal
     assert_eq!(state_snapshot(&second.state, 77), expected);
     assert_eq!(std::fs::read(directory.database()).unwrap(), first_bytes);
     eprintln!(
-        "G03 actual schema 2 migration: retained exact count 2/stored 6.21/reveal/Funds 13.9; zero inferred production; repeat open restored V3 byte-identically"
+        "G03 actual schema 2 migration: retained exact count 2/stored 6.21/reveal/Funds 13.9; zero inferred production; repeat open restored V4 byte-identically"
     );
 }
 
@@ -1097,7 +1213,7 @@ fn actual_schema_one_migration_is_complete_idempotent_and_has_no_inferred_sales(
     assert_eq!(state_snapshot(&first.state, 77), expected);
     let first_bytes = std::fs::read(directory.database()).unwrap();
     let upgraded = payload(&directory.database());
-    assert!(upgraded.starts_with("{\"snapshot_version\":3,"));
+    assert!(upgraded.starts_with("{\"snapshot_version\":4,"));
     let connection = Connection::open(directory.database()).unwrap();
     let versions: (i64, i64, i64) = connection
         .query_row(
@@ -1106,11 +1222,11 @@ fn actual_schema_one_migration_is_complete_idempotent_and_has_no_inferred_sales(
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .unwrap();
-    assert_eq!(versions, (3, 77, 3));
+    assert_eq!(versions, (4, 77, 3));
     let schema: i64 = connection
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(schema, 3);
+    assert_eq!(schema, 4);
     drop(connection);
     for _ in 0..2 {
         let restored = open(&directory.database());
@@ -1120,7 +1236,7 @@ fn actual_schema_one_migration_is_complete_idempotent_and_has_no_inferred_sales(
         assert_eq!(std::fs::read(directory.database()).unwrap(), first_bytes);
     }
     eprintln!(
-        "actual schema 1 migration: retained revision 77, clock 1, RNG, eight produced clips and no offline sales; version 3 repeat opens byte-identical"
+        "actual schema 1 migration: retained revision 77, clock 1, RNG, eight produced clips and no offline sales; version 4 repeat opens byte-identical"
     );
 }
 

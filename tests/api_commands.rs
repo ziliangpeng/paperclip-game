@@ -186,6 +186,7 @@ fn assert_fresh_view(response: &HttpResponse) -> GameView {
             "auto_clipper_rate",
             "auto_clipper_revealed",
             "auto_clippers",
+            "available_trust",
             "clips_sold",
             "computing_hidden",
             "console_messages",
@@ -197,9 +198,13 @@ fn assert_fresh_view(response: &HttpResponse) -> GameView {
             "marketing_cost",
             "marketing_level",
             "memory",
+            "next_trust_target",
             "price_per_clip",
             "processors",
             "projects_hidden",
+            "standard_ops",
+            "standard_ops_capacity",
+            "temporary_ops",
             "trust",
             "unsold_clips",
             "unused_clips",
@@ -226,8 +231,13 @@ fn assert_fresh_view(response: &HttpResponse) -> GameView {
         "last_sale_revenue",
         "marketing_level",
         "trust",
+        "available_trust",
+        "next_trust_target",
         "processors",
         "memory",
+        "standard_ops",
+        "temporary_ops",
+        "standard_ops_capacity",
         "auto_clippers",
         "auto_clipper_cost",
         "auto_clipper_rate",
@@ -258,8 +268,13 @@ fn assert_fresh_view(response: &HttpResponse) -> GameView {
     assert_eq!(view.game.last_sale_revenue.to_string(), "0");
     assert_eq!(view.game.marketing_level.to_string(), "1");
     assert_eq!(view.game.trust.to_string(), "2");
+    assert_eq!(view.game.available_trust.to_string(), "0");
+    assert_eq!(view.game.next_trust_target.to_string(), "3000");
     assert_eq!(view.game.processors.to_string(), "1");
     assert_eq!(view.game.memory.to_string(), "1");
+    assert_eq!(view.game.standard_ops.to_string(), "0");
+    assert_eq!(view.game.temporary_ops.to_string(), "0");
+    assert_eq!(view.game.standard_ops_capacity.to_string(), "1000");
     assert!(view.game.computing_hidden);
     assert!(view.game.projects_hidden);
     assert!(!view.game.auto_clipper_revealed);
@@ -759,6 +774,230 @@ fn actual_commands_expose_both_computational_unlock_routes_through_typed_get() {
     stranded_server.stop();
 }
 
+fn allocation_command(kind: &str, id: &str) -> Vec<u8> {
+    serde_json::to_vec(&json!({
+        "command_id": id,
+        "type": kind,
+        "arguments": {}
+    }))
+    .unwrap()
+}
+
+#[test]
+fn closed_allocation_commands_cover_retries_arguments_full_capacity_and_domain() {
+    let server = TestServer::start_with_state(|state| {
+        state.pro.computing_hidden = false;
+        state.pro.projects_hidden = false;
+        state.pro.trust = IntegralAmount::from_i128(4);
+    });
+    let malformed = serde_json::to_vec(&json!({
+        "command_id": "c01-http-add-p",
+        "type": "add_processor",
+        "arguments": {"count": 1}
+    }))
+    .unwrap();
+    assert_eq!(post(server.address, malformed).status, 400);
+    let add_p_body = allocation_command("add_processor", "c01-http-add-p");
+    let add_p = post(server.address, &add_p_body);
+    assert_eq!(
+        add_p.status, 200,
+        "schema failure did not bind the retry key"
+    );
+    assert_eq!(add_p.json()["status"], "applied");
+    let projection = get(server.address).view();
+    assert_eq!(projection.game.trust.to_string(), "4");
+    assert_eq!(projection.game.available_trust.to_string(), "1");
+    assert_eq!(projection.game.processors.to_string(), "2");
+    assert_eq!(projection.game.memory.to_string(), "1");
+    assert_eq!(projection.game.standard_ops_capacity.to_string(), "1000");
+
+    let add_m_body = allocation_command("add_memory", "c01-http-add-m");
+    assert_eq!(post(server.address, &add_m_body).status, 200);
+    let full = get(server.address).view();
+    assert_eq!(full.game.trust.to_string(), "4");
+    assert_eq!(full.game.available_trust.to_string(), "0");
+    assert_eq!(full.game.processors.to_string(), "2");
+    assert_eq!(full.game.memory.to_string(), "2");
+    assert_eq!(full.game.standard_ops_capacity.to_string(), "2000");
+    assert_eq!(full.game.standard_ops.to_string(), "0");
+    assert_eq!(full.game.temporary_ops.to_string(), "0");
+    assert_eq!(
+        post(server.address, &add_p_body),
+        add_p,
+        "success replay keeps first revision/body"
+    );
+    let conflict = post(
+        server.address,
+        allocation_command("add_memory", "c01-http-add-p"),
+    );
+    assert_eq!(conflict.status, 409);
+    assert_eq!(post(server.address, &add_p_body), add_p);
+
+    for kind in ["add_processor", "add_memory"] {
+        let body = allocation_command(kind, &format!("c01-http-full-{kind}"));
+        let rejected = post(server.address, &body);
+        assert_eq!(rejected.status, 422);
+        assert_eq!(rejected.json()["reason"], "trust_capacity_full");
+        assert_eq!(post(server.address, body), rejected);
+    }
+    let after_rejections = get(server.address).view();
+    assert_eq!(after_rejections.game.trust, full.game.trust);
+    assert_eq!(
+        after_rejections.game.available_trust,
+        full.game.available_trust
+    );
+    assert_eq!(after_rejections.game.processors, full.game.processors);
+    assert_eq!(after_rejections.game.memory, full.game.memory);
+    assert_eq!(
+        after_rejections.game.standard_ops_capacity,
+        full.game.standard_ops_capacity
+    );
+    server.stop();
+
+    let upper = paperclip_game::game::evaluator::processor_domain_upper();
+    let outward_server = TestServer::start_with_state(move |state| {
+        state.pro.computing_hidden = false;
+        state.pro.projects_hidden = false;
+        state.pro.trust = Amount::from_i128(1)
+            .multiply_integer(&(&upper + 2u8))
+            .integral()
+            .unwrap();
+        state.pro.processors = Amount::from_i128(1)
+            .multiply_integer(&upper)
+            .integral()
+            .unwrap();
+        state.pro.memory = IntegralAmount::from_i128(1);
+        state.pro.creativity_speed = NonNegativeAmount::from_i128(1).unwrap();
+    });
+    let before = get(outward_server.address).view();
+    assert_eq!(before.game.available_trust.to_string(), "1");
+    let outward_body = allocation_command("add_processor", "c01-http-outward-p");
+    let outward = post(outward_server.address, &outward_body);
+    assert_eq!(outward.status, 422);
+    assert_eq!(outward.json()["reason"], "processor_evaluator_domain");
+    let after = get(outward_server.address).view();
+    assert_eq!(after.game.trust, before.game.trust);
+    assert_eq!(after.game.available_trust, before.game.available_trust);
+    assert_eq!(after.game.processors, before.game.processors);
+    assert_eq!(after.game.memory, before.game.memory);
+    assert_eq!(after.game.next_trust_target, before.game.next_trust_target);
+    assert_eq!(after.game.standard_ops, before.game.standard_ops);
+    assert_eq!(after.game.temporary_ops, before.game.temporary_ops);
+    assert_eq!(after.game.console_messages, before.game.console_messages);
+    // Memory remains a valid separate path and never invokes the P curve.
+    assert_eq!(
+        post(
+            outward_server.address,
+            allocation_command("add_memory", "c01-http-outward-m")
+        )
+        .status,
+        200
+    );
+    assert_eq!(
+        post(outward_server.address, &outward_body),
+        outward,
+        "domain replay is terminal even after later capacity change"
+    );
+    let after_memory = get(outward_server.address).view();
+    assert_eq!(after_memory.game.memory.to_string(), "2");
+    assert_eq!(after_memory.game.standard_ops_capacity.to_string(), "2000");
+    assert_eq!(after_memory.game.available_trust.to_string(), "0");
+    assert_eq!(after_memory.game.processors, before.game.processors);
+    assert_eq!(after_memory.game.trust, before.game.trust);
+    outward_server.stop();
+}
+
+#[test]
+fn concurrent_allocation_serializes_capacity_and_coalesces_same_key() {
+    let server = TestServer::start_with_state(|state| {
+        state.pro.computing_hidden = false;
+        state.pro.projects_hidden = false;
+        state.pro.trust = IntegralAmount::from_i128(3);
+    });
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+    let responses = std::thread::scope(|scope| {
+        let mut jobs = Vec::new();
+        for kind in ["add_processor", "add_memory"] {
+            let barrier = barrier.clone();
+            jobs.push(scope.spawn(move || {
+                barrier.wait();
+                post(
+                    server.address,
+                    allocation_command(kind, &format!("c01-contend-{kind}")),
+                )
+            }));
+        }
+        barrier.wait();
+        jobs.into_iter()
+            .map(|job| job.join().unwrap())
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(
+        responses
+            .iter()
+            .filter(|response| response.status == 200)
+            .count(),
+        1
+    );
+    let rejected: Vec<_> = responses
+        .iter()
+        .filter(|response| response.status == 422)
+        .collect();
+    assert_eq!(rejected.len(), 1);
+    assert_eq!(rejected[0].json()["reason"], "trust_capacity_full");
+    let after = get(server.address).view();
+    assert_eq!(after.game.trust.to_string(), "3");
+    assert_eq!(after.game.available_trust.to_string(), "0");
+    assert!(
+        (after.game.processors.to_string() == "2" && after.game.memory.to_string() == "1")
+            || (after.game.processors.to_string() == "1" && after.game.memory.to_string() == "2")
+    );
+    server.stop();
+
+    let server = TestServer::start_with_state(|state| {
+        state.pro.computing_hidden = false;
+        state.pro.projects_hidden = false;
+        state.pro.trust = IntegralAmount::from_i128(4);
+    });
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+    let responses = std::thread::scope(|scope| {
+        let mut jobs = Vec::new();
+        for _ in 0..6 {
+            let barrier = barrier.clone();
+            jobs.push(scope.spawn(move || {
+                barrier.wait();
+                post(
+                    server.address,
+                    allocation_command("add_processor", "c01-coalesced-p"),
+                )
+            }));
+        }
+        let barrier_for_memory = barrier.clone();
+        jobs.push(scope.spawn(move || {
+            barrier_for_memory.wait();
+            post(
+                server.address,
+                allocation_command("add_memory", "c01-coalesced-m"),
+            )
+        }));
+        barrier.wait();
+        jobs.into_iter()
+            .map(|job| job.join().unwrap())
+            .collect::<Vec<_>>()
+    });
+    let first = &responses[0];
+    assert_eq!(first.status, 200);
+    assert!(responses[..6].iter().all(|response| response == first));
+    assert_eq!(responses[6].status, 200);
+    let after = get(server.address).view();
+    assert_eq!(after.game.trust.to_string(), "4");
+    assert_eq!(after.game.available_trust.to_string(), "0");
+    assert_eq!(after.game.processors.to_string(), "2");
+    assert_eq!(after.game.memory.to_string(), "2");
+    assert_eq!(after.game.standard_ops_capacity.to_string(), "2000");
+    server.stop();
+}
+
 #[test]
 fn unlock_negative_space_rejects_later_controls_and_arbitrary_writes_without_mutation() {
     let server = TestServer::start();
@@ -769,8 +1008,6 @@ fn unlock_negative_space_rejects_later_controls_and_arbitrary_writes_without_mut
         "set_state",
         "pause",
         "step",
-        "add_processor",
-        "add_memory",
     ] {
         let response = post(
             server.address,
@@ -783,6 +1020,23 @@ fn unlock_negative_space_rejects_later_controls_and_arbitrary_writes_without_mut
         );
         assert_eq!(response.status, 404, "{kind}");
         assert_eq!(response.json()["status"], "unknown_command", "{kind}");
+    }
+    for kind in ["add_processor", "add_memory"] {
+        let body = serde_json::to_vec(&json!({
+            "command_id": format!("m2-c01-locked-{kind}"),
+            "type": kind,
+            "arguments": {}
+        }))
+        .unwrap();
+        let response = post(server.address, &body);
+        assert_eq!(response.status, 422, "{kind}");
+        assert_eq!(response.json()["status"], "rule_rejected");
+        assert_eq!(response.json()["reason"], "computation_locked");
+        assert_eq!(
+            post(server.address, body),
+            response,
+            "locked terminal replay"
+        );
     }
     let arbitrary_write = post(
         server.address,

@@ -1,7 +1,7 @@
-//! Strict snapshot payloads with explicit 1/2 -> 3 migration.
+//! Strict snapshot payloads with explicit 1/2/3 -> 4 migration.
 //!
 //! Payload format versions and SQLite schema versions are independent concepts.
-//! Current capture always emits version 3; supported historical V1/V2 payloads
+//! Current capture always emits version 4; supported historical V1/V2/V3 payloads
 //! retain their whole legacy state before current-format revalidation.
 
 use crate::game::amount::{Amount, IntegralAmount, NonNegativeAmount, SafeU64};
@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use std::error::Error;
 use std::fmt;
 
-pub const SNAPSHOT_VERSION: u8 = 3;
+pub const SNAPSHOT_VERSION: u8 = 4;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -53,6 +53,11 @@ pub struct ProSnapshot {
     pub trust: IntegralAmount,
     pub processors: IntegralAmount,
     pub memory: IntegralAmount,
+    pub next_trust_target: IntegralAmount,
+    pub trust_target_predecessor: IntegralAmount,
+    pub creativity_speed: NonNegativeAmount,
+    pub standard_ops: NonNegativeAmount,
+    pub temporary_ops: NonNegativeAmount,
     pub computing_hidden: bool,
     pub projects_hidden: bool,
     pub auto_clipper_revealed: bool,
@@ -115,6 +120,52 @@ pub struct ClockSnapshot {
     pub slow_phase: u16,
     pub combat_remainder_nanos: u32,
     pub combat_pulses: SafeU64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct SnapshotV3 {
+    snapshot_version: u8,
+    revision: SafeU64,
+    pro: ProSnapshotV3,
+    clock: ClockSnapshot,
+    rng_state: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ProSnapshotV3 {
+    pub lifetime_clips: NonNegativeAmount,
+    pub unsold_clips: NonNegativeAmount,
+    pub unused_clips: NonNegativeAmount,
+    pub wire: NonNegativeAmount,
+    pub funds: Amount,
+    pub wire_spool_length: NonNegativeAmount,
+    pub wire_quote: Amount,
+    pub price_per_clip: Amount,
+    pub marketing_level: IntegralAmount,
+    pub marketing_effectiveness: Amount,
+    pub demand_boost: Amount,
+    pub prestige_u: IntegralAmount,
+    pub demand: NonNegativeAmount,
+    pub clips_sold: NonNegativeAmount,
+    pub income: Amount,
+    pub last_sale_revenue: Amount,
+    pub wire_base_price: Amount,
+    pub wire_price_counter: SafeU64,
+    pub wire_purchase_count: SafeU64,
+    pub wire_inactivity_ticks: SafeU64,
+    pub trust: IntegralAmount,
+    pub processors: IntegralAmount,
+    pub memory: IntegralAmount,
+    pub computing_hidden: bool,
+    pub projects_hidden: bool,
+    pub auto_clipper_revealed: bool,
+    pub auto_clippers: IntegralAmount,
+    pub auto_clipper_cost: Amount,
+    pub auto_clipper_rate: NonNegativeAmount,
+    pub auto_clipper_production_accumulator: NonNegativeAmount,
+    pub console_messages: [String; 5],
 }
 
 #[derive(Clone, Debug)]
@@ -192,6 +243,10 @@ impl Snapshot {
                 upgrade_v2(legacy)
             }
             3 => {
+                let legacy: SnapshotV3 = decode_strict_canonical(text)?;
+                upgrade_v3(legacy)
+            }
+            4 => {
                 let snapshot: Self = decode_strict_canonical(text)?;
                 snapshot.validate()?;
                 Ok(snapshot)
@@ -239,6 +294,12 @@ fn upgrade_v1(legacy: SnapshotV1) -> Result<Snapshot, SnapshotError> {
 }
 
 fn upgrade_v2(legacy: SnapshotV2) -> Result<Snapshot, SnapshotError> {
+    let original = legacy.pro.to_state_partial()?;
+    let pro = ProSnapshot::from_state(&original);
+    upgrade_parts(legacy.revision, pro, legacy.clock, legacy.rng_state)
+}
+
+fn upgrade_v3(legacy: SnapshotV3) -> Result<Snapshot, SnapshotError> {
     let original = legacy.pro.to_state_partial()?;
     let pro = ProSnapshot::from_state(&original);
     upgrade_parts(legacy.revision, pro, legacy.clock, legacy.rng_state)
@@ -339,6 +400,46 @@ impl ProSnapshotV2 {
     }
 }
 
+impl ProSnapshotV3 {
+    fn to_state_partial(&self) -> Result<ProState, SnapshotError> {
+        Ok(ProState {
+            lifetime_clips: self.lifetime_clips.clone(),
+            unsold_clips: self.unsold_clips.clone(),
+            unused_clips: self.unused_clips.clone(),
+            wire: self.wire.clone(),
+            funds: self.funds.clone(),
+            wire_spool_length: self.wire_spool_length.clone(),
+            wire_quote: self.wire_quote.clone(),
+            price_per_clip: self.price_per_clip.clone(),
+            marketing_level: self.marketing_level.clone(),
+            marketing_effectiveness: self.marketing_effectiveness.clone(),
+            demand_boost: self.demand_boost.clone(),
+            prestige_u: self.prestige_u.clone(),
+            demand: self.demand.clone(),
+            clips_sold: self.clips_sold.clone(),
+            income: self.income.clone(),
+            last_sale_revenue: self.last_sale_revenue.clone(),
+            wire_base_price: self.wire_base_price.clone(),
+            wire_price_counter: self.wire_price_counter,
+            wire_purchase_count: self.wire_purchase_count,
+            wire_inactivity_ticks: self.wire_inactivity_ticks,
+            trust: self.trust.clone(),
+            processors: self.processors.clone(),
+            memory: self.memory.clone(),
+            computing_hidden: self.computing_hidden,
+            projects_hidden: self.projects_hidden,
+            auto_clipper_revealed: self.auto_clipper_revealed,
+            auto_clippers: self.auto_clippers.clone(),
+            auto_clipper_cost: self.auto_clipper_cost.clone(),
+            auto_clipper_rate: self.auto_clipper_rate.clone(),
+            auto_clipper_production_accumulator: self.auto_clipper_production_accumulator.clone(),
+            console_messages: self.console_messages.clone(),
+            // C01 fields alone receive fresh defaults after all V3 fields are retained.
+            ..ProState::fresh()
+        })
+    }
+}
+
 impl ProSnapshot {
     fn from_state(state: &ProState) -> Self {
         Self {
@@ -365,6 +466,11 @@ impl ProSnapshot {
             trust: state.trust.clone(),
             processors: state.processors.clone(),
             memory: state.memory.clone(),
+            next_trust_target: state.next_trust_target.clone(),
+            trust_target_predecessor: state.trust_target_predecessor.clone(),
+            creativity_speed: state.creativity_speed.clone(),
+            standard_ops: state.standard_ops.clone(),
+            temporary_ops: state.temporary_ops.clone(),
             computing_hidden: state.computing_hidden,
             projects_hidden: state.projects_hidden,
             auto_clipper_revealed: state.auto_clipper_revealed,
@@ -401,6 +507,11 @@ impl ProSnapshot {
             trust: self.trust.clone(),
             processors: self.processors.clone(),
             memory: self.memory.clone(),
+            next_trust_target: self.next_trust_target.clone(),
+            trust_target_predecessor: self.trust_target_predecessor.clone(),
+            creativity_speed: self.creativity_speed.clone(),
+            standard_ops: self.standard_ops.clone(),
+            temporary_ops: self.temporary_ops.clone(),
             computing_hidden: self.computing_hidden,
             projects_hidden: self.projects_hidden,
             auto_clipper_revealed: self.auto_clipper_revealed,
@@ -425,6 +536,15 @@ fn validate_current_pro(state: &ProState) -> Result<(), SnapshotError> {
         if count.amount().is_negative() {
             return Err(SnapshotError::DomainViolation);
         }
+    }
+    if state.next_trust_target.amount() <= &Amount::zero()
+        || state.trust_target_predecessor.amount() <= &Amount::zero()
+        || state.next_trust_target <= state.trust_target_predecessor
+        || state
+            .standard_ops_capacity()
+            .is_none_or(|capacity| state.standard_ops > capacity)
+    {
+        return Err(SnapshotError::DomainViolation);
     }
     // A legal producer purchase always reveals. Actual output and its partial-
     // second accumulator cannot exceed the whole request for the stored count.
@@ -696,7 +816,7 @@ mod tests {
     }
 
     #[test]
-    fn complete_v3_roundtrip_restores_exact_state_and_uninterrupted_continuation() {
+    fn complete_v4_roundtrip_restores_exact_state_and_uninterrupted_continuation() {
         let original = rich_state();
         let before_capture = original.rng_state_hex();
         let snapshot = Snapshot::capture(&original, MAX_SAFE_JSON_INTEGER).unwrap();
@@ -887,10 +1007,10 @@ mod tests {
             assert!(canonical.contains(needle), "missing fixture text {needle}");
             canonical.replacen(needle, replacement, 1)
         };
-        let unsupported_version = replace("\"snapshot_version\":3", "\"snapshot_version\":4");
+        let unsupported_version = replace("\"snapshot_version\":4", "\"snapshot_version\":5");
         let duplicate = replace(
-            "\"snapshot_version\":3",
-            "\"snapshot_version\":3,\"snapshot_version\":3",
+            "\"snapshot_version\":4",
+            "\"snapshot_version\":4,\"snapshot_version\":4",
         );
         let duplicate_nested = replace(
             "\"funds\":\"-0.000000000000000001\"",
@@ -1091,6 +1211,22 @@ mod tests {
             bad_message.to_canonical_bytes(),
             Err(SnapshotError::DomainViolation)
         );
+        for invalid in [
+            replace("\"creativity_speed\":\"1\"", "\"creativity_speed\":1"),
+            replace("\"creativity_speed\":\"1\"", "\"creativity_speed\":\"-1\""),
+            replace(
+                "\"next_trust_target\":\"3000\"",
+                "\"next_trust_target\":\"03000\"",
+            ),
+            replace(
+                "\"next_trust_target\":\"3000\"",
+                "\"next_trust_target\":\"2000\"",
+            ),
+            replace("\"standard_ops\":\"0\"", "\"standard_ops\":\"3001\""),
+            replace("\"temporary_ops\":\"0\"", "\"temporary_ops\":\"-1\""),
+        ] {
+            assert!(Snapshot::from_canonical_bytes(invalid.as_bytes()).is_err());
+        }
         for field in 0..5 {
             let mut invalid = base.clone();
             let count = match field {
@@ -1157,7 +1293,12 @@ mod tests {
             rng_state: current.rng_state.clone(),
         };
         let migrated = Snapshot::from_canonical_bytes(&serde_json::to_vec(&v1).unwrap()).unwrap();
-        assert_eq!(migrated.snapshot_version, 3);
+        assert_eq!(migrated.snapshot_version, 4);
+        assert_eq!(migrated.pro.next_trust_target.to_string(), "3000");
+        assert_eq!(migrated.pro.trust_target_predecessor.to_string(), "2000");
+        assert_eq!(migrated.pro.creativity_speed.to_string(), "1");
+        assert_eq!(migrated.pro.standard_ops.to_string(), "0");
+        assert_eq!(migrated.pro.temporary_ops.to_string(), "0");
         assert_eq!(migrated.pro.lifetime_clips, current.pro.lifetime_clips);
         assert_eq!(migrated.pro.funds, current.pro.funds);
         assert_eq!(migrated.pro.wire_quote, current.pro.wire_quote);
@@ -1189,6 +1330,14 @@ mod tests {
         let original = rich_state();
         let current = Snapshot::capture(&original, 92).unwrap();
         let canonical = String::from_utf8(current.to_canonical_bytes().unwrap()).unwrap();
+        let c01_additions = format!(
+            ",\"next_trust_target\":{},\"trust_target_predecessor\":{},\"creativity_speed\":{},\"standard_ops\":{},\"temporary_ops\":{}",
+            serde_json::to_string(&current.pro.next_trust_target).unwrap(),
+            serde_json::to_string(&current.pro.trust_target_predecessor).unwrap(),
+            serde_json::to_string(&current.pro.creativity_speed).unwrap(),
+            serde_json::to_string(&current.pro.standard_ops).unwrap(),
+            serde_json::to_string(&current.pro.temporary_ops).unwrap(),
+        );
         let additions = format!(
             ",\"auto_clipper_rate\":{},\"auto_clipper_production_accumulator\":{},\"console_messages\":{}",
             serde_json::to_string(&current.pro.auto_clipper_rate).unwrap(),
@@ -1196,11 +1345,18 @@ mod tests {
             serde_json::to_string(&current.pro.console_messages).unwrap()
         );
         assert!(canonical.contains(&additions));
+        assert!(canonical.contains(&c01_additions));
         let legacy = canonical
-            .replacen("\"snapshot_version\":3", "\"snapshot_version\":2", 1)
-            .replacen(&additions, "", 1);
+            .replacen("\"snapshot_version\":4", "\"snapshot_version\":2", 1)
+            .replacen(&additions, "", 1)
+            .replacen(&c01_additions, "", 1);
         let migrated = Snapshot::from_canonical_bytes(legacy.as_bytes()).unwrap();
-        assert_eq!(migrated.snapshot_version, 3);
+        assert_eq!(migrated.snapshot_version, 4);
+        assert_eq!(migrated.pro.next_trust_target.to_string(), "3000");
+        assert_eq!(migrated.pro.trust_target_predecessor.to_string(), "2000");
+        assert_eq!(migrated.pro.creativity_speed.to_string(), "1");
+        assert_eq!(migrated.pro.standard_ops.to_string(), "0");
+        assert_eq!(migrated.pro.temporary_ops.to_string(), "0");
         // Deliberately inconsistent with a level-7 successor: restoration must
         // charge/retain the stored price, never reconstruct from producer level.
         assert_eq!(migrated.pro.auto_clippers.to_string(), "7");
@@ -1236,7 +1392,7 @@ mod tests {
     }
 
     #[test]
-    fn nondefault_v3_economy_continuation_is_identical_after_restore() {
+    fn nondefault_v4_economy_continuation_is_identical_after_restore() {
         let original = rich_state();
         let snapshot = Snapshot::capture(&original, 88).unwrap();
         let encoded = snapshot.to_canonical_bytes().unwrap();

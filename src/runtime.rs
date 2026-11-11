@@ -95,6 +95,8 @@ enum Intent {
     RaisePrice,
     BuyMarketing,
     BuyAutoClipper,
+    AddProcessor,
+    AddMemory,
 }
 
 impl Command {
@@ -124,6 +126,14 @@ impl Command {
 
     pub fn buy_auto_clipper(id: CommandId) -> Self {
         Self::intent(id, Intent::BuyAutoClipper)
+    }
+
+    pub fn add_processor(id: CommandId) -> Self {
+        Self::intent(id, Intent::AddProcessor)
+    }
+
+    pub fn add_memory(id: CommandId) -> Self {
+        Self::intent(id, Intent::AddMemory)
     }
 
     fn intent(id: CommandId, intent: Intent) -> Self {
@@ -562,6 +572,7 @@ impl<C: MonotonicClock> Writer<C> {
         economy::advance_auto_clippers(&mut candidate, cadence.second_due)
             .map_err(RuntimeFailure::Economy)?;
         economy::observe_computational_resources(&mut candidate.pro);
+        economy::observe_trust_targets(&mut candidate.pro).map_err(RuntimeFailure::Economy)?;
         self.state = candidate;
         self.revision = next_revision;
         self.lag_debt_nanos -= UPDATE_QUANTUM_NANOS;
@@ -571,7 +582,7 @@ impl<C: MonotonicClock> Writer<C> {
     fn execute_new(&mut self, command: Command) -> Result<CommandReceipt, RuntimeFailure> {
         let next_revision = next_revision(self.revision)?;
         let mut candidate = self.state.clone();
-        let outcome = match command.intent {
+        let mut outcome = match command.intent {
             Intent::MakePaperclip => convert_one_wire(&mut candidate.pro)
                 .map(|_| ())
                 .map_err(CommandRejection::Conversion),
@@ -589,6 +600,12 @@ impl<C: MonotonicClock> Writer<C> {
             }
             Intent::BuyAutoClipper => {
                 economy::buy_auto_clipper(&mut candidate.pro).map_err(CommandRejection::Economy)
+            }
+            Intent::AddProcessor => {
+                economy::add_processor(&mut candidate.pro).map_err(CommandRejection::Economy)
+            }
+            Intent::AddMemory => {
+                economy::add_memory(&mut candidate.pro).map_err(CommandRejection::Economy)
             }
         };
         if outcome.is_ok() {
@@ -608,6 +625,8 @@ impl<C: MonotonicClock> Writer<C> {
             }
             economy::observe_auto_clipper_reveal(&mut candidate.pro);
             economy::observe_computational_resources(&mut candidate.pro);
+            outcome = economy::observe_trust_targets(&mut candidate.pro)
+                .map_err(CommandRejection::Economy);
         }
         let result = match outcome {
             Ok(()) => {

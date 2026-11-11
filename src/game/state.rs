@@ -30,6 +30,11 @@ pub struct ProState {
     pub trust: IntegralAmount,
     pub processors: IntegralAmount,
     pub memory: IntegralAmount,
+    pub next_trust_target: IntegralAmount,
+    pub trust_target_predecessor: IntegralAmount,
+    pub creativity_speed: NonNegativeAmount,
+    pub standard_ops: NonNegativeAmount,
+    pub temporary_ops: NonNegativeAmount,
     pub computing_hidden: bool,
     pub projects_hidden: bool,
     pub auto_clipper_revealed: bool,
@@ -47,6 +52,29 @@ impl ProState {
     /// Whole-unit mantissa conversion used by exact integer structural fields.
     pub(crate) fn integral_mantissa(value: &IntegralAmount) -> BigInt {
         value.amount().mantissa() / Amount::from_i128(1).mantissa()
+    }
+
+    /// Unspent configuration capacity, or zero when retained state is already full.
+    pub fn available_trust_capacity(&self) -> NonNegativeAmount {
+        let used =
+            Self::integral_mantissa(&self.processors) + Self::integral_mantissa(&self.memory);
+        let available = Self::integral_mantissa(&self.trust) - used;
+        if available <= BigInt::from(0u8) {
+            NonNegativeAmount::zero()
+        } else {
+            Amount::from_i128(1)
+                .multiply_integer(&available)
+                .nonnegative()
+                .expect("positive capacity is nonnegative")
+        }
+    }
+
+    /// Standard Operations capacity is Memory * 1000, without an Ops generation rule.
+    pub fn standard_ops_capacity(&self) -> Option<NonNegativeAmount> {
+        Amount::from_i128(1_000)
+            .multiply_integer(&Self::integral_mantissa(&self.memory))
+            .nonnegative()
+            .ok()
     }
 
     /// Current Marketing cost in whole dollars, exactly derived from its stored level.
@@ -84,6 +112,12 @@ impl ProState {
             trust: IntegralAmount::from_i128(2),
             processors: IntegralAmount::from_i128(1),
             memory: IntegralAmount::from_i128(1),
+            next_trust_target: IntegralAmount::from_i128(3_000),
+            trust_target_predecessor: IntegralAmount::from_i128(2_000),
+            // Fresh speed 1 is distinct from pure P=1 recompute, which is 0.
+            creativity_speed: NonNegativeAmount::from_i128(1).expect("valid fresh speed"),
+            standard_ops: NonNegativeAmount::zero(),
+            temporary_ops: NonNegativeAmount::zero(),
             computing_hidden: true,
             projects_hidden: true,
             auto_clipper_revealed: false,
@@ -145,6 +179,11 @@ mod tests {
         assert_eq!(state.trust.to_string(), "2");
         assert_eq!(state.processors.to_string(), "1");
         assert_eq!(state.memory.to_string(), "1");
+        assert_eq!(state.next_trust_target.to_string(), "3000");
+        assert_eq!(state.trust_target_predecessor.to_string(), "2000");
+        assert_eq!(state.creativity_speed.to_string(), "1");
+        assert_eq!(state.standard_ops.to_string(), "0");
+        assert_eq!(state.temporary_ops.to_string(), "0");
         assert!(state.computing_hidden);
         assert!(state.projects_hidden);
         assert!(!state.auto_clipper_revealed);
