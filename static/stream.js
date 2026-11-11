@@ -44,7 +44,7 @@ const NONNEGATIVE_FIELDS = [
 ];
 const INTEGRAL_FIELDS = [
   "auto_clippers", "available_trust", "marketing_level", "memory", "next_trust_target", "processors",
-  "standard_ops", "standard_ops_capacity", "temporary_ops", "trust",
+  "standard_ops_capacity", "trust",
 ];
 const AMOUNT_PATTERN = /^-?(?:0|[1-9][0-9]*)(?:\.[0-9]{0,17}[1-9])?$/;
 const MAX_AMOUNT_CHARACTERS = 1_048_576;

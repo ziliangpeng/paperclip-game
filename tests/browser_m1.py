@@ -2524,7 +2524,7 @@ def check_numeric_helpers(page: Cdp, worktree: Path) -> dict[str, Any]:
     result = page.evaluate("""(async () => {
       const amount = await import('/static/stream.js');
       const display = await import('/static/view-model.js');
-      const {parseAmount, formatAmount, compareAmount, addAmount, ceilAmount} = amount;
+      const {parseAmount, formatAmount, compareAmount, addAmount, ceilAmount, parseTransportJson, assertCompleteGameView} = amount;
       const checks = [];
       const check = (condition, label) => { if (!condition) throw new Error(label); checks.push(label); };
       check(parseAmount('0.000000000000000001').scaled === 1n, '1e-18 scaled BigInt');
@@ -2549,6 +2549,22 @@ def check_numeric_helpers(page: Cdp, worktree: Path) -> dict[str, Any]:
       ];
       for (const [raw, expected] of demandPercentChecks) {
         check(display.formatDemandPercent(raw) === expected, 'exact Public Demand percent ' + raw);
+      }
+      const completeResponse = await fetch('/api/game/view', {cache: 'no-store'});
+      check(completeResponse.status === 200, 'complete native View GET for fractional-Ops type guards');
+      const completeView = parseTransportJson(await completeResponse.text());
+      assertCompleteGameView(completeView);
+      const typedGuards = [
+        ['standard_ops', '-0.000000000000000001', 'negative nonnegative Amount', 'fractional Ops preserve negative standard rejection'],
+        ['temporary_ops', '-0.000000000000000001', 'negative nonnegative Amount', 'fractional Ops preserve negative temporary rejection'],
+        ['standard_ops_capacity', '1000.000000000000000001', 'fractional integral Amount', 'Ops capacity remains integral'],
+      ];
+      for (const [field, value, reason, label] of typedGuards) {
+        const candidate = structuredClone(completeView);
+        candidate.game[field] = value;
+        let rejected = null;
+        try { assertCompleteGameView(candidate); } catch (error) { rejected = error; }
+        check(rejected instanceof TypeError && rejected.message === reason, label);
       }
       const invalid = ['', '-0', '+1', '01', '1.0', '.5', '1.', '1e3', ' 1', '1 ', '1\\n',
         '\\uFF11\\uFF12', 'NaN', 'Infinity', '0.0000000000000000000', '1.2345678901234567890',
@@ -2588,6 +2604,7 @@ def run_numeric_and_ordering(browser: Browser, state: ProxyState, template: dict
             "lifetime_clips": "0", "unsold_clips": "0", "unused_clips": "0",
             "wire": "0", "funds": "0", "auto_clipper_revealed": True,
             "auto_clipper_cost": "6.1", "computing_hidden": False,
+            "standard_ops": "1", "temporary_ops": "2",
         }),
         fixture_view(template, run_id, 3, {
             "lifetime_clips": "9007199254740993",
@@ -2600,6 +2617,8 @@ def run_numeric_and_ordering(browser: Browser, state: ProxyState, template: dict
             "demand": "9007199254740993", "marketing_cost": "9007199254740994",
             "clips_sold": "9007199254740995", "income": "0.000000000000000001",
             "last_sale_revenue": "0.123",
+            "standard_ops": "0.000000000000000001",
+            "temporary_ops": "20.000000000000000001",
         }),
         fixture_view(template, run_id, 4, {
             "auto_clipper_revealed": True, "auto_clipper_cost": "6.331",
@@ -2650,6 +2669,9 @@ def run_numeric_and_ordering(browser: Browser, state: ProxyState, template: dict
     assert state.fixture_sent[1].wait(8)
     wait_dom(page, "document.documentElement.dataset.revision", "2", "exact zero fixture")
     assert amount("lifetime-clips") == {"canonical": "0", "display": "0", "title": "0"}
+    assert amount("standard-ops") == {"canonical": "1", "display": "1", "title": "1"}
+    assert amount("temporary-ops") == {"canonical": "2", "display": "2", "title": "2"}
+    assert amount("standard-ops-capacity")["canonical"] == "1000"
     assert amount("funds")["display"] == "0.00"
     assert amount("auto-clipper-cost") == {"canonical": "6.1", "display": "6.10", "title": "6.1"}
     assert page.evaluate("document.getElementById('computational-resources').hidden") is False
@@ -2669,6 +2691,9 @@ def run_numeric_and_ordering(browser: Browser, state: ProxyState, template: dict
         "clips-sold": "9007199254740995",
         "income": "0.000000000000000001",
         "last-sale-revenue": "0.123",
+        "standard-ops": "0.000000000000000001",
+        "temporary-ops": "20.000000000000000001",
+        "standard-ops-capacity": "1000",
     }
     for element, canonical in expected.items():
         actual = amount(element)
