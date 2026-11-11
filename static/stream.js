@@ -23,27 +23,28 @@ const CLOCK_FIELDS = [
   "slow_phase", "update_count",
 ];
 const GAME_FIELDS = [
-  "auto_clipper_cost", "auto_clipper_rate", "auto_clipper_revealed", "auto_clippers", "clips_sold",
-  "computing_hidden", "console_messages", "demand", "funds", "income", "last_sale_revenue",
-  "lifetime_clips", "marketing_cost", "marketing_level", "memory",
-  "price_per_clip", "processors", "projects_hidden", "trust", "unsold_clips",
-  "unused_clips", "wire", "wire_quote", "wire_spool_length",
+  "auto_clipper_cost", "auto_clipper_rate", "auto_clipper_revealed", "auto_clippers", "available_trust",
+  "clips_sold", "computing_hidden", "console_messages", "demand", "funds", "income", "last_sale_revenue",
+  "lifetime_clips", "marketing_cost", "marketing_level", "memory", "next_trust_target",
+  "price_per_clip", "processors", "projects_hidden", "standard_ops", "standard_ops_capacity", "temporary_ops",
+  "trust", "unsold_clips", "unused_clips", "wire", "wire_quote", "wire_spool_length",
 ];
 const AMOUNT_FIELDS = [
-  "auto_clipper_cost", "auto_clipper_rate", "auto_clippers", "clips_sold", "demand", "funds",
-  "income", "last_sale_revenue", "lifetime_clips", "marketing_cost",
-  "marketing_level", "memory", "price_per_clip", "processors", "trust",
+  "auto_clipper_cost", "auto_clipper_rate", "auto_clippers", "available_trust", "clips_sold", "demand", "funds",
+  "income", "last_sale_revenue", "lifetime_clips", "marketing_cost", "marketing_level", "memory", "next_trust_target",
+  "price_per_clip", "processors", "standard_ops", "standard_ops_capacity", "temporary_ops", "trust",
   "unsold_clips", "unused_clips", "wire", "wire_quote", "wire_spool_length",
 ];
 const BOOLEAN_FIELDS = [
   "auto_clipper_revealed", "computing_hidden", "projects_hidden",
 ];
 const NONNEGATIVE_FIELDS = [
-  "auto_clipper_rate", "clips_sold", "demand", "lifetime_clips", "unsold_clips", "unused_clips",
-  "wire", "wire_spool_length",
+  "auto_clipper_rate", "available_trust", "clips_sold", "demand", "lifetime_clips", "standard_ops",
+  "standard_ops_capacity", "temporary_ops", "unsold_clips", "unused_clips", "wire", "wire_spool_length",
 ];
 const INTEGRAL_FIELDS = [
-  "auto_clippers", "marketing_level", "memory", "processors", "trust",
+  "auto_clippers", "available_trust", "marketing_level", "memory", "next_trust_target", "processors",
+  "standard_ops", "standard_ops_capacity", "temporary_ops", "trust",
 ];
 const AMOUNT_PATTERN = /^-?(?:0|[1-9][0-9]*)(?:\.[0-9]{0,17}[1-9])?$/;
 const MAX_AMOUNT_CHARACTERS = 1_048_576;

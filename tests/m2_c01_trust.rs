@@ -264,6 +264,38 @@ fn v4_restore_retains_stored_speed_targets_and_ops_without_recompute() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn direct_production_crossing_three_thousand_awards_without_another_intent() {
+    use paperclip_game::runtime::{Command, CommandId};
+
+    let seed = GameRuntime::start().unwrap();
+    let mut initial = seed.handle().view().game;
+    seed.shutdown().await.unwrap();
+    set_lifetime(&mut initial.pro, "2999");
+    initial.pro.wire = NonNegativeAmount::from_i128(1).unwrap();
+    initial.pro.computing_hidden = false;
+    initial.pro.projects_hidden = false;
+    let runtime = GameRuntime::start_from_snapshot(initial, 0).unwrap();
+    let handle = runtime.handle();
+    let crossing = handle
+        .execute(Command::make_paperclip(CommandId::new(1).unwrap()))
+        .await
+        .unwrap();
+    assert_eq!(crossing.result, Ok(()));
+    let state = handle.view().game;
+    assert_eq!(state.pro.lifetime_clips.to_string(), "3000");
+    assert_eq!(state.pro.wire.to_string(), "0");
+    assert_eq!(
+        state.pro.trust.to_string(),
+        "3",
+        "production itself must cross the first new cursor"
+    );
+    assert_eq!(state.pro.next_trust_target.to_string(), "5000");
+    assert_eq!(state.pro.trust_target_predecessor.to_string(), "3000");
+    assert!(state.pro.console_messages[4].contains("Trust target 3000 reached"));
+    runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn runtime_command_tick_retry_and_restore_deduplicate_awards_and_allocation() {
     use paperclip_game::runtime::{Command, CommandId};
 

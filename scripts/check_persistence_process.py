@@ -71,14 +71,16 @@ STORED_PRO_FIELDS = {
     "marketing_effectiveness", "demand_boost", "prestige_u", "demand",
     "clips_sold", "income", "last_sale_revenue", "wire_base_price",
     "wire_price_counter", "wire_purchase_count", "wire_inactivity_ticks",
-    "trust", "processors", "memory", "computing_hidden", "projects_hidden",
+    "trust", "processors", "memory", "next_trust_target", "trust_target_predecessor",
+    "creativity_speed", "standard_ops", "temporary_ops", "computing_hidden", "projects_hidden",
     "auto_clipper_revealed", "auto_clippers", "auto_clipper_cost",
     "auto_clipper_rate", "auto_clipper_production_accumulator", "console_messages",
 }
 INTERNAL_PRO_FIELDS = {
     "marketing_effectiveness", "demand_boost", "prestige_u", "wire_base_price",
     "wire_price_counter", "wire_purchase_count", "wire_inactivity_ticks",
-    "auto_clipper_production_accumulator",
+    "auto_clipper_production_accumulator", "next_trust_target", "trust_target_predecessor",
+    "creativity_speed",
 }
 
 
@@ -287,9 +289,9 @@ def read_snapshot(database: Path,
     connection = sqlite3.connect(f"{database.resolve().as_uri()}?mode=ro", uri=True)
     try:
         schema = connection.execute("PRAGMA user_version").fetchone()[0]
-        # Product storage is schema/snapshot 3. Historical V1/V2 input is
+        # Product storage is schema/snapshot 4. Historical V1/V2/V3 input is
         # migrated by the application and remains covered by its strict tests.
-        assert schema == 3
+        assert schema == 4
         rows = connection.execute(
             "SELECT slot, snapshot_version, revision, capture_sequence, payload, checksum "
             "FROM game_snapshot"
@@ -298,13 +300,13 @@ def read_snapshot(database: Path,
         connection.close()
     assert len(rows) == 1 and rows[0][0] == "default"
     _, version, revision, sequence, payload, checksum = rows[0]
-    assert version == 3
+    assert version == 4
     assert type(revision) is int and 0 <= revision <= api.SAFE_INTEGER
     assert type(sequence) is int and 0 <= sequence <= api.SAFE_INTEGER
     raw_payload = payload.encode("utf-8")
     snapshot = api.checked_json(raw_payload)
     assert set(snapshot) == {"snapshot_version", "revision", "pro", "clock", "rng_state"}
-    assert type(snapshot["snapshot_version"]) is int and snapshot["snapshot_version"] == 3
+    assert type(snapshot["snapshot_version"]) is int and snapshot["snapshot_version"] == 4
     assert type(snapshot["revision"]) is int and snapshot["revision"] == revision
     assert_stored_pro(snapshot["pro"], availability_values=availability_values)
     assert set(snapshot["clock"]) == {
@@ -316,6 +318,7 @@ def read_snapshot(database: Path,
     assert json.dumps(snapshot, separators=(",", ":")).encode() == raw_payload
     assert hashlib.sha256(raw_payload).hexdigest() == checksum
     return {
+        "snapshot_version": version,
         "revision": revision,
         "sequence": sequence,
         "pro": snapshot["pro"],

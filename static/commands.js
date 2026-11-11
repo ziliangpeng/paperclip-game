@@ -4,7 +4,7 @@ import {parseTransportJson as parseSharedTransportJson} from "./stream.js";
 
 const COMMAND_TYPES = Object.freeze([
   "make_paperclip", "buy_wire", "lower_price", "raise_price", "buy_marketing",
-  "buy_auto_clipper",
+  "buy_auto_clipper", "add_processor", "add_memory",
 ]);
 const MAX_COMMAND_ID_BYTES = 128;
 const MAX_RESPONSE_BYTES = 16 * 1024;
@@ -12,6 +12,7 @@ const REJECTION_REASONS = [
   "insufficient_wire", "insufficient_funds", "conversion_rejected", "conflicting_retry",
   "price_at_minimum", "counter_limit", "numeric_decision_domain",
   "numeric_evaluation_rejected", "resource_limit", "invalid_state",
+  "computation_locked", "trust_capacity_full", "processor_evaluator_domain",
 ];
 
 class ResponseValidationError extends TypeError {}

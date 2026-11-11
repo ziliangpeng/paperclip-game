@@ -679,6 +679,11 @@ def dom_state(page: Cdp) -> dict[str, Any]:
       trust: document.getElementById('trust').dataset.canonical,
       processors: document.getElementById('processors').dataset.canonical,
       memory: document.getElementById('memory').dataset.canonical,
+      availableTrust: document.getElementById('available-trust').dataset.canonical,
+      nextTrustTarget: document.getElementById('next-trust-target').dataset.canonical,
+      standardOps: document.getElementById('standard-ops').dataset.canonical,
+      temporaryOps: document.getElementById('temporary-ops').dataset.canonical,
+      standardOpsCapacity: document.getElementById('standard-ops-capacity').dataset.canonical,
       computingHidden: document.getElementById('computational-resources').hidden,
       autoClippersHidden: document.getElementById('auto-clippers-panel').hidden,
       autoClippers: document.getElementById('auto-clippers').dataset.canonical,
@@ -862,7 +867,7 @@ def check_assets_and_negative_commands(page: Cdp, port: int) -> None:
         try { makePaperclipCommand(invalidId); } catch (error) { rejected = error instanceof TypeError && error.message === 'invalid opaque command ID'; }
         if (!rejected) throw new Error('command id guard');
       }
-      const closedKinds = ["buy_wire", "lower_price", "raise_price", "buy_marketing", "buy_auto_clipper"];
+      const closedKinds = ["buy_wire", "lower_price", "raise_price", "buy_marketing", "buy_auto_clipper", "add_processor", "add_memory"];
       let closedRejected = 0;
       for (const kind of closedKinds) {
         const command = createCommand(kind, 'browser-business-' + kind);
@@ -905,7 +910,7 @@ def check_assets_and_negative_commands(page: Cdp, port: int) -> None:
         wrongContentTypeRejected: true, invalidAppliedShapeRejected: true,
         timeoutBounded: true, timeoutRetainsRetry: true};
     })()""")
-    assert result == {"badEnvelopes": 8, "closedRejected": 15, "invalidIds": 3, "fetches": 0,
+    assert result == {"badEnvelopes": 8, "closedRejected": 21, "invalidIds": 3, "fetches": 0,
                       "oversizeRejected": True, "wrongContentTypeRejected": True,
                       "invalidAppliedShapeRejected": True, "timeoutBounded": True,
                       "timeoutRetainsRetry": True}, result
@@ -947,7 +952,7 @@ def check_accessibility_and_keyboard_order(page: Cdp) -> None:
     visible = [heading for heading in structure["headings"] if not heading["hidden"]]
     assert visible[0]["level"] == 1 and all(h["level"] <= previous + 1 for h, previous in zip(visible[1:], [h["level"] for h in visible[:-1]]))
     assert structure["fakeControls"] == 0
-    assert structure["buttons"] == ["Make Paperclip", "Lower Price", "Raise Price", "Buy Marketing", "Buy Wire", "Buy AutoClipper"]
+    assert structure["buttons"] == ["Make Paperclip", "Lower Price", "Raise Price", "Buy Marketing", "Buy Wire", "Buy AutoClipper", "Add Processor", "Add Memory"]
     assert structure["amountsOutsideLive"] and structure["statusLive"] == "polite" and structure["statusAtomic"] == "true"
     assert structure["labels"] and abs(structure["contrast"] - 21) < 1e-9 and abs(structure["buttonContrast"] - 21) < 1e-9, structure
     assert structure["computingHidden"] and structure["autoHidden"]
@@ -1580,6 +1585,10 @@ def run_autoclipper_native_evidence(binary: Path, executable: str, version: str)
         assert entry_stored["pro"]["auto_clipper_production_accumulator"] == "0"
         entry_game = stored.assert_stored_pro(entry_stored["pro"])
         entry_game["marketing_cost"] = "100"
+        entry_game.update({
+            "available_trust": "0", "next_trust_target": "3000", "standard_ops": "0",
+            "temporary_ops": "0", "standard_ops_capacity": "1000",
+        })
         api.assert_production({"game": entry_game}, "1000", "0")
 
         page1, context1, target1 = browser.new_page("/")
@@ -2020,7 +2029,7 @@ def run_autoclipper_native_evidence(binary: Path, executable: str, version: str)
             "initialMarketingAfterReveal": {"charge": str(marketing_charge),
                 "revision": marketing["response_body"]["revision"], "level": "2"},
             "fiveLineConsole": saved["pro"]["console_messages"],
-            "snapshotVersion": 3,
+            "snapshotVersion": saved["snapshot_version"],
             "recoveredRunIdChanged": True,
             "recoveryStoredCountCostReveal": ["2", "6.21", True],
             "recoveryOnlyOnlineProduction": str(expected_production),
@@ -2105,6 +2114,8 @@ def run_main_ui(browser: Browser, state: ProxyState, backend_port: int, page1: C
         "demand": "3.2", "marketing_cost": "100", "clips_sold": "0",
         "income": "0", "last_sale_revenue": "0", "marketing_level": "1", "memory": "1", "price_per_clip": "0.25",
         "processors": "1", "projects_hidden": True, "trust": "2",
+        "available_trust": "0", "next_trust_target": "3000", "standard_ops": "0",
+        "temporary_ops": "0", "standard_ops_capacity": "1000",
         "unsold_clips": "0", "unused_clips": "0", "wire": "1000",
         "wire_quote": "20", "wire_spool_length": "1000",
     })
@@ -3925,13 +3936,20 @@ def main() -> int:
             m2_module = importlib.util.module_from_spec(m2_spec)
             m2_spec.loader.exec_module(m2_module)
             m2_result = m2_module.run(binary, executable, version)
+            award_path = Path(__file__).resolve().with_name("browser_m2_c01_award.py")
+            award_spec = importlib.util.spec_from_file_location("paperclip_browser_m2_c01_award", award_path)
+            assert award_spec is not None and award_spec.loader is not None
+            award_module = importlib.util.module_from_spec(award_spec)
+            award_spec.loader.exec_module(award_module)
+            award_result = award_module.run(binary, executable, version)
+            assert (award_result["chromeExit"], award_result["backendExit"]) == (0, 0)
             assert (m2_result["lifetimeRoute"]["chromeExit"],
                     m2_result["lifetimeRoute"]["backendExit"],
                     m2_result["strandedRoute"]["chromeExit"],
                     m2_result["strandedRoute"]["backendExit"]) == (0, 0, 0, 0), m2_result
             summary = {
                 "status": "pass", "browser": version, "independentBrowserContexts": 2,
-                "m2C01Unlock": m2_result,
+                "m2C01Unlock": m2_result, "m2C01AwardAllocation": award_result,
                 "startup": startup_result, "main": main_result,
                 "numericOrdering": numeric_result, "recovery": recovery_result,
                 "g02NativeBusiness": business_result,

@@ -51,6 +51,8 @@ const COMMANDS = [
   ["raise-price-form", "raise-price", "raise_price", "Raise Price"],
   ["buy-marketing-form", "buy-marketing", "buy_marketing", "Buy Marketing"],
   ["buy-auto-clipper-form", "buy-auto-clipper", "buy_auto_clipper", "Buy AutoClipper"],
+  ["add-processor-form", "add-processor", "add_processor", "Add Processor"],
+  ["add-memory-form", "add-memory", "add_memory", "Add Memory"],
 ];
 const controls = [];
 
@@ -87,6 +89,9 @@ for (const [formId, buttonId, type, label] of COMMANDS) {
           price_at_minimum: "price is already at its minimum",
           numeric_decision_domain: "the finite integer-decision domain was exceeded",
           numeric_evaluation_rejected: "numeric evaluation rejected the input",
+          computation_locked: "Computation has not unlocked yet",
+          trust_capacity_full: "all earned Trust is already allocated",
+          processor_evaluator_domain: "the requested Processor count is outside the implemented finite evaluator domain",
           counter_limit: "a checked counter reached its limit",
           resource_limit: "the explicit evaluation resource limit was reached",
           invalid_state: "the game state is invalid",
