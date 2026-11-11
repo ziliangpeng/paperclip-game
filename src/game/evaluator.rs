@@ -5,7 +5,7 @@
 //! high-precision references. Integer decisions use the domain and margins
 //! established by that research, never host `powf`/`sin`.
 
-use super::amount::{Amount, SafeU64};
+use super::amount::{Amount, IntegralAmount, NonNegativeAmount, SafeU64};
 use num_bigint::BigInt;
 use std::error::Error;
 use std::fmt;
@@ -21,6 +21,9 @@ pub enum EvaluatorError {
     InvalidDomain,
     NonFinite,
     OutsideDecisionDomain,
+    /// Capacity may remain legal while the finite Processor curve cannot
+    /// represent the requested new count. PCG-026 requires this distinct case.
+    OutsideProcessorDomain,
 }
 
 impl fmt::Display for EvaluatorError {
@@ -30,6 +33,9 @@ impl fmt::Display for EvaluatorError {
             Self::NonFinite => "evaluator produced a non-finite result",
             Self::OutsideDecisionDomain => {
                 "evaluator result cannot prove the required integer decision"
+            }
+            Self::OutsideProcessorDomain => {
+                "processor count exceeds the supported creativity evaluator domain"
             }
         })
     }
@@ -175,6 +181,179 @@ fn amount_to_f64(value: &Amount) -> Result<f64, EvaluatorError> {
         return Err(EvaluatorError::NonFinite);
     }
     Ok(parsed)
+}
+
+/// Exact upper endpoint of the conservative Processor evaluator domain.
+///
+/// This is a numerical domain, not a gameplay cap. For P>=1 the real
+/// `log10(P)*P^1.1+P-1` curve is strictly increasing. High-precision boundary
+/// evaluation proves `R(2^923)*(1+2^-48) < f64::MAX`, while `R(2^924)` itself
+/// exceeds that finite range. Exact integers above this endpoint are rejected
+/// before conversion with `OutsideProcessorDomain`, as PCG-026 requires.
+pub const PROCESSOR_DOMAIN_MAX_EXPONENT: usize = 923;
+
+pub fn processor_domain_upper() -> BigInt {
+    BigInt::from(1u8) << PROCESSOR_DOMAIN_MAX_EXPONENT
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ProcessorSpeedStages {
+    pub binary_input: f64,
+    pub log10: f64,
+    pub power: f64,
+    pub composite: f64,
+}
+
+/// Evaluate x^1.1 after exact m*2^e reduction. The 11/10 exponent here is
+/// independent of the G02 23/20 `normalized_power` implementation below.
+pub fn normalized_processor_power(input: f64) -> Result<f64, EvaluatorError> {
+    if !input.is_finite() {
+        return Err(EvaluatorError::NonFinite);
+    }
+    if input < 1.0 {
+        return Err(EvaluatorError::InvalidDomain);
+    }
+    let input_bits = input.to_bits();
+    let exponent = ((input_bits >> 52) & 0x7ff) as i32 - 1023;
+    let mantissa = f64::from_bits((input_bits & ((1_u64 << 52) - 1)) | (1023_u64 << 52));
+    let turns = exponent.div_euclid(10);
+    let remainder = exponent.rem_euclid(10);
+    let integer_exponent = 11 * turns + 11 * remainder / 10;
+    let fractional_exponent = (11 * remainder % 10) as f64 / 10.0;
+    let reduced = libm::pow(mantissa, 1.1) * libm::pow(2.0, fractional_exponent);
+    let output = libm::scalbn(reduced, integer_exponent);
+    if !output.is_finite() || output <= 0.0 {
+        return if output.is_finite() {
+            Err(EvaluatorError::InvalidDomain)
+        } else {
+            Err(EvaluatorError::NonFinite)
+        };
+    }
+    Ok(output)
+}
+
+fn evaluate_processor_curve(input: f64) -> Result<ProcessorSpeedStages, EvaluatorError> {
+    if !input.is_finite() {
+        return Err(EvaluatorError::NonFinite);
+    }
+    if input < 1.0 {
+        return Err(EvaluatorError::InvalidDomain);
+    }
+    let log10 = libm::log10(input);
+    if !log10.is_finite() || log10 < 0.0 {
+        return if log10.is_finite() {
+            Err(EvaluatorError::InvalidDomain)
+        } else {
+            Err(EvaluatorError::NonFinite)
+        };
+    }
+    let power = normalized_processor_power(input)?;
+    let product = log10 * power;
+    if !product.is_finite() || product < 0.0 {
+        return if product.is_finite() {
+            Err(EvaluatorError::InvalidDomain)
+        } else {
+            Err(EvaluatorError::NonFinite)
+        };
+    }
+    let with_processor = product + input;
+    if !with_processor.is_finite() || with_processor < 0.0 {
+        return if with_processor.is_finite() {
+            Err(EvaluatorError::InvalidDomain)
+        } else {
+            Err(EvaluatorError::NonFinite)
+        };
+    }
+    let composite = with_processor - 1.0;
+    if !composite.is_finite() || composite < 0.0 {
+        return if composite.is_finite() {
+            Err(EvaluatorError::InvalidDomain)
+        } else {
+            Err(EvaluatorError::NonFinite)
+        };
+    }
+    Ok(ProcessorSpeedStages {
+        binary_input: input,
+        log10,
+        power,
+        composite,
+    })
+}
+
+/// Exact-P domain gate and named binary64 stages for independent native tests.
+/// The real game Command supplies only the server's stored integral counter.
+pub fn creativity_speed_ratio_stages(
+    input: &ExactRatio,
+) -> Result<ProcessorSpeedStages, EvaluatorError> {
+    if input.denominator() != &BigInt::from(1u8) || input.numerator() < &BigInt::from(1u8) {
+        return Err(EvaluatorError::InvalidDomain);
+    }
+    if input.numerator() > &processor_domain_upper() {
+        return Err(EvaluatorError::OutsideProcessorDomain);
+    }
+    if input.numerator() == &BigInt::from(1u8) {
+        // Pure one-Processor recomputation is exactly zero. Fresh speed 1 is
+        // constructed separately by state initialization, never conflated here.
+        return Ok(ProcessorSpeedStages {
+            binary_input: 1.0,
+            log10: 0.0,
+            power: 1.0,
+            composite: 0.0,
+        });
+    }
+    let binary_input = input.to_f64()?;
+    evaluate_processor_curve(binary_input)
+}
+
+/// Convert the final finite continuous result exactly once to the Amount grid.
+/// No logarithm/power/composition stage uses this quantization.
+pub fn processor_speed_to_amount(continuous: f64) -> Result<NonNegativeAmount, EvaluatorError> {
+    if !continuous.is_finite() {
+        return Err(EvaluatorError::NonFinite);
+    }
+    if continuous < 0.0 {
+        return Err(EvaluatorError::InvalidDomain);
+    }
+    let bits = continuous.to_bits();
+    let encoded_exponent = ((bits >> 52) & 0x7ff) as i32;
+    let fraction = bits & ((1_u64 << 52) - 1);
+    let (significand, exponent) = if encoded_exponent == 0 {
+        (fraction, -1074)
+    } else {
+        (fraction | (1_u64 << 52), encoded_exponent - 1023 - 52)
+    };
+    if significand == 0 {
+        return Ok(NonNegativeAmount::zero());
+    }
+    let (numerator, denominator) = if exponent >= 0 {
+        (
+            BigInt::from(significand)
+                << usize::try_from(exponent).expect("nonnegative f64 exponent"),
+            BigInt::from(1u8),
+        )
+    } else {
+        (
+            BigInt::from(significand),
+            BigInt::from(1u8)
+                << usize::try_from(-exponent).expect("negative f64 exponent magnitude"),
+        )
+    };
+    Amount::quantize_ratio(&numerator, &denominator)
+        .map_err(|_| EvaluatorError::InvalidDomain)?
+        .nonnegative()
+        .map_err(|_| EvaluatorError::InvalidDomain)
+}
+
+pub fn creativity_speed_ratio(input: &ExactRatio) -> Result<NonNegativeAmount, EvaluatorError> {
+    let stages = creativity_speed_ratio_stages(input)?;
+    processor_speed_to_amount(stages.composite)
+}
+
+pub fn creativity_speed(processors: &IntegralAmount) -> Result<NonNegativeAmount, EvaluatorError> {
+    let scale = Amount::from_i128(1).mantissa().clone();
+    let numerator = processors.amount().mantissa() / scale;
+    let input = ExactRatio::new(numerator, BigInt::from(1u8))?;
+    creativity_speed_ratio(&input)
 }
 
 /// Evaluate x^1.15 after an exact m*2^e reduction into the measured domain.
@@ -348,5 +527,29 @@ mod tests {
         }
         assert_eq!(libm::sin(0.0).to_bits(), 0);
         assert_eq!(libm::sin(4.0).to_bits(), 0xbfe837b9dddc1eae);
+    }
+
+    #[test]
+    fn processor_raw_composition_rejects_nonfinite_stages_without_domain_bypass() {
+        let next_dyadic = libm::scalbn(1.0, 924);
+        assert!(normalized_processor_power(next_dyadic).unwrap().is_finite());
+        assert_eq!(
+            evaluate_processor_curve(next_dyadic),
+            Err(EvaluatorError::NonFinite)
+        );
+        for invalid in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(
+                evaluate_processor_curve(invalid),
+                Err(EvaluatorError::NonFinite)
+            );
+            assert_eq!(
+                normalized_processor_power(invalid),
+                Err(EvaluatorError::NonFinite)
+            );
+        }
+        assert_eq!(
+            evaluate_processor_curve(0.5),
+            Err(EvaluatorError::InvalidDomain)
+        );
     }
 }
