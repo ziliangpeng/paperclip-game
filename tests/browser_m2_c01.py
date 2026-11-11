@@ -373,7 +373,9 @@ def run_stranded_route(m1: Any, binary: Path, executable: str, version: str) -> 
             assert record["forwarded"] == 1 and record["response_status"] == 422, record
             assert record["response_body"]["reason"] == "trust_capacity_full", record
             assert record["json"] == {"command_id": record["json"]["command_id"], "type": kind, "arguments": {}}
-            rejected_dom = wait_dom(m1, page, lambda value: "capacity" in value["status"].lower(),
+            rejected_dom = wait_dom(m1, page, lambda value:
+                                    "already allocated" in value["status"] and
+                                    "no resource change" in value["status"],
                                     f"native {kind} capacity rejection feedback")
             after = current(agent)
             for field in ("trust", "available_trust", "next_trust_target", "processors", "memory",
