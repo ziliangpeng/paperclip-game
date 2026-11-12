@@ -173,6 +173,8 @@ class WebSocket:
             assert size <= 8 * 1024 * 1024, "bounded CDP message"
             context["declaredPayloadLength"] = size
             context["phase"] = "payload"
+            if opcode & 0x08:
+                assert size <= 125, "control frame payload must not exceed 125 bytes"
             payload = self._exact(size, deadline)
             if opcode == 8:
                 raise EOFError("CDP close frame")
