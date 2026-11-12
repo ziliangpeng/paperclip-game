@@ -41,6 +41,12 @@ class WebSocket:
         self.socket = socket.create_connection((parsed.hostname, parsed.port), timeout=5)
         self.buffer = bytearray()
         self._frame_context: dict[str, Any] | None = None
+        # Raw-read metadata only; bounded, and never a traffic/content journal.
+        self._raw_reads: deque[dict[str, Any]] = deque(maxlen=16)
+        self._raw_read_count = 0
+        self._expected_command_id: int | None = None
+        self._expected_method: str | None = None
+        self._command_started_monotonic: float | None = None
         key = base64.b64encode(os.urandom(16)).decode()
         path = parsed.path + (("?" + parsed.query) if parsed.query else "")
         request = (
@@ -65,18 +71,47 @@ class WebSocket:
         del self.buffer[:end]
         return response
 
-    def _exact(self, size: int) -> bytes:
+    def _exact(self, size: int, deadline: float) -> bytes:
         while len(self.buffer) < size:
             receive_size = min(64 * 1024, max(4096, size - len(self.buffer)))
+            raw_read: dict[str, Any] | None = None
             try:
+                started = time.monotonic()
+                remaining = deadline - started
+                if remaining <= 0:
+                    raise TimeoutError("timed out")
+                self.socket.settimeout(remaining)
+                raw_read = {
+                    # Raw receive timing only, never the peer's send time or TCP state.
+                    "phase": self._frame_context["phase"] if self._frame_context else "unframed",
+                    "expectedCommandId": self._expected_command_id,
+                    "expectedMethod": self._expected_method,
+                    "callElapsedAtRawReadStartSeconds": (
+                        round(started - self._command_started_monotonic, 6)
+                        if self._command_started_monotonic is not None else None
+                    ),
+                    "remainingBudgetBeforeRecvSeconds": round(remaining, 6),
+                    "requestedReceiveChunkBytes": receive_size,
+                    "bufferBytesBeforeRecv": len(self.buffer),
+                }
+                self._raw_reads.append(raw_read)
+                self._raw_read_count += 1
                 chunk = self.socket.recv(receive_size)
+                raw_read["recvDurationSeconds"] = round(time.monotonic() - started, 6)
+                raw_read["bytesReceived"] = len(chunk)
             except TimeoutError as error:
+                if raw_read is not None:
+                    raw_read["outcome"] = "TimeoutError"
                 if self._frame_context is not None:
                     note = {"component": "WebSocket._exact", **self._frame_context,
                             "requestedExactSize": size, "requestedReceiveChunkSize": receive_size,
                             "bufferedByteArrayLength": len(self.buffer)}
                     if self._frame_context["phase"] == "payload":
                         note["pendingPayloadPrefixHex"] = bytes(self.buffer[:64]).hex()
+                    note.update({"expectedCommandId": self._expected_command_id,
+                                 "expectedMethod": self._expected_method,
+                                 "actualRawSocketReadCount": self._raw_read_count,
+                                 "recentRawSocketReads": list(self._raw_reads)})
                     error.add_note("CDP timeout context: " +
                                    json.dumps(note, sort_keys=True, separators=(",", ":")))
                 raise
@@ -104,29 +139,41 @@ class WebSocket:
         self._frame(1, json.dumps(value, separators=(",", ":")).encode())
 
     def receive(self, timeout: float = 10) -> dict[str, Any]:
-        self.socket.settimeout(timeout)
+        deadline = time.monotonic() + timeout
+        self._raw_reads.clear()
+        self._raw_read_count = 0
         fragments = bytearray()
         while True:
-            # A new header cannot inherit metadata from an earlier frame.
+            # One absolute budget covers every frame and raw chunk of this receive.
             context: dict[str, Any] = {"phase": "header", "frameFin": None,
                                        "frameOpcode": None, "declaredPayloadLength": None,
                                        "incompleteFrameIdentity": "unknown"}
             self._frame_context = context
-            first, second = self._exact(2)
+            if time.monotonic() >= deadline:
+                error = TimeoutError("timed out")
+                note = {"component": "WebSocket.receive", **context,
+                        "expectedCommandId": self._expected_command_id,
+                        "expectedMethod": self._expected_method,
+                        "actualRawSocketReadCount": self._raw_read_count,
+                        "recentRawSocketReads": list(self._raw_reads)}
+                error.add_note("CDP timeout context: " +
+                               json.dumps(note, sort_keys=True, separators=(",", ":")))
+                raise error
+            first, second = self._exact(2, deadline)
             fin, opcode = bool(first & 0x80), first & 0x0F
             assert not second & 0x80, "server CDP frames must not be masked"
             context["frameFin"], context["frameOpcode"] = fin, opcode
             size = second & 0x7F
             if size == 126:
                 context["phase"] = "extended-length"
-                size = struct.unpack("!H", self._exact(2))[0]
+                size = struct.unpack("!H", self._exact(2, deadline))[0]
             elif size == 127:
                 context["phase"] = "extended-length"
-                size = struct.unpack("!Q", self._exact(8))[0]
+                size = struct.unpack("!Q", self._exact(8, deadline))[0]
             assert size <= 8 * 1024 * 1024, "bounded CDP message"
             context["declaredPayloadLength"] = size
             context["phase"] = "payload"
-            payload = self._exact(size)
+            payload = self._exact(size, deadline)
             if opcode == 8:
                 raise EOFError("CDP close frame")
             if opcode == 9:
@@ -140,7 +187,10 @@ class WebSocket:
             assert len(fragments) <= 8 * 1024 * 1024
             if fin:
                 assert opcode in (0, 1, 2)
-                return json.loads(fragments)
+                message = json.loads(fragments)
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("timed out")
+                return message
 
     def close(self) -> None:
         try:
@@ -163,6 +213,9 @@ class Cdp:
         self.next_id += 1
         self.websocket.send({"id": command_id, "method": method, "params": params or {}})
         deadline = time.monotonic() + timeout
+        self.websocket._expected_command_id = command_id
+        self.websocket._expected_method = method
+        self.websocket._command_started_monotonic = deadline - timeout
         while True:
             remaining = deadline - time.monotonic()
             assert remaining > 0, f"bounded CDP call: {method}"
