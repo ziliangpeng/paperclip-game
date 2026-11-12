@@ -87,6 +87,8 @@ enum NormalizedPayload {
     RaisePrice,
     BuyMarketing,
     BuyAutoClipper,
+    AddProcessor,
+    AddMemory,
     // Unknown actions remain fully normalized for conflict checks, but can
     // never become an executable runtime intent.
     Unsupported {
@@ -104,6 +106,8 @@ impl NormalizedPayload {
             Self::RaisePrice => Some(Command::raise_price(id)),
             Self::BuyMarketing => Some(Command::buy_marketing(id)),
             Self::BuyAutoClipper => Some(Command::buy_auto_clipper(id)),
+            Self::AddProcessor => Some(Command::add_processor(id)),
+            Self::AddMemory => Some(Command::add_memory(id)),
             Self::Unsupported { .. } => None,
         }
     }
@@ -139,7 +143,7 @@ fn decode_command(bytes: &[u8]) -> Result<NormalizedCommand, StoredResponse> {
     };
     let payload = match envelope.action_type.as_str() {
         "make_paperclip" | "buy_wire" | "lower_price" | "raise_price" | "buy_marketing"
-        | "buy_auto_clipper"
+        | "buy_auto_clipper" | "add_processor" | "add_memory"
             if arguments.is_empty() =>
         {
             match envelope.action_type.as_str() {
@@ -149,11 +153,13 @@ fn decode_command(bytes: &[u8]) -> Result<NormalizedCommand, StoredResponse> {
                 "raise_price" => NormalizedPayload::RaisePrice,
                 "buy_marketing" => NormalizedPayload::BuyMarketing,
                 "buy_auto_clipper" => NormalizedPayload::BuyAutoClipper,
+                "add_processor" => NormalizedPayload::AddProcessor,
+                "add_memory" => NormalizedPayload::AddMemory,
                 _ => unreachable!(),
             }
         }
         "make_paperclip" | "buy_wire" | "lower_price" | "raise_price" | "buy_marketing"
-        | "buy_auto_clipper" => {
+        | "buy_auto_clipper" | "add_processor" | "add_memory" => {
             return Err(schema_error("invalid_arguments"));
         }
         _ => NormalizedPayload::Unsupported {
@@ -482,6 +488,11 @@ fn rejection_reason(rejection: CommandRejection) -> &'static str {
         CommandRejection::Economy(EconomyError::InsufficientFunds) => "insufficient_funds",
         CommandRejection::Economy(EconomyError::PriceAtMinimum) => "price_at_minimum",
         CommandRejection::Economy(EconomyError::CounterLimit) => "counter_limit",
+        CommandRejection::Economy(EconomyError::TrustCapacityFull) => "trust_capacity_full",
+        CommandRejection::Economy(EconomyError::ComputationLocked) => "computation_locked",
+        CommandRejection::Economy(EconomyError::ProcessorEvaluatorDomain) => {
+            "processor_evaluator_domain"
+        }
         CommandRejection::Economy(EconomyError::Evaluator(
             EvaluatorError::OutsideDecisionDomain,
         )) => "numeric_decision_domain",

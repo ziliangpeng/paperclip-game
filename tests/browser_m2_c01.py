@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Real-Chrome Issue #42 Computational Resources unlock verification."""
+"""Real-Chrome #42 unlock and #43-A public projection/capacity verification."""
 from __future__ import annotations
 
 from decimal import Decimal
@@ -312,7 +312,8 @@ def run_lifetime_route(m1: Any, binary: Path, executable: str, version: str) -> 
                          "restartObservationSeconds": round(restart_observation_seconds, 3),
                          "offlineProduction": "0", "secondAnnouncement": False,
                          "verifiedRngFastPhases": phases},
-            "noProjectOfferPurchaseOrAllocation": True,
+            "noProjectOfferOrPurchase": True,
+            "allocationScope": "implemented by #43-A native controls exercised in stranded route",
             "durationSeconds": round(time.monotonic() - started, 3),
         }
     return {**result, "browser": version, "realBackend": True,
@@ -355,8 +356,36 @@ def run_stranded_route(m1: Any, binary: Path, executable: str, version: str) -> 
         assert baseline["game"]["console_messages"] == unlocked["game"]["console_messages"]
         stream.close()
         control_ids = [button["id"] for button in dom["controls"]]
-        assert not any("project" in control or "processor" in control or "memory" in control
-                       for control in control_ids), control_ids
+        assert not any("project" in control for control in control_ids), control_ids
+        assert "add-processor" in control_ids and "add-memory" in control_ids, control_ids
+        allocation_receipts = []
+        for kind, button_id, key in (("add_processor", "add-processor", "Enter"),
+                                     ("add_memory", "add-memory", "Space")):
+            before = current(agent)
+            command_count = len(case["state"].command_records)
+            page.call("Page.bringToFront")
+            page.evaluate(f"document.getElementById('{button_id}').focus()")
+            page.press(key)
+            record = m1.wait_commands(case["state"], command_count + 1)[-1]
+            m1.exact_command(record, kind)
+            m1.wait_for(lambda: record.get("response_body"), lambda value: isinstance(value, dict),
+                        f"actual #43-A native {kind} rejection")
+            assert record["forwarded"] == 1 and record["response_status"] == 422, record
+            assert record["response_body"]["reason"] == "trust_capacity_full", record
+            assert record["json"] == {"command_id": record["json"]["command_id"], "type": kind, "arguments": {}}
+            rejected_dom = wait_dom(m1, page, lambda value:
+                                    "already allocated" in value["status"] and
+                                    "no resource change" in value["status"],
+                                    f"native {kind} capacity rejection feedback")
+            after = current(agent)
+            for field in ("trust", "available_trust", "next_trust_target", "processors", "memory",
+                          "standard_ops", "temporary_ops", "standard_ops_capacity"):
+                assert after["game"][field] == before["game"][field], (kind, field)
+                assert rejected_dom[{"trust": "trust", "available_trust": "availableTrust",
+                                     "next_trust_target": "nextTrustTarget", "processors": "processors",
+                                     "memory": "memory", "standard_ops": "standardOps",
+                                     "temporary_ops": "temporaryOps", "standard_ops_capacity": "standardOpsCapacity"}[field]] == after["game"][field], field
+            allocation_receipts.append({"request": record["json"], "response": record["response_body"]})
         result = {
             "route": "Unsold < 1 AND Funds < current Wire quote AND Wire < 1",
             "lifetime": unlocked["game"]["lifetime_clips"],
@@ -367,7 +396,9 @@ def run_stranded_route(m1: Any, binary: Path, executable: str, version: str) -> 
             "apiSseNativeAnnouncementCount": 1,
             "browserRevision": dom["revision"],
             "apiRevision": unlocked["revision"],
-            "laterControlButtonsPresent": False,
+            "allocationButtonsPresent": True,
+            "nativeCapacityRejection": allocation_receipts,
+            "noProjectOfferOrPurchase": True,
             "durationSeconds": round(time.monotonic() - started, 3),
         }
     return {**result, "browser": version, "realBackend": True,
@@ -382,7 +413,7 @@ def run(binary: Path, executable: str, version: str) -> dict[str, Any]:
     stranded = run_stranded_route(m1, binary, executable, version)
     result = {
         "status": "pass",
-        "scope": "M2-C01-A unlock only; not M2 integration or full-phase completion",
+        "scope": "M2-C01-A unlock plus #43-A public fields/rejections; not full-phase completion",
         "browser": version,
         "lifetimeRoute": lifetime,
         "strandedRoute": stranded,

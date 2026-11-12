@@ -2,7 +2,7 @@
 
 use super::amount::{Amount, IntegralAmount, NonNegativeAmount, SafeU64};
 use super::conversion::{ConversionError, convert_wire_ratio};
-use super::evaluator::{EvaluatorError, ExactRatio, sale_request, wire_quote};
+use super::evaluator::{EvaluatorError, ExactRatio, creativity_speed, sale_request, wire_quote};
 use super::rng::GameRng;
 use super::state::{GameState, ProState};
 use num_bigint::BigInt;
@@ -20,6 +20,9 @@ pub enum EconomyError {
     InvalidState,
     ExponentResourceLimit,
     CounterLimit,
+    TrustCapacityFull,
+    ComputationLocked,
+    ProcessorEvaluatorDomain,
     Evaluator(EvaluatorError),
 }
 
@@ -33,6 +36,14 @@ impl fmt::Display for EconomyError {
                 formatter.write_str("exact economy exponent exceeds the evaluation resource limit")
             }
             Self::CounterLimit => formatter.write_str("economy counter reached its safe limit"),
+            Self::TrustCapacityFull => {
+                formatter.write_str("no unspent Trust configuration capacity remains")
+            }
+            Self::ComputationLocked => {
+                formatter.write_str("computational resources are still locked")
+            }
+            Self::ProcessorEvaluatorDomain => formatter
+                .write_str("the requested Processor count exceeds the supported evaluator domain"),
             Self::Evaluator(error) => write!(formatter, "{error}"),
         }
     }
@@ -193,6 +204,95 @@ pub fn observe_computational_resources(state: &mut ProState) {
         state.projects_hidden = false;
         push_console_message(state, COMPUTATIONAL_RESOURCES_UNLOCK_MESSAGE.to_owned());
     }
+}
+
+fn integral_from_whole(value: BigInt) -> Result<IntegralAmount, EconomyError> {
+    Amount::from_i128(1)
+        .multiply_integer(&value)
+        .integral()
+        .map_err(|_| EconomyError::InvalidState)
+}
+
+fn trust_target_announcement(target: &IntegralAmount) -> String {
+    let exact = target.to_string();
+    if exact.len() <= 160 {
+        format!("Trust target {exact} reached: +1 Trust; Processor/Memory capacity increased.")
+    } else {
+        // Keep bounded console history valid even for extreme retained targets.
+        // The exact target/cursor remain authoritative Amount fields; this is
+        // one per-target emission, never an aggregate or a target clamp.
+        format!(
+            "Trust target with {} decimal digits reached: +1 Trust; Processor/Memory capacity increased.",
+            exact.len()
+        )
+    }
+}
+
+/// Catch up every exact Human production target in one serialized observation.
+/// Cursor advancement is the one-once record shared by ticks, retries and restore.
+pub fn observe_trust_targets(state: &mut ProState) -> Result<(), EconomyError> {
+    let mut next = state.clone();
+    if whole(&next.next_trust_target) <= BigInt::from(0u8)
+        || whole(&next.trust_target_predecessor) <= BigInt::from(0u8)
+        || next.next_trust_target <= next.trust_target_predecessor
+    {
+        return Err(EconomyError::InvalidState);
+    }
+    while next.lifetime_clips.amount() >= next.next_trust_target.amount() {
+        // Trust is total capacity. Allocation never reverses this increment.
+        next.trust = integral_from_whole(whole(&next.trust) + BigInt::from(1u8))?;
+        let announcement = trust_target_announcement(&next.next_trust_target);
+        push_console_message(&mut next, announcement);
+        let successor = whole(&next.trust_target_predecessor) + whole(&next.next_trust_target);
+        next.trust_target_predecessor = next.next_trust_target.clone();
+        next.next_trust_target = integral_from_whole(successor)?;
+    }
+    *state = next;
+    Ok(())
+}
+
+fn check_allocation_availability(state: &ProState) -> Result<(), EconomyError> {
+    if state.computing_hidden {
+        return Err(EconomyError::ComputationLocked);
+    }
+    if whole(&state.processors) + whole(&state.memory) >= whole(&state.trust) {
+        return Err(EconomyError::TrustCapacityFull);
+    }
+    Ok(())
+}
+
+/// Add one Processor only after the complete new-count speed evaluation succeeds.
+pub fn add_processor(state: &mut ProState) -> Result<(), EconomyError> {
+    check_allocation_availability(state)?;
+    let new_count = integral_from_whole(whole(&state.processors) + BigInt::from(1u8))?;
+    // Exact-P domain checks and every binary64/final-grid guard happen before
+    // the cloned authoritative candidate receives any allocation/speed write.
+    let new_speed = creativity_speed(&new_count).map_err(|error| match error {
+        EvaluatorError::OutsideProcessorDomain => EconomyError::ProcessorEvaluatorDomain,
+        other => EconomyError::Evaluator(other),
+    })?;
+    let mut next = state.clone();
+    next.processors = new_count;
+    next.creativity_speed = new_speed;
+    push_console_message(
+        &mut next,
+        "Processor added: standard Ops rate +10/s; Creativity speed recomputed.".to_owned(),
+    );
+    *state = next;
+    Ok(())
+}
+
+/// Add exactly one Memory and 1000 standard Ops capacity; speed is untouched.
+pub fn add_memory(state: &mut ProState) -> Result<(), EconomyError> {
+    check_allocation_availability(state)?;
+    let mut next = state.clone();
+    next.memory = integral_from_whole(whole(&next.memory) + BigInt::from(1u8))?;
+    push_console_message(
+        &mut next,
+        "Memory added, max operations increased.".to_owned(),
+    );
+    *state = next;
+    Ok(())
 }
 
 /// Latch reveal only after the authoritative Funds balance actually reaches 5.

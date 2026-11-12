@@ -1,0 +1,60 @@
+{
+  "combined_error_bound_violations": 0,
+  "coverage": {
+    "below_on_above_grid": true,
+    "binary53_and_ties_even": true,
+    "cumulative_exact_to_composite_error_bound": true,
+    "domain_boundary": true,
+    "explicit_source_indeterminate_floor_or_ceiling_relation": true,
+    "native_repeated_bit_amount_identity": true,
+    "negative_nonfinite_nonintegral": true,
+    "seeded_samples": 240,
+    "small_integers_1_64": 64,
+    "wide_mantissa_exponent_and_all_denominator10_remainder_classes": true
+  },
+  "determinate_count": 0,
+  "domain": {
+    "lower": 1,
+    "meaning": "conservative finite-evaluator test domain",
+    "upper_exact": "70906491683854249133971333415503528601229677279443476631916611638829262598057001759775558209235971002092300595769547131083230268742795262708226708464736682213924924871800416657575912944521796077262840069882938251784694133132833485038618990914757637167551284096438594475925700608",
+    "upper_expression": "2^923"
+  },
+  "evaluator_file": "src/game/evaluator.rs",
+  "evaluator_sha256": "19820f59e060901d4f782279febaa1f7a582a7fe4a23bf8950d8155438adafc7",
+  "exponent_denominator": 10,
+  "exponent_numerator": 11,
+  "generator_file": "tests/generate_m2_c01_references.py",
+  "generator_sha256": "c7655284c2423da31db6b88c01b1764235b6ae1c36fcbabad5c0b4595349abc6",
+  "indeterminate_count": 384,
+  "maximum_error_sample_ids": {
+    "binary_input_to_composite": "seeded-000-e1",
+    "exact_input_to_binary_input": "binary53-+1",
+    "exact_input_to_composite": "seeded-000-e1",
+    "exact_input_to_log10": "seeded-200-e5",
+    "exact_input_to_power": "seeded-114-e1"
+  },
+  "maximum_relative_error": {
+    "binary_input_to_composite": "3.006335238616776877517460465562197557848046234347953053093507674942877860973669523470063949665058596757960262172955282003914464222839500993607138277154708230080E-16",
+    "exact_input_to_binary_input": "1.110223024625156417164115227307739401472727346604840562268884762171454486780501661307764351638109744628351944971706474390777400295507516461435105147579742564378E-16",
+    "exact_input_to_composite": "3.006335238616776877517460465562197557848046234347953053093507674942877860973669523470063949665058596757960262172955282003914464222839500993607138277154708230080E-16",
+    "exact_input_to_log10": "9.651728756639049241203184305908704638330783019806963452098138410597300395195237595591571821803275547715891365965747500603253271588624564934725099285945152161684E-17",
+    "exact_input_to_power": "2.792495252538565487849150434244926133853780934161772315854119099106771624668107655248567612918724085239587489615304887208580663287687359294959014284428903557181E-16"
+  },
+  "native_observation": "macOS arm64 / Apple M-series / Python3.14 Decimal160",
+  "native_output_sha256": "20fb392f99097a8ea86e719cc7374b57e6256228e2ea376bd681a7da7b7f31c7",
+  "native_sweep_file": "sweep.native",
+  "native_sweep_sha256": "eb4c6352f29ca032f461923285d6d90da0cbb4bf3846714e4f04cbc9b7c2a9db",
+  "precision_digits": 160,
+  "references_before_sha256": "d969e73bbf934df2a02bf31e84ee950ab0d921599fa70c8959ed5be2c53cd25b",
+  "references_file": "references.json",
+  "references_idempotent": true,
+  "references_sha256": "d969e73bbf934df2a02bf31e84ee950ab0d921599fa70c8959ed5be2c53cd25b",
+  "request_count": 432,
+  "requests_before_sha256": "10c7d9404b536e41189ed5a2ee4ab875c445440e00aac09b7560f8f155a93eb0",
+  "requests_file": "sweep.requests",
+  "requests_idempotent": true,
+  "requests_sha256": "10c7d9404b536e41189ed5a2ee4ab875c445440e00aac09b7560f8f155a93eb0",
+  "schema_version": "m2-c01-processor-references-v1",
+  "seed": 4143016577,
+  "valid_stages": 384
+}

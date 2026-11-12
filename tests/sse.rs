@@ -96,7 +96,13 @@ fn line(reader: &mut BufReader<TcpStream>) -> std::io::Result<Option<String>> {
     let mut bytes = Vec::new();
     let mut byte = [0_u8; 1];
     while bytes.len() < 16 * 1024 {
-        match reader.read(&mut byte)? {
+        let count = loop {
+            match reader.read(&mut byte) {
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                other => break other?,
+            }
+        };
+        match count {
             0 => return Ok(None),
             1 => {
                 bytes.push(byte[0]);

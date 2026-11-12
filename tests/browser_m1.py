@@ -41,6 +41,12 @@ class WebSocket:
         self.socket = socket.create_connection((parsed.hostname, parsed.port), timeout=5)
         self.buffer = bytearray()
         self._frame_context: dict[str, Any] | None = None
+        # Raw-read metadata only; bounded, and never a traffic/content journal.
+        self._raw_reads: deque[dict[str, Any]] = deque(maxlen=16)
+        self._raw_read_count = 0
+        self._expected_command_id: int | None = None
+        self._expected_method: str | None = None
+        self._command_started_monotonic: float | None = None
         key = base64.b64encode(os.urandom(16)).decode()
         path = parsed.path + (("?" + parsed.query) if parsed.query else "")
         request = (
@@ -65,18 +71,47 @@ class WebSocket:
         del self.buffer[:end]
         return response
 
-    def _exact(self, size: int) -> bytes:
+    def _exact(self, size: int, deadline: float) -> bytes:
         while len(self.buffer) < size:
             receive_size = min(64 * 1024, max(4096, size - len(self.buffer)))
+            raw_read: dict[str, Any] | None = None
             try:
+                started = time.monotonic()
+                remaining = deadline - started
+                if remaining <= 0:
+                    raise TimeoutError("timed out")
+                self.socket.settimeout(remaining)
+                raw_read = {
+                    # Raw receive timing only, never the peer's send time or TCP state.
+                    "phase": self._frame_context["phase"] if self._frame_context else "unframed",
+                    "expectedCommandId": self._expected_command_id,
+                    "expectedMethod": self._expected_method,
+                    "callElapsedAtRawReadStartSeconds": (
+                        round(started - self._command_started_monotonic, 6)
+                        if self._command_started_monotonic is not None else None
+                    ),
+                    "remainingBudgetBeforeRecvSeconds": round(remaining, 6),
+                    "requestedReceiveChunkBytes": receive_size,
+                    "bufferBytesBeforeRecv": len(self.buffer),
+                }
+                self._raw_reads.append(raw_read)
+                self._raw_read_count += 1
                 chunk = self.socket.recv(receive_size)
+                raw_read["recvDurationSeconds"] = round(time.monotonic() - started, 6)
+                raw_read["bytesReceived"] = len(chunk)
             except TimeoutError as error:
+                if raw_read is not None:
+                    raw_read["outcome"] = "TimeoutError"
                 if self._frame_context is not None:
                     note = {"component": "WebSocket._exact", **self._frame_context,
                             "requestedExactSize": size, "requestedReceiveChunkSize": receive_size,
                             "bufferedByteArrayLength": len(self.buffer)}
                     if self._frame_context["phase"] == "payload":
                         note["pendingPayloadPrefixHex"] = bytes(self.buffer[:64]).hex()
+                    note.update({"expectedCommandId": self._expected_command_id,
+                                 "expectedMethod": self._expected_method,
+                                 "actualRawSocketReadCount": self._raw_read_count,
+                                 "recentRawSocketReads": list(self._raw_reads)})
                     error.add_note("CDP timeout context: " +
                                    json.dumps(note, sort_keys=True, separators=(",", ":")))
                 raise
@@ -104,29 +139,43 @@ class WebSocket:
         self._frame(1, json.dumps(value, separators=(",", ":")).encode())
 
     def receive(self, timeout: float = 10) -> dict[str, Any]:
-        self.socket.settimeout(timeout)
+        deadline = time.monotonic() + timeout
+        self._raw_reads.clear()
+        self._raw_read_count = 0
         fragments = bytearray()
         while True:
-            # A new header cannot inherit metadata from an earlier frame.
+            # One absolute budget covers every frame and raw chunk of this receive.
             context: dict[str, Any] = {"phase": "header", "frameFin": None,
                                        "frameOpcode": None, "declaredPayloadLength": None,
                                        "incompleteFrameIdentity": "unknown"}
             self._frame_context = context
-            first, second = self._exact(2)
+            if time.monotonic() >= deadline:
+                error = TimeoutError("timed out")
+                note = {"component": "WebSocket.receive", **context,
+                        "expectedCommandId": self._expected_command_id,
+                        "expectedMethod": self._expected_method,
+                        "actualRawSocketReadCount": self._raw_read_count,
+                        "recentRawSocketReads": list(self._raw_reads)}
+                error.add_note("CDP timeout context: " +
+                               json.dumps(note, sort_keys=True, separators=(",", ":")))
+                raise error
+            first, second = self._exact(2, deadline)
             fin, opcode = bool(first & 0x80), first & 0x0F
             assert not second & 0x80, "server CDP frames must not be masked"
             context["frameFin"], context["frameOpcode"] = fin, opcode
             size = second & 0x7F
             if size == 126:
                 context["phase"] = "extended-length"
-                size = struct.unpack("!H", self._exact(2))[0]
+                size = struct.unpack("!H", self._exact(2, deadline))[0]
             elif size == 127:
                 context["phase"] = "extended-length"
-                size = struct.unpack("!Q", self._exact(8))[0]
+                size = struct.unpack("!Q", self._exact(8, deadline))[0]
             assert size <= 8 * 1024 * 1024, "bounded CDP message"
             context["declaredPayloadLength"] = size
             context["phase"] = "payload"
-            payload = self._exact(size)
+            if opcode & 0x08:
+                assert size <= 125, "control frame payload must not exceed 125 bytes"
+            payload = self._exact(size, deadline)
             if opcode == 8:
                 raise EOFError("CDP close frame")
             if opcode == 9:
@@ -140,7 +189,10 @@ class WebSocket:
             assert len(fragments) <= 8 * 1024 * 1024
             if fin:
                 assert opcode in (0, 1, 2)
-                return json.loads(fragments)
+                message = json.loads(fragments)
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("timed out")
+                return message
 
     def close(self) -> None:
         try:
@@ -163,6 +215,9 @@ class Cdp:
         self.next_id += 1
         self.websocket.send({"id": command_id, "method": method, "params": params or {}})
         deadline = time.monotonic() + timeout
+        self.websocket._expected_command_id = command_id
+        self.websocket._expected_method = method
+        self.websocket._command_started_monotonic = deadline - timeout
         while True:
             remaining = deadline - time.monotonic()
             assert remaining > 0, f"bounded CDP call: {method}"
@@ -679,6 +734,11 @@ def dom_state(page: Cdp) -> dict[str, Any]:
       trust: document.getElementById('trust').dataset.canonical,
       processors: document.getElementById('processors').dataset.canonical,
       memory: document.getElementById('memory').dataset.canonical,
+      availableTrust: document.getElementById('available-trust').dataset.canonical,
+      nextTrustTarget: document.getElementById('next-trust-target').dataset.canonical,
+      standardOps: document.getElementById('standard-ops').dataset.canonical,
+      temporaryOps: document.getElementById('temporary-ops').dataset.canonical,
+      standardOpsCapacity: document.getElementById('standard-ops-capacity').dataset.canonical,
       computingHidden: document.getElementById('computational-resources').hidden,
       autoClippersHidden: document.getElementById('auto-clippers-panel').hidden,
       autoClippers: document.getElementById('auto-clippers').dataset.canonical,
@@ -862,7 +922,7 @@ def check_assets_and_negative_commands(page: Cdp, port: int) -> None:
         try { makePaperclipCommand(invalidId); } catch (error) { rejected = error instanceof TypeError && error.message === 'invalid opaque command ID'; }
         if (!rejected) throw new Error('command id guard');
       }
-      const closedKinds = ["buy_wire", "lower_price", "raise_price", "buy_marketing", "buy_auto_clipper"];
+      const closedKinds = ["buy_wire", "lower_price", "raise_price", "buy_marketing", "buy_auto_clipper", "add_processor", "add_memory"];
       let closedRejected = 0;
       for (const kind of closedKinds) {
         const command = createCommand(kind, 'browser-business-' + kind);
@@ -905,7 +965,7 @@ def check_assets_and_negative_commands(page: Cdp, port: int) -> None:
         wrongContentTypeRejected: true, invalidAppliedShapeRejected: true,
         timeoutBounded: true, timeoutRetainsRetry: true};
     })()""")
-    assert result == {"badEnvelopes": 8, "closedRejected": 15, "invalidIds": 3, "fetches": 0,
+    assert result == {"badEnvelopes": 8, "closedRejected": 21, "invalidIds": 3, "fetches": 0,
                       "oversizeRejected": True, "wrongContentTypeRejected": True,
                       "invalidAppliedShapeRejected": True, "timeoutBounded": True,
                       "timeoutRetainsRetry": True}, result
@@ -947,7 +1007,7 @@ def check_accessibility_and_keyboard_order(page: Cdp) -> None:
     visible = [heading for heading in structure["headings"] if not heading["hidden"]]
     assert visible[0]["level"] == 1 and all(h["level"] <= previous + 1 for h, previous in zip(visible[1:], [h["level"] for h in visible[:-1]]))
     assert structure["fakeControls"] == 0
-    assert structure["buttons"] == ["Make Paperclip", "Lower Price", "Raise Price", "Buy Marketing", "Buy Wire", "Buy AutoClipper"]
+    assert structure["buttons"] == ["Make Paperclip", "Lower Price", "Raise Price", "Buy Marketing", "Buy Wire", "Buy AutoClipper", "Add Processor", "Add Memory"]
     assert structure["amountsOutsideLive"] and structure["statusLive"] == "polite" and structure["statusAtomic"] == "true"
     assert structure["labels"] and abs(structure["contrast"] - 21) < 1e-9 and abs(structure["buttonContrast"] - 21) < 1e-9, structure
     assert structure["computingHidden"] and structure["autoHidden"]
@@ -1580,6 +1640,10 @@ def run_autoclipper_native_evidence(binary: Path, executable: str, version: str)
         assert entry_stored["pro"]["auto_clipper_production_accumulator"] == "0"
         entry_game = stored.assert_stored_pro(entry_stored["pro"])
         entry_game["marketing_cost"] = "100"
+        entry_game.update({
+            "available_trust": "0", "next_trust_target": "3000", "standard_ops": "0",
+            "temporary_ops": "0", "standard_ops_capacity": "1000",
+        })
         api.assert_production({"game": entry_game}, "1000", "0")
 
         page1, context1, target1 = browser.new_page("/")
@@ -2020,7 +2084,7 @@ def run_autoclipper_native_evidence(binary: Path, executable: str, version: str)
             "initialMarketingAfterReveal": {"charge": str(marketing_charge),
                 "revision": marketing["response_body"]["revision"], "level": "2"},
             "fiveLineConsole": saved["pro"]["console_messages"],
-            "snapshotVersion": 3,
+            "snapshotVersion": saved["snapshot_version"],
             "recoveredRunIdChanged": True,
             "recoveryStoredCountCostReveal": ["2", "6.21", True],
             "recoveryOnlyOnlineProduction": str(expected_production),
@@ -2105,6 +2169,8 @@ def run_main_ui(browser: Browser, state: ProxyState, backend_port: int, page1: C
         "demand": "3.2", "marketing_cost": "100", "clips_sold": "0",
         "income": "0", "last_sale_revenue": "0", "marketing_level": "1", "memory": "1", "price_per_clip": "0.25",
         "processors": "1", "projects_hidden": True, "trust": "2",
+        "available_trust": "0", "next_trust_target": "3000", "standard_ops": "0",
+        "temporary_ops": "0", "standard_ops_capacity": "1000",
         "unsold_clips": "0", "unused_clips": "0", "wire": "1000",
         "wire_quote": "20", "wire_spool_length": "1000",
     })
@@ -2513,7 +2579,7 @@ def check_numeric_helpers(page: Cdp, worktree: Path) -> dict[str, Any]:
     result = page.evaluate("""(async () => {
       const amount = await import('/static/stream.js');
       const display = await import('/static/view-model.js');
-      const {parseAmount, formatAmount, compareAmount, addAmount, ceilAmount} = amount;
+      const {parseAmount, formatAmount, compareAmount, addAmount, ceilAmount, parseTransportJson, assertCompleteGameView} = amount;
       const checks = [];
       const check = (condition, label) => { if (!condition) throw new Error(label); checks.push(label); };
       check(parseAmount('0.000000000000000001').scaled === 1n, '1e-18 scaled BigInt');
@@ -2538,6 +2604,22 @@ def check_numeric_helpers(page: Cdp, worktree: Path) -> dict[str, Any]:
       ];
       for (const [raw, expected] of demandPercentChecks) {
         check(display.formatDemandPercent(raw) === expected, 'exact Public Demand percent ' + raw);
+      }
+      const completeResponse = await fetch('/api/game/view', {cache: 'no-store'});
+      check(completeResponse.status === 200, 'complete native View GET for fractional-Ops type guards');
+      const completeView = parseTransportJson(await completeResponse.text());
+      assertCompleteGameView(completeView);
+      const typedGuards = [
+        ['standard_ops', '-0.000000000000000001', 'negative nonnegative Amount', 'fractional Ops preserve negative standard rejection'],
+        ['temporary_ops', '-0.000000000000000001', 'negative nonnegative Amount', 'fractional Ops preserve negative temporary rejection'],
+        ['standard_ops_capacity', '1000.000000000000000001', 'fractional integral Amount', 'Ops capacity remains integral'],
+      ];
+      for (const [field, value, reason, label] of typedGuards) {
+        const candidate = structuredClone(completeView);
+        candidate.game[field] = value;
+        let rejected = null;
+        try { assertCompleteGameView(candidate); } catch (error) { rejected = error; }
+        check(rejected instanceof TypeError && rejected.message === reason, label);
       }
       const invalid = ['', '-0', '+1', '01', '1.0', '.5', '1.', '1e3', ' 1', '1 ', '1\\n',
         '\\uFF11\\uFF12', 'NaN', 'Infinity', '0.0000000000000000000', '1.2345678901234567890',
@@ -2577,6 +2659,7 @@ def run_numeric_and_ordering(browser: Browser, state: ProxyState, template: dict
             "lifetime_clips": "0", "unsold_clips": "0", "unused_clips": "0",
             "wire": "0", "funds": "0", "auto_clipper_revealed": True,
             "auto_clipper_cost": "6.1", "computing_hidden": False,
+            "standard_ops": "1", "temporary_ops": "2",
         }),
         fixture_view(template, run_id, 3, {
             "lifetime_clips": "9007199254740993",
@@ -2589,6 +2672,8 @@ def run_numeric_and_ordering(browser: Browser, state: ProxyState, template: dict
             "demand": "9007199254740993", "marketing_cost": "9007199254740994",
             "clips_sold": "9007199254740995", "income": "0.000000000000000001",
             "last_sale_revenue": "0.123",
+            "standard_ops": "0.000000000000000001",
+            "temporary_ops": "20.000000000000000001",
         }),
         fixture_view(template, run_id, 4, {
             "auto_clipper_revealed": True, "auto_clipper_cost": "6.331",
@@ -2639,6 +2724,9 @@ def run_numeric_and_ordering(browser: Browser, state: ProxyState, template: dict
     assert state.fixture_sent[1].wait(8)
     wait_dom(page, "document.documentElement.dataset.revision", "2", "exact zero fixture")
     assert amount("lifetime-clips") == {"canonical": "0", "display": "0", "title": "0"}
+    assert amount("standard-ops") == {"canonical": "1", "display": "1", "title": "1"}
+    assert amount("temporary-ops") == {"canonical": "2", "display": "2", "title": "2"}
+    assert amount("standard-ops-capacity")["canonical"] == "1000"
     assert amount("funds")["display"] == "0.00"
     assert amount("auto-clipper-cost") == {"canonical": "6.1", "display": "6.10", "title": "6.1"}
     assert page.evaluate("document.getElementById('computational-resources').hidden") is False
@@ -2658,6 +2746,9 @@ def run_numeric_and_ordering(browser: Browser, state: ProxyState, template: dict
         "clips-sold": "9007199254740995",
         "income": "0.000000000000000001",
         "last-sale-revenue": "0.123",
+        "standard-ops": "0.000000000000000001",
+        "temporary-ops": "20.000000000000000001",
+        "standard-ops-capacity": "1000",
     }
     for element, canonical in expected.items():
         actual = amount(element)
@@ -3925,13 +4016,20 @@ def main() -> int:
             m2_module = importlib.util.module_from_spec(m2_spec)
             m2_spec.loader.exec_module(m2_module)
             m2_result = m2_module.run(binary, executable, version)
+            award_path = Path(__file__).resolve().with_name("browser_m2_c01_award.py")
+            award_spec = importlib.util.spec_from_file_location("paperclip_browser_m2_c01_award", award_path)
+            assert award_spec is not None and award_spec.loader is not None
+            award_module = importlib.util.module_from_spec(award_spec)
+            award_spec.loader.exec_module(award_module)
+            award_result = award_module.run(binary, executable, version)
+            assert (award_result["chromeExit"], award_result["backendExit"]) == (0, 0)
             assert (m2_result["lifetimeRoute"]["chromeExit"],
                     m2_result["lifetimeRoute"]["backendExit"],
                     m2_result["strandedRoute"]["chromeExit"],
                     m2_result["strandedRoute"]["backendExit"]) == (0, 0, 0, 0), m2_result
             summary = {
                 "status": "pass", "browser": version, "independentBrowserContexts": 2,
-                "m2C01Unlock": m2_result,
+                "m2C01Unlock": m2_result, "m2C01AwardAllocation": award_result,
                 "startup": startup_result, "main": main_result,
                 "numericOrdering": numeric_result, "recovery": recovery_result,
                 "g02NativeBusiness": business_result,

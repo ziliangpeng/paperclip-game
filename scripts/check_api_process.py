@@ -67,8 +67,13 @@ def assert_production(view: dict[str, Any], wire: str, clips: str,
         "income": "0",
         "last_sale_revenue": "0",
         "trust": "2",
+        "available_trust": "0",
+        "next_trust_target": "3000",
         "processors": "1",
         "memory": "1",
+        "standard_ops": "0",
+        "temporary_ops": "0",
+        "standard_ops_capacity": "1000",
         "computing_hidden": True,
         "projects_hidden": True,
         "auto_clipper_revealed": False,
@@ -84,6 +89,11 @@ def assert_production(view: dict[str, Any], wire: str, clips: str,
         # Only the documented stored model excludes the derived cost; every
         # other captured G02/G03 field remains mandatory in the expectation.
         supplied = {key: economic_values[key] for key in economic_fields}
+        if not stored_model:
+            supplied.update({key: economic_values[key] for key in (
+                "trust", "available_trust", "next_trust_target", "processors", "memory",
+                "standard_ops", "temporary_ops", "standard_ops_capacity",
+            )})
         expected.update(supplied)
     if availability_values is not None:
         assert set(availability_values) == {"computing_hidden", "projects_hidden"}
@@ -94,6 +104,14 @@ def assert_production(view: dict[str, Any], wire: str, clips: str,
         # View-only derived cost. HTTP View validation still requires it below.
         assert "marketing_cost" not in game
         expected.pop("marketing_cost")
+        # These public derived values are intentionally absent from ProSnapshot;
+        # stored validation covers their authority fields and privacy instead of
+        # pretending the stored object contains a second public copy.
+        expected.pop("available_trust")
+        expected.pop("next_trust_target")
+        expected.pop("standard_ops_capacity")
+        for key in ("trust", "processors", "memory", "standard_ops", "temporary_ops"):
+            expected[key] = game[key]
     amount_pattern = re.compile(r"^(?:0|-?[1-9][0-9]*)(?:\.[0-9]*[1-9])?$")
     assert all(type(game[key]) is bool for key in (
         "computing_hidden", "projects_hidden", "auto_clipper_revealed",
@@ -103,10 +121,11 @@ def assert_production(view: dict[str, Any], wire: str, clips: str,
         "wire_spool_length", "wire_quote", "price_per_clip", "marketing_level",
         "demand", "marketing_cost", "clips_sold", "income", "last_sale_revenue",
         "trust", "processors", "memory", "auto_clippers", "auto_clipper_cost",
-        "auto_clipper_rate",
+        "auto_clipper_rate", "available_trust", "next_trust_target", "standard_ops",
+        "temporary_ops", "standard_ops_capacity",
     )
     if stored_model:
-        amount_fields = tuple(key for key in amount_fields if key != "marketing_cost")
+        amount_fields = tuple(key for key in amount_fields if key not in {"marketing_cost", "available_trust", "next_trust_target", "standard_ops_capacity"})
     assert all(isinstance(game[key], str) and amount_pattern.fullmatch(game[key]) for key in amount_fields), (
         "every public Amount must remain an exact JSON string"
     )

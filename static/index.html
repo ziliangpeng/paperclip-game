@@ -106,10 +106,18 @@
         <caption>Current computational readouts</caption>
         <tbody>
           <tr><th scope="row">Trust</th><td><data id="trust" class="amount" value="">Waiting for server</data></td></tr>
+          <tr><th scope="row">Available Trust</th><td><data id="available-trust" class="amount" value="">Waiting for server</data></td></tr>
+          <tr><th scope="row">Next Trust at Lifetime Clips</th><td><data id="next-trust-target" class="amount" value="">Waiting for server</data></td></tr>
           <tr><th scope="row">Processors</th><td><data id="processors" class="amount" value="">Waiting for server</data></td></tr>
           <tr><th scope="row">Memory</th><td><data id="memory" class="amount" value="">Waiting for server</data></td></tr>
+          <tr><th scope="row">Standard Ops</th><td><data id="standard-ops" class="amount" value="">Waiting for server</data></td></tr>
+          <tr><th scope="row">Temporary Ops</th><td><data id="temporary-ops" class="amount" value="">Waiting for server</data></td></tr>
+          <tr><th scope="row">Current standard Ops capacity</th><td><data id="standard-ops-capacity" class="amount" value="">Waiting for server</data></td></tr>
         </tbody>
       </table>
+      <form id="add-processor-form"><button id="add-processor" type="submit">Add Processor</button></form>
+      <form id="add-memory-form"><button id="add-memory" type="submit">Add Memory</button></form>
+      <p>Each control requests exactly one server allocation. Available Trust and standard Ops capacity come only from complete server Views.</p>
     </section>
   </main>
   <footer>
