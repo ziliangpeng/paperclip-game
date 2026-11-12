@@ -23,6 +23,36 @@ fn integral(value: BigInt) -> IntegralAmount {
         .unwrap()
 }
 
+async fn execute_and_observe_view(
+    handle: &paperclip_game::runtime::RuntimeHandle,
+    command: paperclip_game::runtime::Command,
+) -> (paperclip_game::runtime::CommandReceipt, GameState) {
+    let expected_run_id = handle.view().run_id;
+    let mut published_views = handle.subscribe();
+    let receipt = handle.execute(command).await.unwrap();
+    // Receipt publication may precede the complete view at the end of the turn.
+    // Require a coherent same-run view caught up to the command, allowing coalescing.
+    let published = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            let candidate = {
+                let candidate = published_views.borrow_and_update();
+                (candidate.run_id == expected_run_id && candidate.revision >= receipt.revision)
+                    .then(|| candidate.clone())
+            };
+            if let Some(candidate) = candidate {
+                break candidate;
+            }
+            published_views
+                .changed()
+                .await
+                .expect("writer must continue publishing the accepted command");
+        }
+    })
+    .await
+    .expect("bounded full-View publication reaches the command receipt");
+    (receipt, published.game)
+}
+
 fn fresh_state() -> GameState {
     let executor = tokio::runtime::Runtime::new().expect("test Tokio runtime");
     executor.block_on(async {
@@ -276,12 +306,10 @@ async fn direct_production_crossing_three_thousand_awards_without_another_intent
     initial.pro.projects_hidden = false;
     let runtime = GameRuntime::start_from_snapshot(initial, 0).unwrap();
     let handle = runtime.handle();
-    let crossing = handle
-        .execute(Command::make_paperclip(CommandId::new(1).unwrap()))
-        .await
-        .unwrap();
+    let (crossing, state) =
+        execute_and_observe_view(&handle, Command::make_paperclip(CommandId::new(1).unwrap()))
+            .await;
     assert_eq!(crossing.result, Ok(()));
-    let state = handle.view().game;
     assert_eq!(state.pro.lifetime_clips.to_string(), "3000");
     assert_eq!(state.pro.wire.to_string(), "0");
     assert_eq!(
@@ -307,12 +335,9 @@ async fn runtime_command_tick_retry_and_restore_deduplicate_awards_and_allocatio
     state.pro.funds = Amount::from_i128(100);
     let runtime = GameRuntime::start_from_snapshot(state, 0).unwrap();
     let handle = runtime.handle();
-    let crossing = handle
-        .execute(Command::raise_price(CommandId::new(101).unwrap()))
-        .await
-        .unwrap();
+    let (crossing, after_crossing) =
+        execute_and_observe_view(&handle, Command::raise_price(CommandId::new(101).unwrap())).await;
     assert_eq!(crossing.result, Ok(()));
-    let after_crossing = handle.view().game;
     assert_eq!(after_crossing.pro.trust.to_string(), "3");
     assert_eq!(after_crossing.pro.next_trust_target.to_string(), "5000");
     assert_eq!(
@@ -330,18 +355,17 @@ async fn runtime_command_tick_retry_and_restore_deduplicate_awards_and_allocatio
     );
 
     let p_id = CommandId::new(102).unwrap();
-    let add_p = handle.execute(Command::add_processor(p_id)).await.unwrap();
+    let (add_p, after_p) = execute_and_observe_view(&handle, Command::add_processor(p_id)).await;
     assert_eq!(add_p.result, Ok(()));
-    let after_p = handle.view().game;
     assert_eq!(after_p.pro.processors.to_string(), "2");
     assert_eq!(after_p.pro.trust.to_string(), "3");
     assert_eq!(after_p.pro.available_trust_capacity().to_string(), "0");
-    let add_p_replay = handle.execute(Command::add_processor(p_id)).await.unwrap();
+    let (add_p_replay, after_replay) =
+        execute_and_observe_view(&handle, Command::add_processor(p_id)).await;
     assert_eq!(
         add_p_replay, add_p,
         "retry replays success even after capacity is full"
     );
-    let after_replay = handle.view().game;
     assert_eq!(after_replay.pro.processors.to_string(), "2");
     assert_eq!(after_replay.pro.trust.to_string(), "3");
     assert_eq!(
@@ -367,12 +391,12 @@ async fn runtime_command_tick_retry_and_restore_deduplicate_awards_and_allocatio
         .unwrap();
     let restarted = GameRuntime::start_from_snapshot(recovered.state, recovered.revision).unwrap();
     let restarted_handle = restarted.handle();
-    let continuation = restarted_handle
-        .execute(Command::lower_price(CommandId::new(103).unwrap()))
-        .await
-        .unwrap();
+    let (continuation, continued) = execute_and_observe_view(
+        &restarted_handle,
+        Command::lower_price(CommandId::new(103).unwrap()),
+    )
+    .await;
     assert_eq!(continuation.result, Ok(()));
-    let continued = restarted_handle.view().game;
     assert_eq!(continued.pro.trust.to_string(), "3");
     assert_eq!(continued.pro.processors.to_string(), "2");
     assert_eq!(continued.pro.memory.to_string(), "1");
